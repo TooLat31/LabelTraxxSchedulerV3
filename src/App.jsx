@@ -1,0 +1,2419 @@
+import React, { useEffect, useMemo, useState } from "react";
+
+const PRESS_ORDER = ["5.1", "6.1", "1.1", "2.1", "8", "9", "Rewind"];
+const STORAGE_KEY = "labeltraxx-scheduler-v4";
+const BASE_TABS = ["Scheduler", "New Request", "Open Requests", "Request History", "Daily Shipment"];
+const ATTACHMENT_ACCEPT =
+  ".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.png,.jpg,.jpeg,.zip,.msg,.eml";
+
+const EMPTY_REQUEST_FORM = {
+  jobNumber: "",
+  customer: "",
+  requestorName: "",
+  description: "",
+};
+
+const EMPTY_LOGIN_FORM = {
+  username: "",
+  password: "",
+};
+
+const EMPTY_USER_FORM = {
+  username: "",
+  password: "",
+  isAdmin: false,
+};
+
+const EMPTY_SHIPMENT_FORM = {
+  label: "",
+  method: "Skid",
+  packageCount: "",
+  packageType: "Skids",
+  totalCost: "",
+  notes: "",
+};
+
+function safeText(value) {
+  return value == null ? "" : String(value).trim();
+}
+
+function parseNumber(value) {
+  const cleaned = safeText(value).replace(/,/g, "");
+  if (!cleaned) return 0;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseCurrency(value) {
+  const cleaned = safeText(value).replace(/[$,]/g, "");
+  if (!cleaned) return 0;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseDate(value) {
+  const raw = safeText(value);
+  if (!raw || raw === "00/00/00") return null;
+  const parts = raw.split(/[\/\-]/).map((part) => part.trim());
+  if (parts.length < 3) return null;
+  let [monthValue, dayValue, yearValue] = parts;
+  const month = Number(monthValue);
+  const day = Number(dayValue);
+  let year = Number(yearValue);
+  if (!Number.isFinite(month) || !Number.isFinite(day) || !Number.isFinite(year)) return null;
+  if (year < 100) year += 2000;
+  const dt = new Date(year, month - 1, day);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
+function formatDate(date) {
+  if (!date) return "-";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "numeric",
+    day: "numeric",
+    year: "2-digit",
+  }).format(date);
+}
+
+function formatShortDate(date) {
+  if (!date) return "";
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "numeric",
+    day: "numeric",
+  }).format(date);
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "numeric",
+    day: "numeric",
+    year: "2-digit",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function formatCurrency(value) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+  }).format(value || 0);
+}
+
+function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function startOfWeek(input) {
+  const date = new Date(input);
+  const day = date.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  date.setDate(date.getDate() + diff);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function addDays(date, days) {
+  const copy = new Date(date);
+  copy.setDate(copy.getDate() + days);
+  return copy;
+}
+
+function isoDate(date) {
+  if (!date) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function todayKey() {
+  return isoDate(new Date());
+}
+
+function sameDay(dateValue, dayKey) {
+  if (!dateValue || !dayKey) return false;
+  return isoDate(new Date(dateValue)) === dayKey;
+}
+
+function comparableUsername(value) {
+  return safeText(value).toLowerCase();
+}
+
+function buildDefaultAdmin() {
+  return {
+    id: "user-admin",
+    username: "Admin",
+    password: "1234",
+    isAdmin: true,
+    createdAt: new Date().toISOString(),
+    createdBy: "system",
+  };
+}
+
+function normalizeUsers(users) {
+  const normalized = Array.isArray(users)
+    ? users
+        .map((user, index) => ({
+          id: user.id || `user-${index + 1}`,
+          username: safeText(user.username),
+          password: safeText(user.password),
+          isAdmin: Boolean(user.isAdmin),
+          createdAt: user.createdAt || new Date().toISOString(),
+          createdBy: user.createdBy || "system",
+        }))
+        .filter((user) => user.username)
+    : [];
+
+  const hasAdmin = normalized.some((user) => comparableUsername(user.username) === "admin");
+  if (!hasAdmin) normalized.unshift(buildDefaultAdmin());
+  return normalized;
+}
+
+function readFileAsAttachment(file, uploadedBy) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () =>
+      resolve({
+        id: makeId("att"),
+        name: file.name,
+        size: file.size,
+        type: file.type || "application/octet-stream",
+        uploadedAt: new Date().toISOString(),
+        uploadedBy,
+        dataUrl: String(reader.result || ""),
+      });
+    reader.onerror = () => reject(reader.error || new Error("Failed to read file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function buildAttachments(fileList, uploadedBy) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return [];
+  return Promise.all(files.map((file) => readFileAsAttachment(file, uploadedBy)));
+}
+
+function looksLikeJobRow(parts) {
+  if (parts.length < 2) return false;
+  const press = safeText(parts[0]);
+  const number = safeText(parts[1]);
+  return /^\d+(?:\.\d+)?$/.test(press) && /^\d+$/.test(number);
+}
+
+function normalizeJobStatus(status) {
+  const value = safeText(status).toLowerCase();
+  if (!value) return "open";
+  if (value === "done" || value === "closed" || value === "finished" || value === "complete") return "closed";
+  return "open";
+}
+
+function parseLabelTraxxText(text) {
+  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = normalized.split("\n");
+  const headerLine = lines.find(
+    (line) => line.includes("Press\t") && line.includes("Number\t") && line.includes("CustomerName")
+  );
+  if (!headerLine) return [];
+
+  const startIndex = lines.indexOf(headerLine);
+  const headers = headerLine.split("\t");
+  const headerCount = headers.length;
+  const rows = [];
+  let current = null;
+
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim()) {
+      if (current) current[headerCount - 1] = `${current[headerCount - 1] || ""}\n`;
+      continue;
+    }
+
+    const parts = line.split("\t");
+    if (looksLikeJobRow(parts)) {
+      if (current) rows.push(current);
+      current = Array.from({ length: headerCount }, (_, itemIndex) => parts[itemIndex] ?? "");
+      if (parts.length > headerCount) {
+        current[headerCount - 1] = parts.slice(headerCount - 1).join("\t");
+      }
+      continue;
+    }
+
+    if (current) {
+      current[headerCount - 1] = `${current[headerCount - 1] || ""}${current[headerCount - 1] ? "\n" : ""}${line}`;
+    }
+  }
+
+  if (current) rows.push(current);
+
+  return rows
+    .map((row) => {
+      const record = Object.fromEntries(headers.map((header, index) => [header, safeText(row[index])]));
+      const stockParts = [safeText(record.StockNum2), safeText(record.StockNum1)].filter(Boolean);
+      const importedStatus = safeText(record.Status) || safeText(record.TicketStatus) || "Open";
+      return {
+        id: safeText(record.Number),
+        press: safeText(record.Press),
+        number: safeText(record.Number),
+        customerName: safeText(record.CustomerName),
+        generalDescr: safeText(record.GeneralDescr),
+        custPoNum: safeText(record.CustPONum),
+        priority: safeText(record.Priority),
+        shipByDate: parseDate(record.Ship_by_Date),
+        entryDate: parseDate(record.EntryDate),
+        dueOnSiteDate: parseDate(record.Due_on_Site_Date),
+        stockNum2: safeText(record.StockNum2),
+        stockNum1: safeText(record.StockNum1),
+        stockDisplay: stockParts.join(" / "),
+        ticketStatus: importedStatus,
+        normalizedStatus: normalizeJobStatus(importedStatus),
+        mainTool: safeText(record.MainTool),
+        toolNo2: safeText(record.ToolNo2),
+        ticQuantity: parseNumber(record.TicQuantity),
+        estFootage: parseNumber(record.EstFootage),
+        estPressTime: parseNumber(record.EstPressTime),
+        notes: safeText(record.Notes),
+        raw: record,
+      };
+    })
+    .filter((job) => job.number);
+}
+
+function priorityTone(priority) {
+  const value = safeText(priority).toLowerCase();
+  if (value.includes("high")) return "bg-rose-100 text-rose-700 border-rose-200";
+  if (value.includes("release")) return "bg-sky-100 text-sky-700 border-sky-200";
+  if (value.includes("inventory")) return "bg-amber-100 text-amber-800 border-amber-200";
+  if (value.includes("digital")) return "bg-violet-100 text-violet-700 border-violet-200";
+  if (value.includes("test")) return "bg-slate-100 text-slate-700 border-slate-200";
+  return "bg-emerald-100 text-emerald-700 border-emerald-200";
+}
+
+function statusTone(status) {
+  const value = safeText(status).toLowerCase();
+  if (value === "finished") return "bg-zinc-900 text-white";
+  if (value === "ship") return "bg-emerald-600 text-white";
+  if (value === "scheduled") return "bg-sky-600 text-white";
+  if (value === "done") return "bg-emerald-100 text-emerald-800";
+  if (value === "open") return "bg-zinc-200 text-zinc-700";
+  return "bg-zinc-100 text-zinc-700";
+}
+
+function buildWeekColumns(weekStart) {
+  return Array.from({ length: 5 }, (_, index) => {
+    const date = addDays(weekStart, index);
+    return {
+      key: isoDate(date),
+      date,
+      label: new Intl.DateTimeFormat("en-US", { weekday: "long" }).format(date),
+    };
+  });
+}
+
+function csvEscape(value) {
+  const text = safeText(value).replace(/"/g, '""');
+  return `"${text}"`;
+}
+
+function makeId(prefix) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function makeDragPayload(payload) {
+  return JSON.stringify(payload);
+}
+
+function parseDragPayload(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function dateSortValue(value) {
+  if (!value) return 0;
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function downloadFile(name, content, type = "text/plain;charset=utf-8") {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function snapshotJobForShipment(job, finishMeta) {
+  return {
+    id: job.id,
+    number: job.number,
+    customerName: job.customerName,
+    generalDescr: job.generalDescr,
+    press: job.press,
+    ticQuantity: job.ticQuantity,
+    shipByDate: job.shipByDate ? job.shipByDate.toISOString() : null,
+    finishedAt: finishMeta?.finishedAt || null,
+    finishedBy: finishMeta?.finishedBy || "",
+  };
+}
+
+function getShipmentItems(group, jobMap, finishedMetaByJobId) {
+  if (Array.isArray(group.jobItems) && group.jobItems.length) return group.jobItems;
+  return (group.jobIds || [])
+    .map((jobId) => {
+      const job = jobMap.get(jobId);
+      if (!job) return null;
+      return snapshotJobForShipment(job, finishedMetaByJobId.get(jobId));
+    })
+    .filter(Boolean);
+}
+
+function deriveVisibleJobState(jobId, activePressJobIds, finishedJobIds) {
+  if (finishedJobIds.has(jobId)) return "finished";
+  if (activePressJobIds.has(jobId)) return "scheduled";
+  return "open";
+}
+
+export default function App() {
+  const [isReady, setIsReady] = useState(false);
+  const [jobs, setJobs] = useState([]);
+  const [assignments, setAssignments] = useState([]);
+  const [requests, setRequests] = useState([]);
+  const [shipmentGroups, setShipmentGroups] = useState([]);
+  const [users, setUsers] = useState([buildDefaultAdmin()]);
+  const [currentUsername, setCurrentUsername] = useState("");
+  const [weekStart, setWeekStart] = useState(startOfWeek(new Date()));
+  const [pasteText, setPasteText] = useState("");
+  const [search, setSearch] = useState("");
+  const [unscheduledSearch, setUnscheduledSearch] = useState("");
+  const [queueStatusFilter, setQueueStatusFilter] = useState("All");
+  const [queuePressFilter, setQueuePressFilter] = useState("All");
+  const [selectedJobId, setSelectedJobId] = useState(null);
+  const [activeTab, setActiveTab] = useState("Scheduler");
+  const [requestForm, setRequestForm] = useState(EMPTY_REQUEST_FORM);
+  const [requestDraftAttachments, setRequestDraftAttachments] = useState([]);
+  const [selectedShipDate, setSelectedShipDate] = useState(todayKey());
+  const [selectedShipmentJobs, setSelectedShipmentJobs] = useState([]);
+  const [shipmentForm, setShipmentForm] = useState({ ...EMPTY_SHIPMENT_FORM, shipDate: todayKey() });
+  const [loginForm, setLoginForm] = useState(EMPTY_LOGIN_FORM);
+  const [loginError, setLoginError] = useState("");
+  const [userForm, setUserForm] = useState(EMPTY_USER_FORM);
+  const [userPasswordDrafts, setUserPasswordDrafts] = useState({});
+  const [requestHistoryFilterDate, setRequestHistoryFilterDate] = useState("");
+  const [shipmentHistoryFilterDate, setShipmentHistoryFilterDate] = useState("");
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+      if (Array.isArray(saved.jobs)) {
+        setJobs(
+          saved.jobs.map((job) => ({
+            ...job,
+            shipByDate: job.shipByDate ? new Date(job.shipByDate) : null,
+            entryDate: job.entryDate ? new Date(job.entryDate) : null,
+            dueOnSiteDate: job.dueOnSiteDate ? new Date(job.dueOnSiteDate) : null,
+          }))
+        );
+      }
+      if (Array.isArray(saved.assignments)) {
+        setAssignments(saved.assignments.filter((assignment) => assignment.kind !== "rewind"));
+      }
+      if (Array.isArray(saved.requests)) {
+        setRequests(
+          saved.requests.map((request) => ({
+            ...request,
+            attachments: Array.isArray(request.attachments) ? request.attachments : [],
+            createdByAccount: request.createdByAccount || "",
+            completedByAccount: request.completedByAccount || "",
+          }))
+        );
+      }
+      if (Array.isArray(saved.shipmentGroups)) setShipmentGroups(saved.shipmentGroups);
+      const normalizedUsers = normalizeUsers(saved.users);
+      setUsers(normalizedUsers);
+      if (saved.weekStart) setWeekStart(new Date(saved.weekStart));
+      if (saved.currentUsername) {
+        const match = normalizedUsers.find(
+          (user) => comparableUsername(user.username) === comparableUsername(saved.currentUsername)
+        );
+        if (match) setCurrentUsername(match.username);
+      }
+    } catch {
+      setUsers([buildDefaultAdmin()]);
+    } finally {
+      setIsReady(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isReady) return;
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        jobs,
+        assignments,
+        requests,
+        shipmentGroups,
+        users,
+        currentUsername,
+        weekStart: weekStart.toISOString(),
+      })
+    );
+  }, [assignments, currentUsername, isReady, jobs, requests, shipmentGroups, users, weekStart]);
+
+  const currentUser = useMemo(
+    () =>
+      users.find((user) => comparableUsername(user.username) === comparableUsername(currentUsername)) || null,
+    [currentUsername, users]
+  );
+
+  useEffect(() => {
+    if (currentUser) return;
+    if (!currentUsername) return;
+    setCurrentUsername("");
+  }, [currentUser, currentUsername]);
+
+  useEffect(() => {
+    if (!jobs.some((job) => job.id === selectedJobId)) setSelectedJobId(null);
+  }, [jobs, selectedJobId]);
+
+  useEffect(() => {
+    setShipmentForm((current) => ({ ...current, shipDate: selectedShipDate }));
+    setSelectedShipmentJobs([]);
+  }, [selectedShipDate]);
+
+  const tabs = useMemo(
+    () => (currentUser?.isAdmin ? [...BASE_TABS, "User Admin"] : BASE_TABS),
+    [currentUser]
+  );
+
+  const weekColumns = useMemo(() => buildWeekColumns(weekStart), [weekStart]);
+  const weekKeys = useMemo(() => new Set(weekColumns.map((column) => column.key)), [weekColumns]);
+  const jobMap = useMemo(() => new Map(jobs.map((job) => [job.id, job])), [jobs]);
+
+  const filteredJobs = useMemo(() => {
+    return jobs.filter((job) => {
+      const haystack = `${job.number} ${job.customerName} ${job.generalDescr} ${job.notes}`.toLowerCase();
+      const matchesSearch = !search.trim() || haystack.includes(search.toLowerCase());
+      return matchesSearch;
+    });
+  }, [jobs, search]);
+
+  const filteredJobIds = useMemo(() => new Set(filteredJobs.map((job) => job.id)), [filteredJobs]);
+
+  const importedSummary = useMemo(() => {
+    const openCount = jobs.filter((job) => job.normalizedStatus === "open").length;
+    const closedCount = jobs.filter((job) => job.normalizedStatus === "closed").length;
+    return { openCount, closedCount };
+  }, [jobs]);
+
+  const userFinishedAssignments = useMemo(
+    () => assignments.filter((assignment) => assignment.kind === "press" && assignment.status === "finished"),
+    [assignments]
+  );
+
+  const finishedMetaByJobId = useMemo(() => {
+    const map = new Map();
+    userFinishedAssignments.forEach((assignment) => {
+      const existing = map.get(assignment.jobId);
+      if (!existing || dateSortValue(assignment.finishedAt) > dateSortValue(existing.finishedAt)) {
+        map.set(assignment.jobId, {
+          finishedAt: assignment.finishedAt || null,
+          finishedBy: assignment.finishedBy || "",
+          dayKey: assignment.finishedAt ? isoDate(new Date(assignment.finishedAt)) : assignment.dayKey,
+        });
+      }
+    });
+    return map;
+  }, [userFinishedAssignments]);
+
+  const userFinishedJobIds = useMemo(
+    () => new Set(Array.from(finishedMetaByJobId.keys())),
+    [finishedMetaByJobId]
+  );
+
+  const activePressAssignments = useMemo(
+    () =>
+      assignments.filter(
+        (assignment) =>
+          assignment.kind === "press" &&
+          assignment.status !== "finished" &&
+          filteredJobIds.has(assignment.jobId)
+      ),
+    [assignments, filteredJobIds]
+  );
+
+  const activePressJobIds = useMemo(
+    () => new Set(activePressAssignments.map((assignment) => assignment.jobId)),
+    [activePressAssignments]
+  );
+
+  const unscheduledJobs = useMemo(() => {
+    return filteredJobs
+      .filter((job) => !activePressJobIds.has(job.id))
+      .filter((job) => !userFinishedJobIds.has(job.id))
+      .filter((job) => {
+        if (queueStatusFilter === "All") return true;
+        if (queueStatusFilter === "Open") return job.normalizedStatus === "open";
+        return job.normalizedStatus === "closed";
+      })
+      .filter((job) => {
+        if (queuePressFilter === "All") return true;
+        return safeText(job.press) === queuePressFilter;
+      })
+      .filter((job) => {
+        const haystack = `${job.number} ${job.customerName} ${job.generalDescr}`.toLowerCase();
+        return !unscheduledSearch.trim() || haystack.includes(unscheduledSearch.toLowerCase());
+      })
+      .sort((left, right) => {
+        const leftDate = left.shipByDate ? left.shipByDate.getTime() : Number.MAX_SAFE_INTEGER;
+        const rightDate = right.shipByDate ? right.shipByDate.getTime() : Number.MAX_SAFE_INTEGER;
+        if (leftDate !== rightDate) return leftDate - rightDate;
+        return right.estPressTime - left.estPressTime;
+      });
+  }, [activePressJobIds, filteredJobs, queuePressFilter, queueStatusFilter, unscheduledSearch, userFinishedJobIds]);
+
+  const allUserFinishedJobs = useMemo(() => {
+    return jobs
+      .filter((job) => userFinishedJobIds.has(job.id))
+      .map((job) => ({
+        ...job,
+        finishMeta: finishedMetaByJobId.get(job.id) || null,
+      }))
+      .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
+  }, [finishedMetaByJobId, jobs, userFinishedJobIds]);
+
+  const doneJobs = useMemo(
+    () => allUserFinishedJobs.filter((job) => filteredJobIds.has(job.id)),
+    [allUserFinishedJobs, filteredJobIds]
+  );
+
+  const board = useMemo(() => {
+    const map = {};
+    weekColumns.forEach((day) => {
+      map[day.key] = {};
+      PRESS_ORDER.forEach((press) => {
+        map[day.key][press] = [];
+      });
+    });
+
+    assignments.forEach((assignment) => {
+      if (!filteredJobIds.has(assignment.jobId)) return;
+      if (!map[assignment.dayKey]) return;
+      const job = jobMap.get(assignment.jobId);
+      if (!job) return;
+      map[assignment.dayKey][assignment.press].push({ assignment, job });
+    });
+
+    Object.values(map).forEach((pressMap) => {
+      Object.values(pressMap).forEach((laneJobs) => {
+        laneJobs.sort((left, right) => right.job.estPressTime - left.job.estPressTime);
+      });
+    });
+
+    return map;
+  }, [assignments, filteredJobIds, jobMap, weekColumns]);
+
+  const openRequests = useMemo(
+    () =>
+      requests
+        .filter((request) => request.status === "open")
+        .sort((left, right) => dateSortValue(right.createdAt) - dateSortValue(left.createdAt)),
+    [requests]
+  );
+
+  const requestHistory = useMemo(
+    () =>
+      requests
+        .filter((request) => request.status === "done")
+        .filter((request) => !requestHistoryFilterDate || sameDay(request.completedAt, requestHistoryFilterDate))
+        .sort((left, right) => dateSortValue(right.completedAt) - dateSortValue(left.completedAt)),
+    [requestHistoryFilterDate, requests]
+  );
+
+  const assignedShipmentJobIds = useMemo(() => {
+    const ids = new Set();
+    shipmentGroups.forEach((group) => {
+      getShipmentItems(group, jobMap, finishedMetaByJobId).forEach((item) => ids.add(item.id));
+    });
+    return ids;
+  }, [finishedMetaByJobId, jobMap, shipmentGroups]);
+
+  const readyToShipJobs = useMemo(() => {
+    return allUserFinishedJobs
+      .filter((job) => sameDay(job.finishMeta?.finishedAt, selectedShipDate))
+      .filter((job) => !assignedShipmentJobIds.has(job.id))
+      .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
+  }, [allUserFinishedJobs, assignedShipmentJobIds, selectedShipDate]);
+
+  const shipmentGroupsForDay = useMemo(
+    () =>
+      shipmentGroups
+        .filter((group) => group.shipDate === selectedShipDate)
+        .sort((left, right) => dateSortValue(right.createdAt) - dateSortValue(left.createdAt)),
+    [selectedShipDate, shipmentGroups]
+  );
+
+  const shipmentHistoryDays = useMemo(() => {
+    const grouped = new Map();
+    shipmentGroups.forEach((group) => {
+      if (shipmentHistoryFilterDate && group.shipDate !== shipmentHistoryFilterDate) return;
+      const existing = grouped.get(group.shipDate) || {
+        shipDate: group.shipDate,
+        groupCount: 0,
+        jobCount: 0,
+        totalCost: 0,
+      };
+      const items = getShipmentItems(group, jobMap, finishedMetaByJobId);
+      grouped.set(group.shipDate, {
+        shipDate: group.shipDate,
+        groupCount: existing.groupCount + 1,
+        jobCount: existing.jobCount + items.length,
+        totalCost: existing.totalCost + parseCurrency(group.totalCost),
+      });
+    });
+    return Array.from(grouped.values()).sort((left, right) => right.shipDate.localeCompare(left.shipDate));
+  }, [finishedMetaByJobId, jobMap, shipmentGroups, shipmentHistoryFilterDate]);
+
+  const selectedJob = selectedJobId ? jobs.find((job) => job.id === selectedJobId) : null;
+  const selectedJobFinishMeta = selectedJob ? finishedMetaByJobId.get(selectedJob.id) : null;
+
+  const queuePressOptions = useMemo(
+    () => ["All", ...Array.from(new Set(jobs.map((job) => safeText(job.press)).filter(Boolean))).sort()],
+    [jobs]
+  );
+
+  const summary = useMemo(() => {
+    return {
+      txtOpen: importedSummary.openCount,
+      txtClosed: importedSummary.closedCount,
+      markedFinished: allUserFinishedJobs.length,
+      openRequests: openRequests.length,
+      scheduledJobs: activePressAssignments.length,
+      shipGroupsOnDate: shipmentGroupsForDay.length,
+    };
+  }, [activePressAssignments.length, allUserFinishedJobs.length, importedSummary.closedCount, importedSummary.openCount, openRequests.length, shipmentGroupsForDay.length]);
+
+  function importText(text) {
+    const parsed = parseLabelTraxxText(text);
+    if (!parsed.length) return;
+    setJobs(parsed);
+    setAssignments((current) => current.filter((assignment) => parsed.some((job) => job.id === assignment.jobId)));
+    setShipmentGroups((current) =>
+      current.map((group) => {
+        const nextJobMap = new Map(parsed.map((job) => [job.id, job]));
+        const jobItems = getShipmentItems(group, nextJobMap, finishedMetaByJobId).filter((item) =>
+          parsed.some((job) => job.id === item.id)
+        );
+        return { ...group, jobItems };
+      })
+    );
+    const firstDate = parsed.find((job) => job.shipByDate)?.shipByDate;
+    if (firstDate) setWeekStart(startOfWeek(firstDate));
+  }
+
+  function handleUpload(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => importText(String(reader.result || ""));
+    reader.readAsText(file);
+  }
+
+  function handleScheduleDrop(event, dayKey, press) {
+    event.preventDefault();
+    const payload = parseDragPayload(event.dataTransfer.getData("application/json"));
+    if (payload?.type === "queue" && payload.jobId) {
+      addAssignment(payload.jobId, dayKey, press);
+      return;
+    }
+    if (payload?.type === "scheduled" && payload.assignmentId) {
+      moveAssignment(payload.assignmentId, dayKey, press);
+      return;
+    }
+    const fallbackJobId = event.dataTransfer.getData("text/plain");
+    if (fallbackJobId) addAssignment(fallbackJobId, dayKey, press);
+  }
+
+  function addAssignment(jobId, dayKey, press) {
+    setAssignments((current) => {
+      const exists = current.some(
+        (assignment) =>
+          assignment.jobId === jobId &&
+          assignment.dayKey === dayKey &&
+          assignment.press === press &&
+          assignment.kind === "press" &&
+          assignment.status !== "finished"
+      );
+      let next = current;
+      if (!exists) {
+        next = [
+          ...next,
+          {
+            id: makeId("asg"),
+            jobId,
+            dayKey,
+            press,
+            kind: "press",
+            status: "scheduled",
+            createdAt: new Date().toISOString(),
+            finishedAt: null,
+            finishedBy: "",
+          },
+        ];
+      }
+      return next;
+    });
+  }
+
+  function moveAssignment(assignmentId, dayKey, press) {
+    setAssignments((current) => {
+      const assignmentToMove = current.find((assignment) => assignment.id === assignmentId);
+      if (!assignmentToMove) return current;
+      if (assignmentToMove.kind !== "press") return current;
+      if (assignmentToMove.status === "finished") return current;
+
+      const duplicate = current.some(
+        (assignment) =>
+          assignment.id !== assignmentId &&
+          assignment.jobId === assignmentToMove.jobId &&
+          assignment.kind === "press" &&
+          assignment.status !== "finished" &&
+          assignment.dayKey === dayKey &&
+          assignment.press === press
+      );
+      if (duplicate) return current;
+
+      return current.map((assignment) => {
+        if (assignment.id === assignmentId) {
+          return {
+            ...assignment,
+            dayKey,
+            press,
+          };
+        }
+        return assignment;
+      });
+    });
+  }
+
+  function duplicateAssignmentToNextDay(assignmentId) {
+    setAssignments((current) => {
+      const assignmentToCopy = current.find((assignment) => assignment.id === assignmentId);
+      if (!assignmentToCopy) return current;
+      if (assignmentToCopy.kind !== "press") return current;
+      if (assignmentToCopy.status === "finished") return current;
+
+      const currentIndex = weekColumns.findIndex((day) => day.key === assignmentToCopy.dayKey);
+      if (currentIndex < 0 || currentIndex >= weekColumns.length - 1) return current;
+
+      const nextDayKey = weekColumns[currentIndex + 1].key;
+      const exists = current.some(
+        (assignment) =>
+          assignment.id !== assignmentId &&
+          assignment.jobId === assignmentToCopy.jobId &&
+          assignment.kind === "press" &&
+          assignment.status !== "finished" &&
+          assignment.dayKey === nextDayKey &&
+          assignment.press === assignmentToCopy.press
+      );
+      if (exists) return current;
+
+      return [
+        ...current,
+        {
+          ...assignmentToCopy,
+          id: makeId("asg"),
+          dayKey: nextDayKey,
+          createdAt: new Date().toISOString(),
+          finishedAt: null,
+          finishedBy: "",
+          status: "scheduled",
+        },
+      ];
+    });
+  }
+
+  function removeAssignment(assignmentId) {
+    setAssignments((current) => current.filter((assignment) => assignment.id !== assignmentId));
+  }
+
+  function finishJob(jobId) {
+    if (!currentUser) return;
+    const finishedAt = new Date().toISOString();
+    const finishedBy = currentUser.username;
+    const job = jobMap.get(jobId);
+    const fallbackDayKey = job?.shipByDate ? isoDate(job.shipByDate) : weekColumns[0]?.key || todayKey();
+    const fallbackPress = job?.press && PRESS_ORDER.includes(job.press) ? job.press : "Rewind";
+
+    setAssignments((current) => {
+      let foundPress = false;
+      let next = current.map((assignment) => {
+        if (assignment.jobId !== jobId) return assignment;
+        foundPress = true;
+        return {
+          ...assignment,
+          status: "finished",
+          finishedAt,
+          finishedBy,
+        };
+      });
+
+      if (!foundPress) {
+        next = [
+          ...next,
+          {
+            id: makeId("asg"),
+            jobId,
+            dayKey: fallbackDayKey,
+            press: fallbackPress,
+            kind: "press",
+            status: "finished",
+            createdAt: finishedAt,
+            finishedAt,
+            finishedBy,
+          },
+        ];
+      }
+
+      return next;
+    });
+  }
+
+  function autoPlace() {
+    setAssignments((current) => {
+      let next = [...current];
+      jobs.forEach((job) => {
+        if (!job.shipByDate) return;
+        const dayKey = isoDate(job.shipByDate);
+        if (!weekKeys.has(dayKey)) return;
+        const press = PRESS_ORDER.includes(job.press) ? job.press : "Rewind";
+        const exists = next.some(
+          (assignment) =>
+            assignment.jobId === job.id &&
+            assignment.dayKey === dayKey &&
+            assignment.press === press &&
+            assignment.kind === "press" &&
+            assignment.status !== "finished"
+        );
+        if (!exists) {
+          next.push({
+            id: makeId("asg"),
+            jobId: job.id,
+            dayKey,
+            press,
+            kind: "press",
+            status: "scheduled",
+            createdAt: new Date().toISOString(),
+            finishedAt: null,
+            finishedBy: "",
+          });
+        }
+      });
+      return next;
+    });
+  }
+
+  function clearBoard() {
+    setAssignments([]);
+  }
+
+  function exportSchedule() {
+    const rows = [
+      [
+        "Day",
+        "Press",
+        "Number",
+        "CustomerName",
+        "Description",
+        "Priority",
+        "EST Time",
+        "Quantity",
+        "Footage",
+        "Stock",
+        "Ship Date",
+        "Imported Status",
+        "Marked Finished By",
+        "Marked Finished At",
+      ],
+    ];
+
+    weekColumns.forEach((day) => {
+      PRESS_ORDER.forEach((press) => {
+        (board[day.key]?.[press] || []).forEach(({ job }) => {
+          const finishMeta = finishedMetaByJobId.get(job.id);
+          rows.push([
+            day.label,
+            press,
+            job.number,
+            job.customerName,
+            job.generalDescr,
+            job.priority,
+            job.estPressTime,
+            job.ticQuantity,
+            job.estFootage,
+            job.stockDisplay,
+            formatDate(job.shipByDate),
+            job.ticketStatus,
+            finishMeta?.finishedBy || "",
+            finishMeta?.finishedAt || "",
+          ]);
+        });
+      });
+    });
+
+    doneJobs.forEach((job) => {
+      rows.push([
+        "Ship Ready",
+        "History",
+        job.number,
+        job.customerName,
+        job.generalDescr,
+        job.priority,
+        job.estPressTime,
+        job.ticQuantity,
+        job.estFootage,
+        job.stockDisplay,
+        formatDate(job.shipByDate),
+        job.ticketStatus,
+        job.finishMeta?.finishedBy || "",
+        job.finishMeta?.finishedAt || "",
+      ]);
+    });
+
+    const csv = rows.map((row) => row.map(csvEscape).join(",")).join("\n");
+    downloadFile(`schedule-${isoDate(weekStart)}.csv`, csv, "text/csv;charset=utf-8");
+  }
+
+  async function handleDraftAttachmentChange(event) {
+    if (!currentUser) return;
+    const nextAttachments = await buildAttachments(event.target.files, currentUser.username);
+    if (nextAttachments.length) {
+      setRequestDraftAttachments((current) => [...current, ...nextAttachments]);
+    }
+    event.target.value = "";
+  }
+
+  function removeDraftAttachment(attachmentId) {
+    setRequestDraftAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
+  }
+
+  function submitRequest(event) {
+    event.preventDefault();
+    if (!currentUser) return;
+    if (!requestForm.jobNumber || !requestForm.customer || !requestForm.requestorName || !requestForm.description) {
+      return;
+    }
+
+    setRequests((current) => [
+      {
+        id: makeId("req"),
+        ...requestForm,
+        attachments: requestDraftAttachments,
+        createdAt: new Date().toISOString(),
+        createdByAccount: currentUser.username,
+        completedAt: null,
+        completedByAccount: "",
+        status: "open",
+      },
+      ...current,
+    ]);
+    setRequestForm(EMPTY_REQUEST_FORM);
+    setRequestDraftAttachments([]);
+    setActiveTab("Open Requests");
+  }
+
+  function markRequestDone(requestId) {
+    if (!currentUser) return;
+    const completedAt = new Date().toISOString();
+    setRequests((current) =>
+      current.map((request) =>
+        request.id === requestId
+          ? {
+              ...request,
+              status: "done",
+              completedAt,
+              completedByAccount: currentUser.username,
+            }
+          : request
+      )
+    );
+  }
+
+  function deleteRequest(requestId) {
+    setRequests((current) => current.filter((request) => request.id !== requestId));
+  }
+
+  async function addRequestAttachments(requestId, fileList) {
+    if (!currentUser) return;
+    const attachments = await buildAttachments(fileList, currentUser.username);
+    if (!attachments.length) return;
+    setRequests((current) =>
+      current.map((request) =>
+        request.id === requestId
+          ? {
+              ...request,
+              attachments: [...(request.attachments || []), ...attachments],
+            }
+          : request
+      )
+    );
+  }
+
+  function removeRequestAttachment(requestId, attachmentId) {
+    setRequests((current) =>
+      current.map((request) =>
+        request.id === requestId
+          ? {
+              ...request,
+              attachments: (request.attachments || []).filter((attachment) => attachment.id !== attachmentId),
+            }
+          : request
+      )
+    );
+  }
+
+  function toggleShipmentJob(jobId) {
+    setSelectedShipmentJobs((current) =>
+      current.includes(jobId) ? current.filter((value) => value !== jobId) : [...current, jobId]
+    );
+  }
+
+  function createShipmentGroup(event) {
+    event.preventDefault();
+    if (!selectedShipmentJobs.length) return;
+    const jobItems = selectedShipmentJobs
+      .map((jobId) => {
+        const job = jobMap.get(jobId);
+        if (!job) return null;
+        return snapshotJobForShipment(job, finishedMetaByJobId.get(jobId));
+      })
+      .filter(Boolean);
+
+    setShipmentGroups((current) => [
+      {
+        id: makeId("ship"),
+        label: shipmentForm.label || `${shipmentForm.method} shipment`,
+        method: shipmentForm.method,
+        packageCount: parseNumber(shipmentForm.packageCount),
+        packageType: shipmentForm.packageType,
+        totalCost: parseCurrency(shipmentForm.totalCost),
+        notes: shipmentForm.notes,
+        shipDate: shipmentForm.shipDate,
+        createdAt: new Date().toISOString(),
+        createdBy: currentUser?.username || "",
+        jobItems,
+      },
+      ...current,
+    ]);
+
+    setSelectedShipmentJobs([]);
+    setShipmentForm({ ...EMPTY_SHIPMENT_FORM, shipDate: selectedShipDate });
+  }
+
+  function deleteShipmentGroup(groupId) {
+    setShipmentGroups((current) => current.filter((group) => group.id !== groupId));
+  }
+
+  function loadDemo() {
+    const sample = `Press\tNumber\tCustomerName\tGeneralDescr\tCustPONum\tPriority\tShip_by_Date\tEntryDate\tDue_on_Site_Date\tStockNum2\tStockNum1\tStatus\tMainTool\tToolNo2\tTicQuantity\tEstFootage\tEstPressTime\tNotes
+5.1\t10159\tData Graphics\t1.625" Cap One Circle 70072\t223000DG\tHigh\t04/28/26\t04/18/26\t04/29/26\t266\t\tOpen\t946\t\t3,612,279\t113,847\t9.76\tExample long notes
+8\t11180\tPremio Foods\t3.125"x4.1875" Premio\t4500081640\tDigital\t04/29/26\t04/16/26\t04/30/26\t266\t590\tDone\tD-904\t\t96,000\t13,328\t1.73\tImported done should not ship until you mark it finished.
+6.1\t11194\tPremio Foods\t3.25"x5" Premio Contract Release\t4500081729\tRelease\t04/28/26\t04/21/26\t04/29/26\t266\t590\tOpen\t668\t\t48,000\t13,020\t4.64\tContract PO 4600004905
+9\t11022\tData Graphics\t1.625" Cap One Circle 69797\t\tHigh\t04/29/26\t03/24/26\t05/04/26\t266\t\tOpen\t946\t\t2,686,950\t86,266\t7.91\tArt Due 4/23`;
+    importText(sample);
+  }
+
+  function handleLogin(event) {
+    event.preventDefault();
+    const match = users.find(
+      (user) =>
+        comparableUsername(user.username) === comparableUsername(loginForm.username) &&
+        user.password === loginForm.password
+    );
+    if (!match) {
+      setLoginError("Invalid username or password.");
+      return;
+    }
+    setCurrentUsername(match.username);
+    setLoginForm(EMPTY_LOGIN_FORM);
+    setLoginError("");
+    setActiveTab("Scheduler");
+  }
+
+  function handleLogout() {
+    setCurrentUsername("");
+    setActiveTab("Scheduler");
+  }
+
+  function createUser(event) {
+    event.preventDefault();
+    if (!currentUser?.isAdmin) return;
+    const username = safeText(userForm.username);
+    const password = safeText(userForm.password);
+    if (!username || !password) return;
+    const exists = users.some((user) => comparableUsername(user.username) === comparableUsername(username));
+    if (exists) {
+      window.alert("That username already exists.");
+      return;
+    }
+    setUsers((current) => [
+      ...current,
+      {
+        id: makeId("user"),
+        username,
+        password,
+        isAdmin: Boolean(userForm.isAdmin),
+        createdAt: new Date().toISOString(),
+        createdBy: currentUser.username,
+      },
+    ]);
+    setUserForm(EMPTY_USER_FORM);
+  }
+
+  function updateUserPassword(userId) {
+    if (!currentUser?.isAdmin) return;
+    const nextPassword = safeText(userPasswordDrafts[userId]);
+    if (!nextPassword) return;
+    setUsers((current) =>
+      current.map((user) => (user.id === userId ? { ...user, password: nextPassword } : user))
+    );
+    setUserPasswordDrafts((current) => ({ ...current, [userId]: "" }));
+  }
+
+  if (!isReady) {
+    return (
+      <div className="min-h-screen bg-zinc-50 p-6 text-zinc-900">
+        <div className="mx-auto max-w-xl rounded-3xl border border-zinc-200 bg-white p-8 text-center shadow-sm">
+          <div className="text-lg font-semibold">Loading scheduler...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <LoginScreen
+        loginForm={loginForm}
+        loginError={loginError}
+        onChange={setLoginForm}
+        onSubmit={handleLogin}
+      />
+    );
+  }
+
+  const schedulerCards = [
+    ["TXT open", summary.txtOpen],
+    ["TXT closed", summary.txtClosed],
+    ["Marked finished", summary.markedFinished],
+    ["Open requests", summary.openRequests],
+    ["Scheduled jobs", summary.scheduledJobs],
+    ["Ship groups", summary.shipGroupsOnDate],
+  ];
+
+  return (
+    <div className="min-h-screen bg-zinc-50 text-zinc-900">
+      <div className="mx-auto max-w-[1900px] p-4 md:p-6">
+        <div className="mb-6 rounded-[2rem] border border-zinc-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700">Production board</p>
+              <h1 className="mt-1 text-2xl font-semibold tracking-tight">Label Traxx scheduler</h1>
+              <p className="mt-2 max-w-3xl text-sm text-zinc-600">
+                Logged in as {currentUser.username}. Request history, attachments, and completed work are now tied to user accounts.
+              </p>
+            </div>
+            <div className="flex flex-col gap-3 xl:items-end">
+              <div className="flex flex-wrap gap-2">
+                {tabs.map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => setActiveTab(tab)}
+                    className={`rounded-2xl px-4 py-2 text-sm font-medium transition ${
+                      activeTab === tab
+                        ? "bg-zinc-900 text-white"
+                        : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+                    }`}
+                  >
+                    {tab}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-2 text-sm">
+                <span className="rounded-full bg-zinc-100 px-3 py-2 text-zinc-700">
+                  {currentUser.isAdmin ? "Admin" : "User"}: {currentUser.username}
+                </span>
+                <button onClick={handleLogout} className="rounded-2xl border border-zinc-200 px-3 py-2">
+                  Log out
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mb-6 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+          {schedulerCards.map(([label, value]) => (
+            <div key={label} className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+              <div className="text-xs uppercase tracking-[0.16em] text-zinc-500">{label}</div>
+              <div className="mt-2 text-2xl font-semibold tracking-tight">{value}</div>
+            </div>
+          ))}
+        </div>
+
+        {activeTab === "Scheduler" && (
+          <div className="space-y-4">
+            <div className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
+              <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+                <div className="mb-4">
+                  <div className="text-sm font-semibold">Import and controls</div>
+                  <div className="text-xs text-zinc-500">Imported done tickets stay informational only until a logged-in user marks them finished.</div>
+                </div>
+
+                <div className="grid gap-3">
+                  <label className="rounded-2xl border border-dashed border-zinc-300 p-4 text-sm text-zinc-600 hover:border-zinc-400">
+                    <div className="font-medium text-zinc-800">Upload Label Traxx TXT</div>
+                    <input type="file" accept=".txt,.tsv,text/plain" onChange={handleUpload} className="mt-3 block w-full text-xs" />
+                  </label>
+
+                  <div className="rounded-2xl border border-zinc-200 p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <div className="text-sm font-medium">Paste export text</div>
+                      <button onClick={() => importText(pasteText)} className="rounded-xl bg-zinc-900 px-3 py-2 text-xs font-medium text-white">
+                        Import
+                      </button>
+                    </div>
+                    <textarea
+                      value={pasteText}
+                      onChange={(event) => setPasteText(event.target.value)}
+                      placeholder="Paste the full TXT export here..."
+                      className="h-32 w-full rounded-2xl border border-zinc-200 p-3 text-xs outline-none placeholder:text-zinc-400 focus:border-zinc-400"
+                    />
+                  </div>
+
+                  <div className="rounded-2xl bg-zinc-50 px-4 py-3 text-sm text-zinc-700">
+                    Finishing jobs and completing requests will be recorded under <span className="font-semibold">{currentUser.username}</span>.
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button onClick={loadDemo} className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm">
+                      Load demo
+                    </button>
+                    <button onClick={autoPlace} className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm">
+                      Auto-place
+                    </button>
+                    <button onClick={exportSchedule} className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm">
+                      Export CSV
+                    </button>
+                    <button onClick={clearBoard} className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700">
+                      Clear
+                    </button>
+                  </div>
+
+                  <button
+                    onClick={() => setActiveTab("New Request")}
+                    className="rounded-2xl bg-emerald-600 px-3 py-2 text-sm font-medium text-white"
+                  >
+                    Create a request
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+                <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">Week view</div>
+                    <div className="mt-1 text-xl font-semibold">
+                      {formatShortDate(weekColumns[0]?.date)} - {formatShortDate(weekColumns[4]?.date)}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button onClick={() => setWeekStart(addDays(weekStart, -7))} className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm">
+                      Previous
+                    </button>
+                    <button onClick={() => setWeekStart(startOfWeek(new Date()))} className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm">
+                      This week
+                    </button>
+                    <button onClick={() => setWeekStart(addDays(weekStart, 7))} className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm">
+                      Next
+                    </button>
+                    <input
+                      type="text"
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                      placeholder="Search all jobs"
+                      className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-3xl border border-zinc-200 bg-white p-3 shadow-sm">
+              <div className="grid grid-cols-5 gap-3">
+                {weekColumns.map((day) => (
+                  <div key={day.key} className="rounded-3xl bg-zinc-50 p-3">
+                    <div className="mb-3 rounded-2xl border border-zinc-200 bg-white px-3 py-3">
+                      <div className="text-xs uppercase tracking-[0.16em] text-zinc-500">{day.label}</div>
+                      <div className="mt-1 text-lg font-semibold">{formatShortDate(day.date)}</div>
+                    </div>
+                    <div className="space-y-3">
+                      {PRESS_ORDER.map((press) => {
+                        const laneJobs = board[day.key]?.[press] || [];
+                        const totalHours = laneJobs.reduce((sum, item) => sum + item.job.estPressTime, 0);
+                        return (
+                          <div
+                            key={`${day.key}-${press}`}
+                            onDragOver={(event) => event.preventDefault()}
+                            onDrop={(event) => handleScheduleDrop(event, day.key, press)}
+                            className="rounded-2xl border border-zinc-200 bg-white p-2"
+                          >
+                            <div className="mb-2 flex items-start justify-between gap-2">
+                              <div>
+                                <div className="text-sm font-semibold">Press {press}</div>
+                                <div className="text-[11px] text-zinc-500">
+                                  {laneJobs.length} jobs - {totalHours.toFixed(2)} hrs
+                                </div>
+                              </div>
+                              <span className="rounded-full bg-zinc-100 px-2 py-1 text-[10px] font-medium text-zinc-600">
+                                drop
+                              </span>
+                            </div>
+                            <div className="space-y-2">
+                              {laneJobs.map(({ assignment, job }) => (
+                                <CompactScheduleCard
+                                  key={assignment.id}
+                                  job={job}
+                                  assignment={assignment}
+                                  finishMeta={finishedMetaByJobId.get(job.id)}
+                                  onSelect={() => setSelectedJobId(job.id)}
+                                  onUnschedule={() => removeAssignment(assignment.id)}
+                                  onFinish={() => finishJob(job.id)}
+                                  onDuplicate={() => duplicateAssignmentToNextDay(assignment.id)}
+                                  draggable={assignment.status !== "finished"}
+                                />
+                              ))}
+                              {!laneJobs.length && (
+                                <div className="rounded-2xl border border-dashed border-zinc-200 p-3 text-center text-[11px] text-zinc-400">
+                                  Drop here
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
+              <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+                <div className="mb-3 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold">Press queue</div>
+                    <div className="text-xs text-zinc-500">Search by ticket, then filter the queue by imported status or press number.</div>
+                  </div>
+                  <div className="rounded-xl bg-zinc-100 px-2 py-1 text-xs text-zinc-600">{unscheduledJobs.length}</div>
+                </div>
+
+                <input
+                  type="text"
+                  value={unscheduledSearch}
+                  onChange={(event) => setUnscheduledSearch(event.target.value)}
+                  placeholder="Search ticket number"
+                  className="mb-3 w-full rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                />
+
+                <div className="mb-3 grid grid-cols-2 gap-2">
+                  <select
+                    value={queueStatusFilter}
+                    onChange={(event) => setQueueStatusFilter(event.target.value)}
+                    className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                  >
+                    <option>All</option>
+                    <option>Open</option>
+                    <option>Done</option>
+                  </select>
+                  <select
+                    value={queuePressFilter}
+                    onChange={(event) => setQueuePressFilter(event.target.value)}
+                    className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                  >
+                    {queuePressOptions.map((press) => (
+                      <option key={press}>{press}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="max-h-[56vh] space-y-3 overflow-y-auto">
+                  {unscheduledJobs.map((job) => (
+                    <JobCard
+                      key={job.id}
+                      job={job}
+                      state={deriveVisibleJobState(job.id, activePressJobIds, userFinishedJobIds)}
+                      onClick={() => setSelectedJobId(job.id)}
+                      onFinish={() => finishJob(job.id)}
+                      weekColumns={weekColumns}
+                      onQuickAssign={(dayKey) => addAssignment(job.id, dayKey, PRESS_ORDER.includes(job.press) ? job.press : "Rewind")}
+                    />
+                  ))}
+                  {!unscheduledJobs.length && (
+                    <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+                      No open queue jobs match your search.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+                <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+                  <div className="mb-3 flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-semibold">Job details</div>
+                      <div className="text-xs text-zinc-500">Select a job from the queue or board.</div>
+                    </div>
+                    {selectedJob && (
+                      <span
+                        className={`rounded-full px-2 py-1 text-xs font-medium ${statusTone(
+                          deriveVisibleJobState(selectedJob.id, activePressJobIds, userFinishedJobIds)
+                        )}`}
+                      >
+                        {deriveVisibleJobState(selectedJob.id, activePressJobIds, userFinishedJobIds)}
+                      </span>
+                    )}
+                  </div>
+
+                  {selectedJob ? (
+                    <div className="space-y-3 text-sm">
+                      <div>
+                        <div className="text-lg font-semibold">
+                          {selectedJob.customerName} {selectedJob.number}
+                        </div>
+                        <div className="text-zinc-600">{selectedJob.generalDescr}</div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 text-xs text-zinc-600">
+                        <Detail label="Default press" value={selectedJob.press || "-"} />
+                        <Detail label="Priority" value={selectedJob.priority || "-"} />
+                        <Detail label="Ship by" value={formatDate(selectedJob.shipByDate)} />
+                        <Detail label="Imported status" value={selectedJob.ticketStatus || "-"} />
+                        <Detail label="Quantity" value={selectedJob.ticQuantity.toLocaleString()} />
+                        <Detail label="EST time" value={`${selectedJob.estPressTime.toFixed(2)} hrs`} />
+                        <Detail label="Finished at" value={formatDateTime(selectedJobFinishMeta?.finishedAt)} />
+                        <Detail label="Finished by" value={selectedJobFinishMeta?.finishedBy || "-"} />
+                        <Detail label="Footage" value={selectedJob.estFootage.toLocaleString()} />
+                        <Detail label="Stock" value={selectedJob.stockDisplay || "-"} />
+                      </div>
+                      <div>
+                        <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Notes</div>
+                        <div className="max-h-56 overflow-auto whitespace-pre-wrap rounded-2xl bg-zinc-50 p-3 text-sm text-zinc-700">
+                          {selectedJob.notes || "No notes on this job."}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+                      No job selected yet.
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+                  <div className="mb-3">
+                    <div className="text-sm font-semibold">Ship ready today</div>
+                    <div className="text-xs text-zinc-500">These are only the jobs marked finished today by a logged-in user.</div>
+                  </div>
+                  <div className="max-h-[56vh] space-y-3 overflow-y-auto">
+                    {doneJobs
+                      .filter((job) => sameDay(job.finishMeta?.finishedAt, todayKey()))
+                      .map((job) => (
+                        <JobCard
+                          key={job.id}
+                          job={job}
+                          state="ship"
+                          onClick={() => setSelectedJobId(job.id)}
+                          finishedAt={job.finishMeta?.finishedAt}
+                          finishedBy={job.finishMeta?.finishedBy}
+                        />
+                      ))}
+                    {!doneJobs.filter((job) => sameDay(job.finishMeta?.finishedAt, todayKey())).length && (
+                      <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+                        No jobs marked finished today yet.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "New Request" && (
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,760px)_minmax(0,1fr)]">
+            <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+              <div className="mb-5">
+                <div className="text-sm font-semibold">Request form</div>
+                <div className="text-xs text-zinc-500">Requests are stamped with the logged-in account, and you can attach supporting documents before saving.</div>
+              </div>
+              <form onSubmit={submitRequest} className="grid gap-4">
+                <Field
+                  label="Job number"
+                  value={requestForm.jobNumber}
+                  onChange={(value) => setRequestForm((current) => ({ ...current, jobNumber: value }))}
+                  placeholder="Internal request number"
+                />
+                <Field
+                  label="Customer"
+                  value={requestForm.customer}
+                  onChange={(value) => setRequestForm((current) => ({ ...current, customer: value }))}
+                  placeholder="Customer name"
+                />
+                <Field
+                  label="Requestor name"
+                  value={requestForm.requestorName}
+                  onChange={(value) => setRequestForm((current) => ({ ...current, requestorName: value }))}
+                  placeholder="Who is asking for it"
+                />
+                <div>
+                  <div className="mb-2 text-sm font-medium text-zinc-800">Description</div>
+                  <textarea
+                    value={requestForm.description}
+                    onChange={(event) =>
+                      setRequestForm((current) => ({ ...current, description: event.target.value }))
+                    }
+                    placeholder="Include QTY and any extra details here"
+                    className="h-36 w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                  />
+                </div>
+                <div>
+                  <div className="mb-2 text-sm font-medium text-zinc-800">Documents</div>
+                  <label className="block rounded-2xl border border-dashed border-zinc-300 p-4 text-sm text-zinc-600 hover:border-zinc-400">
+                    <div className="font-medium text-zinc-800">Upload PDF, Word, Excel, or other request files</div>
+                    <input
+                      type="file"
+                      accept={ATTACHMENT_ACCEPT}
+                      multiple
+                      onChange={handleDraftAttachmentChange}
+                      className="mt-3 block w-full text-xs"
+                    />
+                  </label>
+                </div>
+                <AttachmentList attachments={requestDraftAttachments} onRemove={removeDraftAttachment} />
+                <div className="flex gap-2">
+                  <button type="submit" className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white">
+                    Save request
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRequestForm(EMPTY_REQUEST_FORM);
+                      setRequestDraftAttachments([]);
+                    }}
+                    className="rounded-2xl border border-zinc-200 px-4 py-3 text-sm"
+                  >
+                    Reset
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+              <div className="mb-4">
+                <div className="text-sm font-semibold">Request workflow</div>
+                <div className="text-xs text-zinc-500">Open requests live in their own tab. Mark done records which logged-in user completed the request and when.</div>
+              </div>
+              <div className="grid gap-3">
+                <StatRow label="Open requests" value={openRequests.length} />
+                <StatRow label="Completed requests" value={requestHistory.length} />
+                <StatRow label="Signed-in account" value={currentUser.username} />
+                <button
+                  onClick={() => setActiveTab("Open Requests")}
+                  className="rounded-2xl border border-zinc-200 px-4 py-3 text-left text-sm"
+                >
+                  Open the request queue
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "Open Requests" && (
+          <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+            <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+              <div>
+                <div className="text-sm font-semibold">Open requests</div>
+                <div className="text-xs text-zinc-500">Mark done to move a request into history under your login. Uploads added here stay attached to the request.</div>
+              </div>
+              <button
+                onClick={() => setActiveTab("New Request")}
+                className="rounded-2xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white"
+              >
+                New request
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {openRequests.map((request) => (
+                <RequestCard
+                  key={request.id}
+                  request={request}
+                  onDone={() => markRequestDone(request.id)}
+                  onDelete={() => deleteRequest(request.id)}
+                  onAddAttachments={(files) => addRequestAttachments(request.id, files)}
+                  onRemoveAttachment={(attachmentId) => removeRequestAttachment(request.id, attachmentId)}
+                />
+              ))}
+              {!openRequests.length && (
+                <div className="rounded-2xl border border-dashed border-zinc-200 p-5 text-sm text-zinc-500">
+                  No open requests right now.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "Request History" && (
+          <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+            <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+              <div>
+                <div className="text-sm font-semibold">Request history</div>
+                <div className="text-xs text-zinc-500">Completed requests are sorted by completion time and show which login completed them.</div>
+              </div>
+              <div className="flex items-end gap-2">
+                <div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Filter date</div>
+                  <input
+                    type="date"
+                    value={requestHistoryFilterDate}
+                    onChange={(event) => setRequestHistoryFilterDate(event.target.value)}
+                    className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                  />
+                </div>
+                <button
+                  onClick={() => setRequestHistoryFilterDate("")}
+                  className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+            <div className="space-y-3">
+              {requestHistory.map((request) => (
+                <RequestCard key={request.id} request={request} readOnly />
+              ))}
+              {!requestHistory.length && (
+                <div className="rounded-2xl border border-dashed border-zinc-200 p-5 text-sm text-zinc-500">
+                  No completed requests yet.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "Daily Shipment" && (
+          <div className="space-y-4">
+            <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+              <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                <div>
+                  <div className="text-sm font-semibold">Daily shipment</div>
+                  <div className="text-xs text-zinc-500">
+                    Only jobs a logged-in user marked finished on the selected day show as ready to ship for that day.
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Ship date</div>
+                  <input
+                    type="date"
+                    value={selectedShipDate}
+                    onChange={(event) => setSelectedShipDate(event.target.value)}
+                    className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_420px]">
+              <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+                <div className="mb-4 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold">Ready to ship on {selectedShipDate}</div>
+                    <div className="text-xs text-zinc-500">Select one or more jobs, then create a shipment group.</div>
+                  </div>
+                  <div className="rounded-xl bg-zinc-100 px-2 py-1 text-xs text-zinc-600">{readyToShipJobs.length}</div>
+                </div>
+
+                <div className="space-y-3">
+                  {readyToShipJobs.map((job) => (
+                    <label key={job.id} className="flex gap-3 rounded-2xl border border-zinc-200 p-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedShipmentJobs.includes(job.id)}
+                        onChange={() => toggleShipmentJob(job.id)}
+                        className="mt-1 h-4 w-4"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <div className="text-sm font-semibold">
+                              {job.customerName} {job.number}
+                            </div>
+                            <div className="mt-1 text-xs text-zinc-600">{job.generalDescr}</div>
+                          </div>
+                          <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone("ship")}`}>ship</span>
+                        </div>
+                        <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-zinc-600 md:grid-cols-4">
+                          <InfoPill label="Press" value={job.press || "-"} />
+                          <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
+                          <InfoPill label="Finished" value={formatDateTime(job.finishMeta?.finishedAt)} />
+                          <InfoPill label="By" value={job.finishMeta?.finishedBy || "-"} />
+                        </div>
+                      </div>
+                    </label>
+                  ))}
+                  {!readyToShipJobs.length && (
+                    <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+                      No user-finished jobs are waiting to ship on this date.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+                  <div className="mb-4">
+                    <div className="text-sm font-semibold">Create shipment group</div>
+                    <div className="text-xs text-zinc-500">Example: one skid with 3 jobs for $141.17, or separate FedEx transactions.</div>
+                  </div>
+                  <form onSubmit={createShipmentGroup} className="grid gap-3">
+                    <Field
+                      label="Label"
+                      value={shipmentForm.label}
+                      onChange={(value) => setShipmentForm((current) => ({ ...current, label: value }))}
+                      placeholder="Skid A or FedEx 1"
+                    />
+                    <div>
+                      <div className="mb-2 text-sm font-medium text-zinc-800">Method</div>
+                      <select
+                        value={shipmentForm.method}
+                        onChange={(event) => setShipmentForm((current) => ({ ...current, method: event.target.value }))}
+                        className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                      >
+                        <option>Skid</option>
+                        <option>FedEx</option>
+                        <option>UPS</option>
+                        <option>LTL</option>
+                        <option>Customer Pickup</option>
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-[minmax(0,1fr)_160px] gap-3">
+                      <Field
+                        label="Skids / cartons out"
+                        value={shipmentForm.packageCount}
+                        onChange={(value) => setShipmentForm((current) => ({ ...current, packageCount: value }))}
+                        placeholder="3"
+                      />
+                      <div>
+                        <div className="mb-2 text-sm font-medium text-zinc-800">Type</div>
+                        <select
+                          value={shipmentForm.packageType}
+                          onChange={(event) =>
+                            setShipmentForm((current) => ({ ...current, packageType: event.target.value }))
+                          }
+                          className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                        >
+                          <option>Skids</option>
+                          <option>Cartons</option>
+                        </select>
+                      </div>
+                    </div>
+                    <Field
+                      label="Total price"
+                      value={shipmentForm.totalCost}
+                      onChange={(value) => setShipmentForm((current) => ({ ...current, totalCost: value }))}
+                      placeholder="141.17"
+                    />
+                    <div>
+                      <div className="mb-2 text-sm font-medium text-zinc-800">Notes</div>
+                      <textarea
+                        value={shipmentForm.notes}
+                        onChange={(event) => setShipmentForm((current) => ({ ...current, notes: event.target.value }))}
+                        placeholder="Optional shipment notes"
+                        className="h-24 w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                      />
+                    </div>
+                    <button type="submit" className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white">
+                      Create shipment group
+                    </button>
+                  </form>
+                </div>
+
+                <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+                  <div className="mb-4">
+                    <div className="text-sm font-semibold">Shipment history</div>
+                    <div className="text-xs text-zinc-500">Pick a past date to see the exact jobs that shipped that day.</div>
+                  </div>
+                  <div className="mb-4 flex items-end gap-2">
+                    <div className="flex-1">
+                      <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Filter date</div>
+                      <input
+                        type="date"
+                        value={shipmentHistoryFilterDate}
+                        onChange={(event) => setShipmentHistoryFilterDate(event.target.value)}
+                        className="w-full rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                      />
+                    </div>
+                    <button
+                      onClick={() => setShipmentHistoryFilterDate("")}
+                      className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <div className="space-y-3">
+                    {shipmentHistoryDays.map((item) => (
+                      <button
+                        key={item.shipDate}
+                        onClick={() => setSelectedShipDate(item.shipDate)}
+                        className={`w-full rounded-2xl border px-4 py-3 text-left ${
+                          selectedShipDate === item.shipDate
+                            ? "border-zinc-900 bg-zinc-900 text-white"
+                            : "border-zinc-200 bg-white text-zinc-800"
+                        }`}
+                      >
+                        <div className="text-sm font-semibold">{item.shipDate}</div>
+                        <div className={`mt-1 text-xs ${selectedShipDate === item.shipDate ? "text-zinc-200" : "text-zinc-500"}`}>
+                          {item.groupCount} groups - {item.jobCount} jobs - {formatCurrency(item.totalCost)}
+                        </div>
+                      </button>
+                    ))}
+                    {!shipmentHistoryDays.length && (
+                      <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+                        No shipment history yet.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+              <div className="mb-4">
+                <div className="text-sm font-semibold">Shipped on {selectedShipDate}</div>
+                <div className="text-xs text-zinc-500">Each shipment group keeps the exact jobs and who marked them finished.</div>
+              </div>
+              <div className="space-y-3">
+                {shipmentGroupsForDay.map((group) => {
+                  const items = getShipmentItems(group, jobMap, finishedMetaByJobId);
+                  return (
+                    <div key={group.id} className="rounded-2xl border border-zinc-200 p-4">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <div className="text-sm font-semibold">{group.label}</div>
+                            <span className="rounded-full bg-zinc-900 px-2 py-1 text-[11px] font-medium text-white">
+                              {group.method}
+                            </span>
+                          </div>
+                          <div className="mt-1 text-xs text-zinc-500">
+                            {items.length} jobs - {formatCurrency(group.totalCost)} - created {formatDateTime(group.createdAt)}
+                            {group.createdBy ? ` by ${group.createdBy}` : ""}
+                          </div>
+                          {!!group.packageCount && (
+                            <div className="mt-1 text-xs text-zinc-500">
+                              {group.packageCount} {safeText(group.packageType || "Skids").toLowerCase()}
+                            </div>
+                          )}
+                          {group.notes && <div className="mt-2 text-sm text-zinc-700">{group.notes}</div>}
+                        </div>
+                        <button
+                          onClick={() => deleteShipmentGroup(group.id)}
+                          className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700"
+                        >
+                          Delete group
+                        </button>
+                      </div>
+                      <div className="mt-3 grid gap-2 md:grid-cols-2">
+                        {items.map((item) => (
+                          <div key={item.id} className="rounded-2xl bg-zinc-50 p-3">
+                            <div className="text-sm font-semibold">
+                              {item.customerName} {item.number}
+                            </div>
+                            <div className="mt-1 text-xs text-zinc-600">{item.generalDescr}</div>
+                            <div className="mt-2 text-[11px] text-zinc-500">
+                              Finished {formatDateTime(item.finishedAt)} by {item.finishedBy || "-"}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+                {!shipmentGroupsForDay.length && (
+                  <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+                    No shipment groups created for this date yet.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "User Admin" && currentUser.isAdmin && (
+          <div className="grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
+            <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+              <div className="mb-5">
+                <div className="text-sm font-semibold">Add user</div>
+                <div className="text-xs text-zinc-500">Admin can create logins and set passwords here.</div>
+              </div>
+              <form onSubmit={createUser} className="grid gap-4">
+                <Field
+                  label="Username"
+                  value={userForm.username}
+                  onChange={(value) => setUserForm((current) => ({ ...current, username: value }))}
+                  placeholder="New username"
+                />
+                <Field
+                  label="Password"
+                  value={userForm.password}
+                  onChange={(value) => setUserForm((current) => ({ ...current, password: value }))}
+                  placeholder="Set a password"
+                />
+                <label className="flex items-center gap-3 rounded-2xl border border-zinc-200 px-4 py-3 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={userForm.isAdmin}
+                    onChange={(event) => setUserForm((current) => ({ ...current, isAdmin: event.target.checked }))}
+                    className="h-4 w-4"
+                  />
+                  <span>Give this user admin access</span>
+                </label>
+                <button type="submit" className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white">
+                  Create user
+                </button>
+              </form>
+            </div>
+
+            <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+              <div className="mb-5">
+                <div className="text-sm font-semibold">Manage users</div>
+                <div className="text-xs text-zinc-500">Reset passwords for any user. The seeded admin login is `Admin / 1234`.</div>
+              </div>
+              <div className="space-y-3">
+                {users.map((user) => (
+                  <div key={user.id} className="rounded-2xl border border-zinc-200 p-4">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <div className="text-sm font-semibold">{user.username}</div>
+                          <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${user.isAdmin ? "bg-zinc-900 text-white" : "bg-zinc-100 text-zinc-700"}`}>
+                            {user.isAdmin ? "admin" : "user"}
+                          </span>
+                        </div>
+                        <div className="mt-1 text-xs text-zinc-500">
+                          Created {formatDateTime(user.createdAt)} by {user.createdBy || "-"}
+                        </div>
+                      </div>
+                      <div className="flex flex-col gap-2 md:w-[320px]">
+                        <input
+                          type="text"
+                          value={userPasswordDrafts[user.id] || ""}
+                          onChange={(event) =>
+                            setUserPasswordDrafts((current) => ({ ...current, [user.id]: event.target.value }))
+                          }
+                          placeholder={`Set new password for ${user.username}`}
+                          className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                        />
+                        <button
+                          onClick={() => updateUserPassword(user.id)}
+                          className="rounded-2xl border border-zinc-200 px-4 py-3 text-sm"
+                        >
+                          Save password
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LoginScreen({ loginForm, loginError, onChange, onSubmit }) {
+  return (
+    <div className="min-h-screen bg-zinc-50 p-6 text-zinc-900">
+      <div className="mx-auto max-w-xl rounded-[2rem] border border-zinc-200 bg-white p-8 shadow-sm">
+        <div className="mb-6">
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700">Secure Access</p>
+          <h1 className="mt-1 text-3xl font-semibold tracking-tight">Label Traxx scheduler login</h1>
+          <p className="mt-2 text-sm text-zinc-600">
+            Sign in to open the scheduler, save your work, and stamp finished jobs and request history with your account.
+          </p>
+        </div>
+        <form onSubmit={onSubmit} className="grid gap-4">
+          <Field
+            label="Username"
+            value={loginForm.username}
+            onChange={(value) => onChange((current) => ({ ...current, username: value }))}
+            placeholder="Admin"
+          />
+          <div>
+            <div className="mb-2 text-sm font-medium text-zinc-800">Password</div>
+            <input
+              type="password"
+              value={loginForm.password}
+              onChange={(event) => onChange((current) => ({ ...current, password: event.target.value }))}
+              placeholder="1234"
+              className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+            />
+          </div>
+          {loginError && <div className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{loginError}</div>}
+          <button type="submit" className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white">
+            Log in
+          </button>
+        </form>
+        <div className="mt-4 rounded-2xl bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
+          Default admin login: <span className="font-semibold">Admin</span> / <span className="font-semibold">1234</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Detail({ label, value }) {
+  return (
+    <div className="rounded-2xl bg-zinc-50 p-3">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">{label}</div>
+      <div className="mt-1 text-sm font-medium text-zinc-800">{value}</div>
+    </div>
+  );
+}
+
+function Field({ label, value, onChange, placeholder }) {
+  return (
+    <div>
+      <div className="mb-2 text-sm font-medium text-zinc-800">{label}</div>
+      <input
+        type="text"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+      />
+    </div>
+  );
+}
+
+function StatRow({ label, value }) {
+  return (
+    <div className="rounded-2xl bg-zinc-50 px-4 py-3">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">{label}</div>
+      <div className="mt-1 text-lg font-semibold text-zinc-900">{value}</div>
+    </div>
+  );
+}
+
+function AttachmentList({ attachments, onRemove = null }) {
+  if (!attachments.length) {
+    return (
+      <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+        No documents attached yet.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      {attachments.map((attachment) => (
+        <div key={attachment.id} className="flex flex-col gap-3 rounded-2xl border border-zinc-200 p-3 md:flex-row md:items-center md:justify-between">
+          <div className="min-w-0">
+            <a
+              href={attachment.dataUrl}
+              download={attachment.name}
+              className="block truncate text-sm font-semibold text-zinc-900 underline-offset-2 hover:underline"
+            >
+              {attachment.name}
+            </a>
+            <div className="mt-1 text-xs text-zinc-500">
+              {formatFileSize(attachment.size)} • uploaded {formatDateTime(attachment.uploadedAt)}
+              {attachment.uploadedBy ? ` by ${attachment.uploadedBy}` : ""}
+            </div>
+          </div>
+          {onRemove && (
+            <button
+              onClick={() => onRemove(attachment.id)}
+              className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700"
+            >
+              Remove
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RequestCard({
+  request,
+  onDone,
+  onDelete,
+  onAddAttachments,
+  onRemoveAttachment,
+  readOnly = false,
+}) {
+  return (
+    <div className="rounded-2xl border border-zinc-200 p-4">
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="text-sm font-semibold">
+                {request.customer} - {request.jobNumber}
+              </div>
+              <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone(request.status)}`}>
+                {request.status}
+              </span>
+            </div>
+            <div className="mt-1 text-xs text-zinc-500">
+              Requested by {request.requestorName} on {formatDateTime(request.createdAt)}
+              {request.createdByAccount ? ` using ${request.createdByAccount}` : ""}
+            </div>
+            {request.completedAt && (
+              <div className="mt-1 text-xs text-zinc-500">
+                Completed on {formatDateTime(request.completedAt)}
+                {request.completedByAccount ? ` by ${request.completedByAccount}` : ""}
+              </div>
+            )}
+            <div className="mt-3 whitespace-pre-wrap text-sm text-zinc-700">{request.description}</div>
+          </div>
+          {!readOnly && (
+            <div className="flex gap-2">
+              <button onClick={onDone} className="rounded-2xl bg-zinc-900 px-3 py-2 text-sm text-white">
+                Mark done
+              </button>
+              <button onClick={onDelete} className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700">
+                Delete
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div>
+          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Documents</div>
+          <AttachmentList
+            attachments={request.attachments || []}
+            onRemove={readOnly ? null : onRemoveAttachment}
+          />
+        </div>
+
+        {!readOnly && onAddAttachments && (
+          <label className="block rounded-2xl border border-dashed border-zinc-300 p-4 text-sm text-zinc-600 hover:border-zinc-400">
+            <div className="font-medium text-zinc-800">Add more files to this request</div>
+            <input
+              type="file"
+              accept={ATTACHMENT_ACCEPT}
+              multiple
+              onChange={(event) => {
+                const files = event.target.files;
+                if (files?.length) onAddAttachments(files);
+                event.target.value = "";
+              }}
+              className="mt-3 block w-full text-xs"
+            />
+          </label>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function JobCard({
+  job,
+  state,
+  onClick,
+  onQuickAssign,
+  onFinish,
+  weekColumns,
+  finishedAt,
+  finishedBy,
+}) {
+  const isDraggable = state === "open";
+
+  return (
+    <div
+      draggable={isDraggable}
+      onDragStart={(event) => {
+        if (!isDraggable) return;
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData(
+          "application/json",
+          makeDragPayload({ type: "queue", jobId: job.id })
+        );
+        event.dataTransfer.setData("text/plain", job.id);
+      }}
+      className={`rounded-2xl border border-zinc-200 bg-white p-3 shadow-sm ${isDraggable ? "cursor-grab" : ""}`}
+    >
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div
+          onClick={onClick}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") onClick?.();
+          }}
+          className="min-w-0 flex-1 cursor-pointer text-left"
+        >
+          <div className="text-sm font-semibold leading-tight text-zinc-900">
+            {job.customerName} {job.number}
+          </div>
+          <div className="mt-1 line-clamp-2 text-xs leading-5 text-zinc-600">{job.generalDescr}</div>
+        </div>
+        <div className="flex flex-col items-end gap-2">
+          <span className={`rounded-full border px-2 py-1 text-[11px] font-medium ${priorityTone(job.priority)}`}>
+            {job.priority || "-"}
+          </span>
+          {isDraggable && (
+            <span className="rounded-full bg-zinc-100 px-2 py-1 text-[10px] font-medium text-zinc-600">
+              drag
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 text-xs text-zinc-600">
+        <InfoPill label="Press" value={job.press || "-"} />
+        <InfoPill label="EST" value={`${job.estPressTime.toFixed(2)}h`} />
+        <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
+        <InfoPill label="Ship" value={formatDate(job.shipByDate)} />
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone(state)}`}>{state}</span>
+        {job.ticketStatus && (
+          <span className="rounded-full bg-zinc-100 px-2 py-1 text-[11px] font-medium text-zinc-600">
+            import: {job.ticketStatus}
+          </span>
+        )}
+      </div>
+
+      {finishedAt && <div className="mt-2 text-xs text-zinc-500">Finished {formatDateTime(finishedAt)}</div>}
+      {finishedBy && <div className="mt-1 text-xs text-zinc-500">Finished by {finishedBy}</div>}
+
+      {state === "open" && weekColumns && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {weekColumns.map((day) => (
+            <button
+              key={day.key}
+              onClick={() => onQuickAssign?.(day.key)}
+              className="rounded-xl border border-zinc-200 px-2 py-1 text-[11px] text-zinc-700 hover:bg-zinc-50"
+            >
+              {day.label.slice(0, 3)}
+            </button>
+          ))}
+          <button onClick={onFinish} className="rounded-xl bg-zinc-900 px-2 py-1 text-[11px] text-white">
+            Finish
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CompactScheduleCard({
+  job,
+  assignment,
+  finishMeta,
+  onSelect,
+  onUnschedule,
+  onFinish,
+  onDuplicate,
+  draggable = false,
+}) {
+  const state = assignment.status === "finished" ? "done" : assignment.status;
+
+  return (
+    <div
+      draggable={draggable}
+      onDragStart={(event) => {
+        if (!draggable) return;
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData(
+          "application/json",
+          makeDragPayload({ type: "scheduled", assignmentId: assignment.id, jobId: job.id })
+        );
+      }}
+      className={`rounded-2xl border border-zinc-200 bg-zinc-50 p-2 ${draggable ? "cursor-grab" : ""}`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div
+          onClick={onSelect}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") onSelect?.();
+          }}
+          className="min-w-0 flex-1 cursor-pointer"
+        >
+          <div className="truncate text-xs font-semibold text-zinc-900">
+            {job.customerName} {job.number}
+          </div>
+          <div className="mt-1 line-clamp-2 text-[11px] text-zinc-600">{job.generalDescr}</div>
+        </div>
+        <span className={`rounded-full px-2 py-1 text-[10px] font-medium ${statusTone(state)}`}>{state}</span>
+      </div>
+      {draggable && <div className="mt-1 text-[10px] text-zinc-500">Drag to move</div>}
+      <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-zinc-600">
+        <InfoPill label="Est" value={`${job.estPressTime.toFixed(2)}h`} />
+        <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
+      </div>
+      {finishMeta?.finishedAt && (
+        <div className="mt-2 text-[11px] text-zinc-500">
+          {formatDateTime(finishMeta.finishedAt)} {finishMeta.finishedBy ? `- ${finishMeta.finishedBy}` : ""}
+        </div>
+      )}
+      {(onUnschedule || onFinish || onDuplicate) && (
+        <div className="mt-2 flex gap-2">
+          {onUnschedule && (
+            <button onClick={onUnschedule} className="rounded-xl border border-zinc-200 px-2 py-1 text-[11px] text-zinc-700">
+              Remove
+            </button>
+          )}
+          {onDuplicate && (
+            <button onClick={onDuplicate} className="rounded-xl border border-zinc-200 px-2 py-1 text-[11px] text-zinc-700">
+              Duplicate
+            </button>
+          )}
+          {onFinish && (
+            <button onClick={onFinish} className="rounded-xl bg-zinc-900 px-2 py-1 text-[11px] text-white">
+              Finish
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InfoPill({ label, value }) {
+  return (
+    <div className="rounded-xl bg-white px-2 py-2">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">{label}</div>
+      <div className="mt-1 font-medium text-zinc-800">{value}</div>
+    </div>
+  );
+}
