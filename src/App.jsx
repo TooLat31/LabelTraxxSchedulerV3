@@ -1,16 +1,26 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { isSupabaseConfigured, supabase } from "./lib/supabase";
 
 const PRESS_ORDER = ["5.1", "6.1", "1.1", "2.1", "8", "9", "Rewind"];
 const STORAGE_KEY = "labeltraxx-scheduler-v4";
-const BASE_TABS = ["Scheduler", "New Request", "Open Requests", "Request History", "Daily Shipment"];
+const SESSION_STORAGE_KEY = "labeltraxx-scheduler-session-v1";
+const SHARED_STATE_ROW_ID = "labeltraxx-shared-state";
+const BASE_TABS = ["Scheduler", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Daily Shipment"];
 const ATTACHMENT_ACCEPT =
   ".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.png,.jpg,.jpeg,.zip,.msg,.eml";
+const PULL_PAPER_TARGETS = ["Press 5.1", "Press 6.1", "Press 2.1", "Press 1.1", "Digital"];
+const ROLE_OPTIONS = ["Management", "Warehouse/Shipper", "Operator"];
 
 const EMPTY_REQUEST_FORM = {
   jobNumber: "",
   customer: "",
   requestorName: "",
   description: "",
+};
+
+const EMPTY_PULL_PAPER_FORM = {
+  details: "",
+  target: PULL_PAPER_TARGETS[0],
 };
 
 const EMPTY_LOGIN_FORM = {
@@ -21,7 +31,7 @@ const EMPTY_LOGIN_FORM = {
 const EMPTY_USER_FORM = {
   username: "",
   password: "",
-  isAdmin: false,
+  role: ROLE_OPTIONS[0],
 };
 
 const EMPTY_SHIPMENT_FORM = {
@@ -146,11 +156,42 @@ function comparableUsername(value) {
   return safeText(value).toLowerCase();
 }
 
+function normalizeRole(role, isAdmin) {
+  const normalized = safeText(role);
+  if (ROLE_OPTIONS.includes(normalized)) return normalized;
+  return isAdmin ? "Management" : "Warehouse/Shipper";
+}
+
+function getUserRole(user) {
+  return normalizeRole(user?.role, user?.isAdmin);
+}
+
+function hasManagementAccess(user) {
+  return getUserRole(user) === "Management";
+}
+
+function canMoveJobs(user) {
+  return getUserRole(user) !== "Operator";
+}
+
+function canAccessTab(user, tab) {
+  const role = getUserRole(user);
+  if (role === "Management") return true;
+  if (role === "Warehouse/Shipper") {
+    return !["New Request", "Open Requests", "User Admin"].includes(tab);
+  }
+  if (role === "Operator") {
+    return tab === "Scheduler";
+  }
+  return tab === "Scheduler";
+}
+
 function buildDefaultAdmin() {
   return {
     id: "user-admin",
     username: "Admin",
     password: "1234",
+    role: "Management",
     isAdmin: true,
     createdAt: new Date().toISOString(),
     createdBy: "system",
@@ -164,7 +205,8 @@ function normalizeUsers(users) {
           id: user.id || `user-${index + 1}`,
           username: safeText(user.username),
           password: safeText(user.password),
-          isAdmin: Boolean(user.isAdmin),
+          role: normalizeRole(user.role, user.isAdmin),
+          isAdmin: hasManagementAccess(user),
           createdAt: user.createdAt || new Date().toISOString(),
           createdBy: user.createdBy || "system",
         }))
@@ -174,6 +216,80 @@ function normalizeUsers(users) {
   const hasAdmin = normalized.some((user) => comparableUsername(user.username) === "admin");
   if (!hasAdmin) normalized.unshift(buildDefaultAdmin());
   return normalized;
+}
+
+function normalizeJobs(jobs) {
+  return Array.isArray(jobs)
+    ? jobs.map((job) => ({
+        ...job,
+        press: normalizePressValue(job.press),
+        shipByDate: job.shipByDate ? new Date(job.shipByDate) : null,
+        entryDate: job.entryDate ? new Date(job.entryDate) : null,
+        dueOnSiteDate: job.dueOnSiteDate ? new Date(job.dueOnSiteDate) : null,
+      }))
+    : [];
+}
+
+function normalizeRequests(requests) {
+  return Array.isArray(requests)
+    ? requests.map((request) => ({
+        ...request,
+        attachments: Array.isArray(request.attachments) ? request.attachments : [],
+        createdByAccount: request.createdByAccount || "",
+        completedByAccount: request.completedByAccount || "",
+      }))
+    : [];
+}
+
+function normalizePullPaperRequests(requests) {
+  return Array.isArray(requests) ? requests : [];
+}
+
+function normalizeAssignments(assignments) {
+  return Array.isArray(assignments)
+    ? assignments.filter((assignment) => assignment.kind !== "rewind")
+    : [];
+}
+
+function normalizeShipmentGroups(groups) {
+  return Array.isArray(groups) ? groups : [];
+}
+
+function defaultSharedSnapshot() {
+  return {
+    jobs: [],
+    assignments: [],
+    requests: [],
+    pullPaperRequests: [],
+    shipmentGroups: [],
+    users: [buildDefaultAdmin()],
+    weekStart: startOfWeek(new Date()).toISOString(),
+  };
+}
+
+function normalizeSharedSnapshot(snapshot) {
+  const source = snapshot && typeof snapshot === "object" ? snapshot : {};
+  return {
+    jobs: normalizeJobs(source.jobs),
+    assignments: normalizeAssignments(source.assignments),
+    requests: normalizeRequests(source.requests),
+    pullPaperRequests: normalizePullPaperRequests(source.pullPaperRequests),
+    shipmentGroups: normalizeShipmentGroups(source.shipmentGroups),
+    users: normalizeUsers(source.users),
+    weekStart: source.weekStart ? new Date(source.weekStart) : startOfWeek(new Date()),
+  };
+}
+
+function buildSharedSnapshot(state) {
+  return {
+    jobs: state.jobs,
+    assignments: state.assignments,
+    requests: state.requests,
+    pullPaperRequests: state.pullPaperRequests,
+    shipmentGroups: state.shipmentGroups,
+    users: state.users,
+    weekStart: state.weekStart.toISOString(),
+  };
 }
 
 function readFileAsAttachment(file, uploadedBy) {
@@ -212,6 +328,14 @@ function normalizeJobStatus(status) {
   if (!value) return "open";
   if (value === "done" || value === "closed" || value === "finished" || value === "complete") return "closed";
   return "open";
+}
+
+function normalizePressValue(value) {
+  const normalized = safeText(value);
+  if (!normalized) return "";
+  if (normalized === "1") return "1.1";
+  if (normalized === "2") return "2.1";
+  return normalized;
 }
 
 function parseLabelTraxxText(text) {
@@ -259,7 +383,7 @@ function parseLabelTraxxText(text) {
       const importedStatus = safeText(record.Status) || safeText(record.TicketStatus) || "Open";
       return {
         id: safeText(record.Number),
-        press: safeText(record.Press),
+        press: normalizePressValue(record.Press),
         number: safeText(record.Number),
         customerName: safeText(record.CustomerName),
         generalDescr: safeText(record.GeneralDescr),
@@ -302,6 +426,14 @@ function statusTone(status) {
   if (value === "scheduled") return "bg-sky-600 text-white";
   if (value === "done") return "bg-emerald-100 text-emerald-800";
   if (value === "open") return "bg-zinc-200 text-zinc-700";
+  return "bg-zinc-100 text-zinc-700";
+}
+
+function syncTone(status) {
+  const value = safeText(status).toLowerCase();
+  if (value.includes("live")) return "bg-emerald-50 text-emerald-700";
+  if (value.includes("saving") || value.includes("connecting")) return "bg-amber-50 text-amber-700";
+  if (value.includes("error")) return "bg-rose-50 text-rose-700";
   return "bg-zinc-100 text-zinc-700";
 }
 
@@ -391,6 +523,7 @@ export default function App() {
   const [jobs, setJobs] = useState([]);
   const [assignments, setAssignments] = useState([]);
   const [requests, setRequests] = useState([]);
+  const [pullPaperRequests, setPullPaperRequests] = useState([]);
   const [shipmentGroups, setShipmentGroups] = useState([]);
   const [users, setUsers] = useState([buildDefaultAdmin()]);
   const [currentUsername, setCurrentUsername] = useState("");
@@ -403,6 +536,7 @@ export default function App() {
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [activeTab, setActiveTab] = useState("Scheduler");
   const [requestForm, setRequestForm] = useState(EMPTY_REQUEST_FORM);
+  const [pullPaperForm, setPullPaperForm] = useState(EMPTY_PULL_PAPER_FORM);
   const [requestDraftAttachments, setRequestDraftAttachments] = useState([]);
   const [selectedShipDate, setSelectedShipDate] = useState(todayKey());
   const [selectedShipmentJobs, setSelectedShipmentJobs] = useState([]);
@@ -413,65 +547,153 @@ export default function App() {
   const [userPasswordDrafts, setUserPasswordDrafts] = useState({});
   const [requestHistoryFilterDate, setRequestHistoryFilterDate] = useState("");
   const [shipmentHistoryFilterDate, setShipmentHistoryFilterDate] = useState("");
+  const [syncStatus, setSyncStatus] = useState(isSupabaseConfigured ? "Connecting..." : "Local only");
+  const [lastSyncAt, setLastSyncAt] = useState("");
+  const jobDetailsRef = useRef(null);
+  const lastSharedSnapshotRef = useRef("");
+  const saveTimerRef = useRef(null);
 
   useEffect(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
-      if (Array.isArray(saved.jobs)) {
-        setJobs(
-          saved.jobs.map((job) => ({
-            ...job,
-            shipByDate: job.shipByDate ? new Date(job.shipByDate) : null,
-            entryDate: job.entryDate ? new Date(job.entryDate) : null,
-            dueOnSiteDate: job.dueOnSiteDate ? new Date(job.dueOnSiteDate) : null,
-          }))
-        );
-      }
-      if (Array.isArray(saved.assignments)) {
-        setAssignments(saved.assignments.filter((assignment) => assignment.kind !== "rewind"));
-      }
-      if (Array.isArray(saved.requests)) {
-        setRequests(
-          saved.requests.map((request) => ({
-            ...request,
-            attachments: Array.isArray(request.attachments) ? request.attachments : [],
-            createdByAccount: request.createdByAccount || "",
-            completedByAccount: request.completedByAccount || "",
-          }))
-        );
-      }
-      if (Array.isArray(saved.shipmentGroups)) setShipmentGroups(saved.shipmentGroups);
-      const normalizedUsers = normalizeUsers(saved.users);
-      setUsers(normalizedUsers);
-      if (saved.weekStart) setWeekStart(new Date(saved.weekStart));
-      if (saved.currentUsername) {
-        const match = normalizedUsers.find(
-          (user) => comparableUsername(user.username) === comparableUsername(saved.currentUsername)
-        );
-        if (match) setCurrentUsername(match.username);
-      }
-    } catch {
-      setUsers([buildDefaultAdmin()]);
-    } finally {
-      setIsReady(true);
+    let isCancelled = false;
+
+    function applySharedState(snapshot) {
+      const normalized = normalizeSharedSnapshot(snapshot);
+      setJobs(normalized.jobs);
+      setAssignments(normalized.assignments);
+      setRequests(normalized.requests);
+      setPullPaperRequests(normalized.pullPaperRequests);
+      setShipmentGroups(normalized.shipmentGroups);
+      setUsers(normalized.users);
+      setWeekStart(normalized.weekStart);
+      return normalized;
     }
+
+    async function hydrate() {
+      let saved = {};
+      try {
+        saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+        const session = JSON.parse(localStorage.getItem(SESSION_STORAGE_KEY) || "{}");
+        let sharedSnapshot = saved;
+
+        if (isSupabaseConfigured && supabase) {
+          setSyncStatus("Connecting...");
+          const { data, error } = await supabase
+            .from("app_state")
+            .select("payload, updated_at")
+            .eq("id", SHARED_STATE_ROW_ID)
+            .maybeSingle();
+
+          if (error) throw error;
+
+          if (data?.payload) {
+            sharedSnapshot = data.payload;
+            if (!isCancelled) {
+              setSyncStatus("Live sync");
+              setLastSyncAt(data.updated_at || new Date().toISOString());
+            }
+          } else {
+            const seedSnapshot =
+              Object.keys(saved || {}).length > 0 ? buildSharedSnapshot(normalizeSharedSnapshot(saved)) : defaultSharedSnapshot();
+            const { error: seedError } = await supabase.from("app_state").upsert({
+              id: SHARED_STATE_ROW_ID,
+              payload: seedSnapshot,
+              updated_by: safeText(session.currentUsername) || "system",
+            });
+            if (seedError) throw seedError;
+            sharedSnapshot = seedSnapshot;
+            if (!isCancelled) {
+              setSyncStatus("Live sync");
+              setLastSyncAt(new Date().toISOString());
+            }
+          }
+        }
+
+        if (isCancelled) return;
+
+        const normalized = applySharedState(sharedSnapshot);
+        const digest = JSON.stringify(buildSharedSnapshot(normalized));
+        lastSharedSnapshotRef.current = digest;
+        const sessionUsername = safeText(session.currentUsername);
+        if (sessionUsername) {
+          const match = normalized.users.find(
+            (user) => comparableUsername(user.username) === comparableUsername(sessionUsername)
+          );
+          if (match) setCurrentUsername(match.username);
+        }
+      } catch (error) {
+        console.error("Failed to load shared scheduler state.", error);
+        const fallbackSource = Object.keys(saved || {}).length ? saved : defaultSharedSnapshot();
+        const fallback = normalizeSharedSnapshot(fallbackSource);
+        applySharedState(fallback);
+        lastSharedSnapshotRef.current = JSON.stringify(buildSharedSnapshot(fallback));
+        setSyncStatus(isSupabaseConfigured ? "Sync error" : "Local only");
+      } finally {
+        if (!isCancelled) setIsReady(true);
+      }
+    }
+
+    hydrate();
+
+    return () => {
+      isCancelled = true;
+    };
   }, []);
 
   useEffect(() => {
     if (!isReady) return;
+    const sharedSnapshot = buildSharedSnapshot({
+      jobs,
+      assignments,
+      requests,
+      pullPaperRequests,
+      shipmentGroups,
+      users,
+      weekStart,
+    });
+    const digest = JSON.stringify(sharedSnapshot);
+
+    localStorage.setItem(STORAGE_KEY, digest);
+
+    if (digest === lastSharedSnapshotRef.current) return;
+    lastSharedSnapshotRef.current = digest;
+
+    if (!isSupabaseConfigured || !supabase) {
+      setSyncStatus("Local only");
+      return;
+    }
+
+    setSyncStatus("Saving...");
+    window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(async () => {
+      const { error } = await supabase.from("app_state").upsert({
+        id: SHARED_STATE_ROW_ID,
+        payload: sharedSnapshot,
+        updated_by: currentUsername || "system",
+      });
+
+      if (error) {
+        console.error("Failed to save shared scheduler state.", error);
+        setSyncStatus("Sync error");
+        return;
+      }
+
+      setSyncStatus("Live sync");
+      setLastSyncAt(new Date().toISOString());
+    }, 300);
+
+    return () => {
+      window.clearTimeout(saveTimerRef.current);
+    };
+  }, [assignments, currentUsername, isReady, jobs, pullPaperRequests, requests, shipmentGroups, users, weekStart]);
+
+  useEffect(() => {
     localStorage.setItem(
-      STORAGE_KEY,
+      SESSION_STORAGE_KEY,
       JSON.stringify({
-        jobs,
-        assignments,
-        requests,
-        shipmentGroups,
-        users,
         currentUsername,
-        weekStart: weekStart.toISOString(),
       })
     );
-  }, [assignments, currentUsername, isReady, jobs, requests, shipmentGroups, users, weekStart]);
+  }, [currentUsername]);
 
   const currentUser = useMemo(
     () =>
@@ -479,11 +701,72 @@ export default function App() {
     [currentUsername, users]
   );
 
+  const currentUserRole = useMemo(() => getUserRole(currentUser), [currentUser]);
+  const userCanManageUsers = useMemo(() => hasManagementAccess(currentUser), [currentUser]);
+  const userCanMoveJobs = useMemo(() => canMoveJobs(currentUser), [currentUser]);
+
   useEffect(() => {
     if (currentUser) return;
     if (!currentUsername) return;
     setCurrentUsername("");
   }, [currentUser, currentUsername]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    if (canAccessTab(currentUser, activeTab)) return;
+    setActiveTab("Scheduler");
+  }, [activeTab, currentUser]);
+
+  useEffect(() => {
+    if (!isReady || !isSupabaseConfigured || !supabase) return undefined;
+
+    const channel = supabase
+      .channel("labeltraxx-shared-state")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "app_state",
+          filter: `id=eq.${SHARED_STATE_ROW_ID}`,
+        },
+        (payload) => {
+          const nextPayload = payload.new?.payload;
+          if (!nextPayload) return;
+          const digest = JSON.stringify(nextPayload);
+          if (digest === lastSharedSnapshotRef.current) {
+            setSyncStatus("Live sync");
+            setLastSyncAt(payload.new?.updated_at || new Date().toISOString());
+            return;
+          }
+
+          const normalized = normalizeSharedSnapshot(nextPayload);
+          lastSharedSnapshotRef.current = JSON.stringify(buildSharedSnapshot(normalized));
+          setJobs(normalized.jobs);
+          setAssignments(normalized.assignments);
+          setRequests(normalized.requests);
+          setPullPaperRequests(normalized.pullPaperRequests);
+          setShipmentGroups(normalized.shipmentGroups);
+          setUsers(normalized.users);
+          setWeekStart(normalized.weekStart);
+          setSyncStatus("Live sync");
+          setLastSyncAt(payload.new?.updated_at || new Date().toISOString());
+        }
+      )
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          setSyncStatus("Live sync");
+          return;
+        }
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          setSyncStatus("Sync error");
+        }
+      });
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [isReady]);
 
   useEffect(() => {
     if (!jobs.some((job) => job.id === selectedJobId)) setSelectedJobId(null);
@@ -495,7 +778,7 @@ export default function App() {
   }, [selectedShipDate]);
 
   const tabs = useMemo(
-    () => (currentUser?.isAdmin ? [...BASE_TABS, "User Admin"] : BASE_TABS),
+    () => [...BASE_TABS, "User Admin"].filter((tab) => canAccessTab(currentUser, tab)),
     [currentUser]
   );
 
@@ -643,6 +926,22 @@ export default function App() {
     [requestHistoryFilterDate, requests]
   );
 
+  const openPullPaperRequests = useMemo(
+    () =>
+      pullPaperRequests
+        .filter((request) => request.status === "open")
+        .sort((left, right) => dateSortValue(right.createdAt) - dateSortValue(left.createdAt)),
+    [pullPaperRequests]
+  );
+
+  const completedPullPaperRequests = useMemo(
+    () =>
+      pullPaperRequests
+        .filter((request) => request.status === "done")
+        .sort((left, right) => dateSortValue(right.completedAt) - dateSortValue(left.completedAt)),
+    [pullPaperRequests]
+  );
+
   const assignedShipmentJobIds = useMemo(() => {
     const ids = new Set();
     shipmentGroups.forEach((group) => {
@@ -706,6 +1005,14 @@ export default function App() {
     };
   }, [activePressAssignments.length, allUserFinishedJobs.length, importedSummary.closedCount, importedSummary.openCount, openRequests.length, shipmentGroupsForDay.length]);
 
+  function selectJob(jobId, shouldScroll = false) {
+    setSelectedJobId(jobId);
+    if (!shouldScroll) return;
+    requestAnimationFrame(() => {
+      jobDetailsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+
   function importText(text) {
     const parsed = parseLabelTraxxText(text);
     if (!parsed.length) return;
@@ -734,6 +1041,7 @@ export default function App() {
 
   function handleScheduleDrop(event, dayKey, press) {
     event.preventDefault();
+    if (!userCanMoveJobs) return;
     const payload = parseDragPayload(event.dataTransfer.getData("application/json"));
     if (payload?.type === "queue" && payload.jobId) {
       addAssignment(payload.jobId, dayKey, press);
@@ -748,6 +1056,7 @@ export default function App() {
   }
 
   function addAssignment(jobId, dayKey, press) {
+    if (!userCanMoveJobs) return;
     setAssignments((current) => {
       const exists = current.some(
         (assignment) =>
@@ -779,6 +1088,7 @@ export default function App() {
   }
 
   function moveAssignment(assignmentId, dayKey, press) {
+    if (!userCanMoveJobs) return;
     setAssignments((current) => {
       const assignmentToMove = current.find((assignment) => assignment.id === assignmentId);
       if (!assignmentToMove) return current;
@@ -810,6 +1120,7 @@ export default function App() {
   }
 
   function duplicateAssignmentToNextDay(assignmentId) {
+    if (!userCanMoveJobs) return;
     setAssignments((current) => {
       const assignmentToCopy = current.find((assignment) => assignment.id === assignmentId);
       if (!assignmentToCopy) return current;
@@ -847,6 +1158,7 @@ export default function App() {
   }
 
   function removeAssignment(assignmentId) {
+    if (!userCanMoveJobs) return;
     setAssignments((current) => current.filter((assignment) => assignment.id !== assignmentId));
   }
 
@@ -893,6 +1205,7 @@ export default function App() {
   }
 
   function autoPlace() {
+    if (!userCanMoveJobs) return;
     setAssignments((current) => {
       let next = [...current];
       jobs.forEach((job) => {
@@ -927,6 +1240,7 @@ export default function App() {
   }
 
   function clearBoard() {
+    if (!userCanMoveJobs) return;
     setAssignments([]);
   }
 
@@ -1033,6 +1347,48 @@ export default function App() {
     setRequestForm(EMPTY_REQUEST_FORM);
     setRequestDraftAttachments([]);
     setActiveTab("Open Requests");
+  }
+
+  function submitPullPaperRequest(event) {
+    event.preventDefault();
+    if (!currentUser) return;
+    if (!pullPaperForm.details.trim()) return;
+
+    setPullPaperRequests((current) => [
+      {
+        id: makeId("paper"),
+        details: pullPaperForm.details.trim(),
+        target: pullPaperForm.target,
+        status: "open",
+        createdAt: new Date().toISOString(),
+        createdBy: currentUser.username,
+        completedAt: null,
+        completedBy: "",
+      },
+      ...current,
+    ]);
+    setPullPaperForm(EMPTY_PULL_PAPER_FORM);
+  }
+
+  function markPullPaperRequestDone(requestId) {
+    if (!currentUser) return;
+    const completedAt = new Date().toISOString();
+    setPullPaperRequests((current) =>
+      current.map((request) =>
+        request.id === requestId
+          ? {
+              ...request,
+              status: "done",
+              completedAt,
+              completedBy: currentUser.username,
+            }
+          : request
+      )
+    );
+  }
+
+  function deletePullPaperRequest(requestId) {
+    setPullPaperRequests((current) => current.filter((request) => request.id !== requestId));
   }
 
   function markRequestDone(requestId) {
@@ -1160,7 +1516,7 @@ export default function App() {
 
   function createUser(event) {
     event.preventDefault();
-    if (!currentUser?.isAdmin) return;
+    if (!userCanManageUsers) return;
     const username = safeText(userForm.username);
     const password = safeText(userForm.password);
     if (!username || !password) return;
@@ -1175,7 +1531,8 @@ export default function App() {
         id: makeId("user"),
         username,
         password,
-        isAdmin: Boolean(userForm.isAdmin),
+        role: normalizeRole(userForm.role),
+        isAdmin: normalizeRole(userForm.role) === "Management",
         createdAt: new Date().toISOString(),
         createdBy: currentUser.username,
       },
@@ -1184,7 +1541,7 @@ export default function App() {
   }
 
   function updateUserPassword(userId) {
-    if (!currentUser?.isAdmin) return;
+    if (!userCanManageUsers) return;
     const nextPassword = safeText(userPasswordDrafts[userId]);
     if (!nextPassword) return;
     setUsers((current) =>
@@ -1223,6 +1580,10 @@ export default function App() {
     ["Ship groups", summary.shipGroupsOnDate],
   ];
 
+  const tabBadges = {
+    "Open Requests": openRequests.length,
+  };
+
   return (
     <div className="min-h-screen bg-zinc-50 text-zinc-900">
       <div className="mx-auto max-w-[1900px] p-4 md:p-6">
@@ -1230,7 +1591,7 @@ export default function App() {
           <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700">Production board</p>
-              <h1 className="mt-1 text-2xl font-semibold tracking-tight">Label Traxx scheduler</h1>
+              <h1 className="mt-1 text-2xl font-semibold tracking-tight">Label Traxx Scheduler</h1>
               <p className="mt-2 max-w-3xl text-sm text-zinc-600">
                 Logged in as {currentUser.username}. Request history, attachments, and completed work are now tied to user accounts.
               </p>
@@ -1247,13 +1608,26 @@ export default function App() {
                         : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
                     }`}
                   >
-                    {tab}
+                    <span>{tab}</span>
+                    {tabBadges[tab] > 0 && (
+                      <span
+                        className={`ml-2 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                          activeTab === tab ? "bg-white/15 text-white" : "bg-zinc-100 text-zinc-700"
+                        }`}
+                      >
+                        {tabBadges[tab]}
+                      </span>
+                    )}
                   </button>
                 ))}
               </div>
               <div className="flex items-center gap-2 text-sm">
+                <span className={`rounded-full px-3 py-2 ${syncTone(syncStatus)}`}>
+                  {syncStatus}
+                  {lastSyncAt ? ` • ${formatDateTime(lastSyncAt)}` : ""}
+                </span>
                 <span className="rounded-full bg-zinc-100 px-3 py-2 text-zinc-700">
-                  {currentUser.isAdmin ? "Admin" : "User"}: {currentUser.username}
+                  {currentUserRole}: {currentUser.username}
                 </span>
                 <button onClick={handleLogout} className="rounded-2xl border border-zinc-200 px-3 py-2">
                   Log out
@@ -1321,46 +1695,105 @@ export default function App() {
                     </button>
                   </div>
 
-                  <button
-                    onClick={() => setActiveTab("New Request")}
-                    className="rounded-2xl bg-emerald-600 px-3 py-2 text-sm font-medium text-white"
-                  >
-                    Create a request
-                  </button>
+                  {canAccessTab(currentUser, "New Request") && (
+                    <button
+                      onClick={() => setActiveTab("New Request")}
+                      className="rounded-2xl bg-emerald-600 px-3 py-2 text-sm font-medium text-white"
+                    >
+                      Create a request
+                    </button>
+                  )}
                 </div>
               </div>
 
               <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
-                <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                <div className="mb-3 flex items-center justify-between">
                   <div>
-                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">Week view</div>
-                    <div className="mt-1 text-xl font-semibold">
-                      {formatShortDate(weekColumns[0]?.date)} - {formatShortDate(weekColumns[4]?.date)}
-                    </div>
+                    <div className="text-sm font-semibold">Press queue</div>
+                    <div className="text-xs text-zinc-500">Search by ticket, then filter the queue by imported status or press number.</div>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button onClick={() => setWeekStart(addDays(weekStart, -7))} className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm">
-                      Previous
-                    </button>
-                    <button onClick={() => setWeekStart(startOfWeek(new Date()))} className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm">
-                      This week
-                    </button>
-                    <button onClick={() => setWeekStart(addDays(weekStart, 7))} className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm">
-                      Next
-                    </button>
-                    <input
-                      type="text"
-                      value={search}
-                      onChange={(event) => setSearch(event.target.value)}
-                      placeholder="Search all jobs"
-                      className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                  <div className="rounded-xl bg-zinc-100 px-2 py-1 text-xs text-zinc-600">{unscheduledJobs.length}</div>
+                </div>
+
+                <input
+                  type="text"
+                  value={unscheduledSearch}
+                  onChange={(event) => setUnscheduledSearch(event.target.value)}
+                  placeholder="Search ticket, customer, or description"
+                  className="mb-3 w-full rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                />
+
+                <div className="mb-3 grid grid-cols-2 gap-2">
+                  <select
+                    value={queueStatusFilter}
+                    onChange={(event) => setQueueStatusFilter(event.target.value)}
+                    className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                  >
+                    <option>All</option>
+                    <option>Open</option>
+                    <option>Done</option>
+                  </select>
+                  <select
+                    value={queuePressFilter}
+                    onChange={(event) => setQueuePressFilter(event.target.value)}
+                    className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                  >
+                    {queuePressOptions.map((press) => (
+                      <option key={press}>{press}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="max-h-[480px] space-y-3 overflow-y-auto pr-1">
+                  {unscheduledJobs.map((job) => (
+                    <JobCard
+                      key={job.id}
+                      job={job}
+                      state={deriveVisibleJobState(job.id, activePressJobIds, userFinishedJobIds)}
+                      onClick={() => selectJob(job.id)}
+                      onDoubleClick={() => selectJob(job.id, true)}
+                      onFinish={() => finishJob(job.id)}
+                      weekColumns={weekColumns}
+                      canMove={userCanMoveJobs}
+                      onQuickAssign={(dayKey) => addAssignment(job.id, dayKey, PRESS_ORDER.includes(job.press) ? job.press : "Rewind")}
                     />
-                  </div>
+                  ))}
+                  {!unscheduledJobs.length && (
+                    <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+                      No open queue jobs match your search.
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
 
             <div className="rounded-3xl border border-zinc-200 bg-white p-3 shadow-sm">
+              <div className="mb-3 flex flex-col gap-3 rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
+                <div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Week view</div>
+                  <div className="mt-1 text-base font-semibold">
+                    {formatShortDate(weekColumns[0]?.date)} - {formatShortDate(weekColumns[4]?.date)}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button onClick={() => setWeekStart(addDays(weekStart, -7))} className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm">
+                    Previous
+                  </button>
+                  <button onClick={() => setWeekStart(startOfWeek(new Date()))} className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm">
+                    This week
+                  </button>
+                  <button onClick={() => setWeekStart(addDays(weekStart, 7))} className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm">
+                    Next
+                  </button>
+                  <input
+                    type="text"
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                    placeholder="Search all jobs"
+                    className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                  />
+                </div>
+              </div>
               <div className="grid grid-cols-5 gap-3">
                 {weekColumns.map((day) => (
                   <div key={day.key} className="rounded-3xl bg-zinc-50 p-3">
@@ -1397,11 +1830,11 @@ export default function App() {
                                   job={job}
                                   assignment={assignment}
                                   finishMeta={finishedMetaByJobId.get(job.id)}
-                                  onSelect={() => setSelectedJobId(job.id)}
-                                  onUnschedule={() => removeAssignment(assignment.id)}
+                                  onSelect={() => selectJob(job.id)}
+                                  onUnschedule={userCanMoveJobs ? () => removeAssignment(assignment.id) : undefined}
                                   onFinish={() => finishJob(job.id)}
-                                  onDuplicate={() => duplicateAssignmentToNextDay(assignment.id)}
-                                  draggable={assignment.status !== "finished"}
+                                  onDuplicate={userCanMoveJobs ? () => duplicateAssignmentToNextDay(assignment.id) : undefined}
+                                  draggable={userCanMoveJobs && assignment.status !== "finished"}
                                 />
                               ))}
                               {!laneJobs.length && (
@@ -1419,67 +1852,8 @@ export default function App() {
               </div>
             </div>
 
-            <div className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
-              <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
-                <div className="mb-3 flex items-center justify-between">
-                  <div>
-                    <div className="text-sm font-semibold">Press queue</div>
-                    <div className="text-xs text-zinc-500">Search by ticket, then filter the queue by imported status or press number.</div>
-                  </div>
-                  <div className="rounded-xl bg-zinc-100 px-2 py-1 text-xs text-zinc-600">{unscheduledJobs.length}</div>
-                </div>
-
-                <input
-                  type="text"
-                  value={unscheduledSearch}
-                  onChange={(event) => setUnscheduledSearch(event.target.value)}
-                  placeholder="Search ticket number"
-                  className="mb-3 w-full rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
-                />
-
-                <div className="mb-3 grid grid-cols-2 gap-2">
-                  <select
-                    value={queueStatusFilter}
-                    onChange={(event) => setQueueStatusFilter(event.target.value)}
-                    className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
-                  >
-                    <option>All</option>
-                    <option>Open</option>
-                    <option>Done</option>
-                  </select>
-                  <select
-                    value={queuePressFilter}
-                    onChange={(event) => setQueuePressFilter(event.target.value)}
-                    className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
-                  >
-                    {queuePressOptions.map((press) => (
-                      <option key={press}>{press}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="max-h-[56vh] space-y-3 overflow-y-auto">
-                  {unscheduledJobs.map((job) => (
-                    <JobCard
-                      key={job.id}
-                      job={job}
-                      state={deriveVisibleJobState(job.id, activePressJobIds, userFinishedJobIds)}
-                      onClick={() => setSelectedJobId(job.id)}
-                      onFinish={() => finishJob(job.id)}
-                      weekColumns={weekColumns}
-                      onQuickAssign={(dayKey) => addAssignment(job.id, dayKey, PRESS_ORDER.includes(job.press) ? job.press : "Rewind")}
-                    />
-                  ))}
-                  {!unscheduledJobs.length && (
-                    <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
-                      No open queue jobs match your search.
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
-                <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+            <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+                <div ref={jobDetailsRef} className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
                   <div className="mb-3 flex items-center justify-between">
                     <div>
                       <div className="text-sm font-semibold">Job details</div>
@@ -1511,8 +1885,8 @@ export default function App() {
                         <Detail label="Imported status" value={selectedJob.ticketStatus || "-"} />
                         <Detail label="Quantity" value={selectedJob.ticQuantity.toLocaleString()} />
                         <Detail label="EST time" value={`${selectedJob.estPressTime.toFixed(2)} hrs`} />
-                        <Detail label="Finished at" value={formatDateTime(selectedJobFinishMeta?.finishedAt)} />
-                        <Detail label="Finished by" value={selectedJobFinishMeta?.finishedBy || "-"} />
+                        <Detail label="PO number" value={selectedJob.custPoNum || "-"} />
+                        <Detail label="Main tool" value={selectedJob.mainTool || "-"} />
                         <Detail label="Footage" value={selectedJob.estFootage.toLocaleString()} />
                         <Detail label="Stock" value={selectedJob.stockDisplay || "-"} />
                       </div>
@@ -1543,7 +1917,7 @@ export default function App() {
                           key={job.id}
                           job={job}
                           state="ship"
-                          onClick={() => setSelectedJobId(job.id)}
+                          onClick={() => selectJob(job.id)}
                           finishedAt={job.finishMeta?.finishedAt}
                           finishedBy={job.finishMeta?.finishedBy}
                         />
@@ -1555,7 +1929,6 @@ export default function App() {
                     )}
                   </div>
                 </div>
-              </div>
             </div>
           </div>
         )}
@@ -1638,12 +2011,14 @@ export default function App() {
                 <StatRow label="Open requests" value={openRequests.length} />
                 <StatRow label="Completed requests" value={requestHistory.length} />
                 <StatRow label="Signed-in account" value={currentUser.username} />
-                <button
-                  onClick={() => setActiveTab("Open Requests")}
-                  className="rounded-2xl border border-zinc-200 px-4 py-3 text-left text-sm"
-                >
-                  Open the request queue
-                </button>
+                {canAccessTab(currentUser, "Open Requests") && (
+                  <button
+                    onClick={() => setActiveTab("Open Requests")}
+                    className="rounded-2xl border border-zinc-200 px-4 py-3 text-left text-sm"
+                  >
+                    Open the request queue
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -1718,6 +2093,104 @@ export default function App() {
                   No completed requests yet.
                 </div>
               )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "Pull Paper Request" && (
+          <div className="grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
+            <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+              <div className="mb-5">
+                <div className="text-sm font-semibold">Pull paper request</div>
+                <div className="text-xs text-zinc-500">Send a paper pull note to a press or digital and keep the open list here.</div>
+              </div>
+              <form onSubmit={submitPullPaperRequest} className="grid gap-4">
+                <div>
+                  <div className="mb-2 text-sm font-medium text-zinc-800">Send to</div>
+                  <select
+                    value={pullPaperForm.target}
+                    onChange={(event) => setPullPaperForm((current) => ({ ...current, target: event.target.value }))}
+                    className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                  >
+                    {PULL_PAPER_TARGETS.map((target) => (
+                      <option key={target} value={target}>
+                        {target}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <div className="mb-2 text-sm font-medium text-zinc-800">Paper note</div>
+                  <textarea
+                    value={pullPaperForm.details}
+                    onChange={(event) => setPullPaperForm((current) => ({ ...current, details: event.target.value }))}
+                    placeholder='Stock 266 Width 9.5" 1 roll'
+                    className="h-40 w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                  />
+                </div>
+                <div className="rounded-2xl bg-zinc-50 px-4 py-3 text-sm text-zinc-700">
+                  Requesting as <span className="font-semibold">{currentUser.username}</span>
+                </div>
+                <div className="flex gap-2">
+                  <button type="submit" className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white">
+                    Save pull request
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPullPaperForm(EMPTY_PULL_PAPER_FORM)}
+                    className="rounded-2xl border border-zinc-200 px-4 py-3 text-sm"
+                  >
+                    Reset
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            <div className="space-y-4">
+              <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+                <div className="mb-4 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold">Open pull paper requests</div>
+                    <div className="text-xs text-zinc-500">Mark done when the paper is pulled, or delete it if it is no longer needed.</div>
+                  </div>
+                  <div className="rounded-xl bg-zinc-100 px-2 py-1 text-xs text-zinc-600">{openPullPaperRequests.length}</div>
+                </div>
+                <div className="space-y-3">
+                  {openPullPaperRequests.map((request) => (
+                    <PaperPullCard
+                      key={request.id}
+                      request={request}
+                      onDone={() => markPullPaperRequestDone(request.id)}
+                      onDelete={() => deletePullPaperRequest(request.id)}
+                    />
+                  ))}
+                  {!openPullPaperRequests.length && (
+                    <div className="rounded-2xl border border-dashed border-zinc-200 p-5 text-sm text-zinc-500">
+                      No open pull paper requests right now.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+                <div className="mb-4 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold">Completed pull paper requests</div>
+                    <div className="text-xs text-zinc-500">Recent completed paper pulls stay here so you can see who closed them out.</div>
+                  </div>
+                  <div className="rounded-xl bg-zinc-100 px-2 py-1 text-xs text-zinc-600">{completedPullPaperRequests.length}</div>
+                </div>
+                <div className="space-y-3">
+                  {completedPullPaperRequests.slice(0, 12).map((request) => (
+                    <PaperPullCard key={request.id} request={request} readOnly />
+                  ))}
+                  {!completedPullPaperRequests.length && (
+                    <div className="rounded-2xl border border-dashed border-zinc-200 p-5 text-sm text-zinc-500">
+                      No completed paper pull requests yet.
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         )}
@@ -1970,12 +2443,12 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === "User Admin" && currentUser.isAdmin && (
+        {activeTab === "User Admin" && userCanManageUsers && (
           <div className="grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
             <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
               <div className="mb-5">
                 <div className="text-sm font-semibold">Add user</div>
-                <div className="text-xs text-zinc-500">Admin can create logins and set passwords here.</div>
+                <div className="text-xs text-zinc-500">Management can create logins, assign roles, and set passwords here.</div>
               </div>
               <form onSubmit={createUser} className="grid gap-4">
                 <Field
@@ -1990,15 +2463,20 @@ export default function App() {
                   onChange={(value) => setUserForm((current) => ({ ...current, password: value }))}
                   placeholder="Set a password"
                 />
-                <label className="flex items-center gap-3 rounded-2xl border border-zinc-200 px-4 py-3 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={userForm.isAdmin}
-                    onChange={(event) => setUserForm((current) => ({ ...current, isAdmin: event.target.checked }))}
-                    className="h-4 w-4"
-                  />
-                  <span>Give this user admin access</span>
-                </label>
+                <div>
+                  <div className="mb-2 text-sm font-medium text-zinc-800">Role</div>
+                  <select
+                    value={userForm.role}
+                    onChange={(event) => setUserForm((current) => ({ ...current, role: event.target.value }))}
+                    className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                  >
+                    {ROLE_OPTIONS.map((role) => (
+                      <option key={role} value={role}>
+                        {role}
+                      </option>
+                    ))}
+                  </select>
+                </div>
                 <button type="submit" className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white">
                   Create user
                 </button>
@@ -2008,7 +2486,7 @@ export default function App() {
             <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
               <div className="mb-5">
                 <div className="text-sm font-semibold">Manage users</div>
-                <div className="text-xs text-zinc-500">Reset passwords for any user. The seeded admin login is `Admin / 1234`.</div>
+                <div className="text-xs text-zinc-500">Reset passwords for any user. The seeded management login is `Admin / 1234`.</div>
               </div>
               <div className="space-y-3">
                 {users.map((user) => (
@@ -2017,8 +2495,8 @@ export default function App() {
                       <div>
                         <div className="flex items-center gap-2">
                           <div className="text-sm font-semibold">{user.username}</div>
-                          <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${user.isAdmin ? "bg-zinc-900 text-white" : "bg-zinc-100 text-zinc-700"}`}>
-                            {user.isAdmin ? "admin" : "user"}
+                          <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${hasManagementAccess(user) ? "bg-zinc-900 text-white" : "bg-zinc-100 text-zinc-700"}`}>
+                            {getUserRole(user)}
                           </span>
                         </div>
                         <div className="mt-1 text-xs text-zinc-500">
@@ -2060,7 +2538,7 @@ function LoginScreen({ loginForm, loginError, onChange, onSubmit }) {
       <div className="mx-auto max-w-xl rounded-[2rem] border border-zinc-200 bg-white p-8 shadow-sm">
         <div className="mb-6">
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700">Secure Access</p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">Label Traxx scheduler login</h1>
+          <h1 className="mt-1 text-3xl font-semibold tracking-tight">Label Traxx Scheduler login</h1>
           <p className="mt-2 text-sm text-zinc-600">
             Sign in to open the scheduler, save your work, and stamp finished jobs and request history with your account.
           </p>
@@ -2246,13 +2724,15 @@ function JobCard({
   job,
   state,
   onClick,
+  onDoubleClick,
   onQuickAssign,
   onFinish,
   weekColumns,
   finishedAt,
   finishedBy,
+  canMove = true,
 }) {
-  const isDraggable = state === "open";
+  const isDraggable = state === "open" && canMove;
 
   return (
     <div
@@ -2266,11 +2746,13 @@ function JobCard({
         );
         event.dataTransfer.setData("text/plain", job.id);
       }}
+      onClick={() => onClick?.()}
+      onDoubleClick={() => onDoubleClick?.()}
       className={`rounded-2xl border border-zinc-200 bg-white p-3 shadow-sm ${isDraggable ? "cursor-grab" : ""}`}
     >
       <div className="mb-2 flex items-start justify-between gap-2">
         <div
-          onClick={onClick}
+          onDoubleClick={onDoubleClick}
           role="button"
           tabIndex={0}
           onKeyDown={(event) => {
@@ -2314,22 +2796,70 @@ function JobCard({
       {finishedAt && <div className="mt-2 text-xs text-zinc-500">Finished {formatDateTime(finishedAt)}</div>}
       {finishedBy && <div className="mt-1 text-xs text-zinc-500">Finished by {finishedBy}</div>}
 
-      {state === "open" && weekColumns && (
+      {state === "open" && ((weekColumns && canMove) || onFinish) && (
         <div className="mt-3 flex flex-wrap gap-2">
-          {weekColumns.map((day) => (
+          {weekColumns && canMove &&
+            weekColumns.map((day) => (
+              <button
+                key={day.key}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onQuickAssign?.(day.key);
+                }}
+                className="rounded-xl border border-zinc-200 px-2 py-1 text-[11px] text-zinc-700 hover:bg-zinc-50"
+              >
+                {day.label.slice(0, 3)}
+              </button>
+            ))}
+          {onFinish && (
             <button
-              key={day.key}
-              onClick={() => onQuickAssign?.(day.key)}
-              className="rounded-xl border border-zinc-200 px-2 py-1 text-[11px] text-zinc-700 hover:bg-zinc-50"
+              onClick={(event) => {
+                event.stopPropagation();
+                onFinish();
+              }}
+              className="rounded-xl bg-zinc-900 px-2 py-1 text-[11px] text-white"
             >
-              {day.label.slice(0, 3)}
+              Finish
             </button>
-          ))}
-          <button onClick={onFinish} className="rounded-xl bg-zinc-900 px-2 py-1 text-[11px] text-white">
-            Finish
-          </button>
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+function PaperPullCard({ request, onDone, onDelete, readOnly = false }) {
+  return (
+    <div className="rounded-2xl border border-zinc-200 p-4">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-zinc-100 px-2 py-1 text-[11px] font-medium text-zinc-700">{request.target}</span>
+            <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${request.status === "done" ? statusTone("done") : statusTone("open")}`}>
+              {request.status}
+            </span>
+          </div>
+          <div className="whitespace-pre-wrap text-sm text-zinc-800">{request.details}</div>
+          <div className="text-xs text-zinc-500">
+            Requested by {request.createdBy || "-"} on {formatDateTime(request.createdAt)}
+          </div>
+          {request.completedAt && (
+            <div className="text-xs text-zinc-500">
+              Completed by {request.completedBy || "-"} on {formatDateTime(request.completedAt)}
+            </div>
+          )}
+        </div>
+        {!readOnly && (
+          <div className="flex gap-2">
+            <button onClick={onDone} className="rounded-2xl bg-zinc-900 px-3 py-2 text-sm font-medium text-white">
+              Done
+            </button>
+            <button onClick={onDelete} className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700">
+              Delete
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
