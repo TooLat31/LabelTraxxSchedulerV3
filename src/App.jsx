@@ -411,30 +411,30 @@ function parseLabelTraxxText(text) {
 
 function priorityTone(priority) {
   const value = safeText(priority).toLowerCase();
-  if (value.includes("high")) return "bg-rose-100 text-rose-700 border-rose-200";
-  if (value.includes("release")) return "bg-sky-100 text-sky-700 border-sky-200";
-  if (value.includes("inventory")) return "bg-amber-100 text-amber-800 border-amber-200";
-  if (value.includes("digital")) return "bg-violet-100 text-violet-700 border-violet-200";
-  if (value.includes("test")) return "bg-slate-100 text-slate-700 border-slate-200";
-  return "bg-emerald-100 text-emerald-700 border-emerald-200";
+  if (value.includes("high")) return "bg-amber-100 text-amber-900 border-amber-300";
+  if (value.includes("release")) return "bg-stone-200 text-stone-800 border-stone-300";
+  if (value.includes("inventory")) return "bg-lime-100 text-lime-900 border-lime-300";
+  if (value.includes("digital")) return "bg-slate-200 text-slate-800 border-slate-300";
+  if (value.includes("test")) return "bg-neutral-200 text-neutral-800 border-neutral-300";
+  return "bg-emerald-100 text-emerald-900 border-emerald-300";
 }
 
 function statusTone(status) {
   const value = safeText(status).toLowerCase();
-  if (value === "finished") return "bg-zinc-900 text-white";
-  if (value === "ship") return "bg-emerald-600 text-white";
-  if (value === "scheduled") return "bg-sky-600 text-white";
-  if (value === "done") return "bg-emerald-100 text-emerald-800";
-  if (value === "open") return "bg-zinc-200 text-zinc-700";
-  return "bg-zinc-100 text-zinc-700";
+  if (value === "finished") return "bg-stone-900 text-stone-50";
+  if (value === "ship") return "bg-emerald-800 text-white";
+  if (value === "scheduled") return "bg-stone-700 text-stone-50";
+  if (value === "done") return "bg-emerald-100 text-emerald-900";
+  if (value === "open") return "bg-stone-200 text-stone-800";
+  return "bg-stone-100 text-stone-700";
 }
 
 function syncTone(status) {
   const value = safeText(status).toLowerCase();
-  if (value.includes("live")) return "bg-emerald-50 text-emerald-700";
-  if (value.includes("saving") || value.includes("connecting")) return "bg-amber-50 text-amber-700";
-  if (value.includes("error")) return "bg-rose-50 text-rose-700";
-  return "bg-zinc-100 text-zinc-700";
+  if (value.includes("live")) return "bg-emerald-100 text-emerald-900";
+  if (value.includes("saving") || value.includes("connecting")) return "bg-amber-100 text-amber-900";
+  if (value.includes("error")) return "bg-rose-100 text-rose-900";
+  return "bg-stone-100 text-stone-700";
 }
 
 function buildWeekColumns(weekStart) {
@@ -1552,8 +1552,8 @@ export default function App() {
 
   if (!isReady) {
     return (
-      <div className="min-h-screen bg-zinc-50 p-6 text-zinc-900">
-        <div className="mx-auto max-w-xl rounded-3xl border border-zinc-200 bg-white p-8 text-center shadow-sm">
+      <div className="min-h-screen bg-stone-100 p-6 text-stone-900">
+        <div className="mx-auto max-w-xl rounded-3xl border border-stone-300 bg-gradient-to-br from-stone-50 via-white to-stone-100 p-8 text-center shadow-sm shadow-stone-300/40">
           <div className="text-lg font-semibold">Loading scheduler...</div>
         </div>
       </div>
@@ -1582,17 +1582,18 @@ export default function App() {
 
   const tabBadges = {
     "Open Requests": openRequests.length,
+    "Pull Paper Request": openPullPaperRequests.length,
   };
 
   return (
-    <div className="min-h-screen bg-zinc-50 text-zinc-900">
+    <div className="min-h-screen bg-stone-100 text-stone-900">
       <div className="mx-auto max-w-[1900px] p-4 md:p-6">
-        <div className="mb-6 rounded-[2rem] border border-zinc-200 bg-white p-5 shadow-sm">
+        <div className="mb-6 rounded-[2rem] border border-stone-300 bg-gradient-to-br from-stone-50 via-white to-stone-100 p-5 shadow-sm shadow-stone-300/40">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700">Production board</p>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-900">Production board</p>
               <h1 className="mt-1 text-2xl font-semibold tracking-tight">Label Traxx Scheduler</h1>
-              <p className="mt-2 max-w-3xl text-sm text-zinc-600">
+              <p className="mt-2 max-w-3xl text-sm text-stone-700">
                 Logged in as {currentUser.username}. Request history, attachments, and completed work are now tied to user accounts.
               </p>
             </div>
@@ -1604,15 +1605,15 @@ export default function App() {
                     onClick={() => setActiveTab(tab)}
                     className={`rounded-2xl px-4 py-2 text-sm font-medium transition ${
                       activeTab === tab
-                        ? "bg-zinc-900 text-white"
-                        : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+                        ? "bg-emerald-900 text-stone-50 shadow-sm"
+                        : "border border-stone-300 bg-stone-50 text-stone-700 hover:bg-stone-100"
                     }`}
                   >
                     <span>{tab}</span>
                     {tabBadges[tab] > 0 && (
                       <span
                         className={`ml-2 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                          activeTab === tab ? "bg-white/15 text-white" : "bg-zinc-100 text-zinc-700"
+                          activeTab === tab ? "bg-white/15 text-stone-50" : "bg-stone-200 text-stone-800"
                         }`}
                       >
                         {tabBadges[tab]}
@@ -1626,10 +1627,10 @@ export default function App() {
                   {syncStatus}
                   {lastSyncAt ? ` • ${formatDateTime(lastSyncAt)}` : ""}
                 </span>
-                <span className="rounded-full bg-zinc-100 px-3 py-2 text-zinc-700">
+                <span className="rounded-full bg-stone-200 px-3 py-2 text-stone-800">
                   {currentUserRole}: {currentUser.username}
                 </span>
-                <button onClick={handleLogout} className="rounded-2xl border border-zinc-200 px-3 py-2">
+                <button onClick={handleLogout} className="rounded-2xl border border-stone-300 bg-stone-50 px-3 py-2 text-stone-800">
                   Log out
                 </button>
               </div>
@@ -1639,8 +1640,8 @@ export default function App() {
 
         <div className="mb-6 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
           {schedulerCards.map(([label, value]) => (
-            <div key={label} className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
-              <div className="text-xs uppercase tracking-[0.16em] text-zinc-500">{label}</div>
+            <div key={label} className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
+              <div className="text-xs uppercase tracking-[0.16em] text-stone-600">{label}</div>
               <div className="mt-2 text-2xl font-semibold tracking-tight">{value}</div>
             </div>
           ))}
@@ -1649,22 +1650,22 @@ export default function App() {
         {activeTab === "Scheduler" && (
           <div className="space-y-4">
             <div className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
-              <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+              <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
                 <div className="mb-4">
                   <div className="text-sm font-semibold">Import and controls</div>
-                  <div className="text-xs text-zinc-500">Imported done tickets stay informational only until a logged-in user marks them finished.</div>
+                  <div className="text-xs text-stone-600">Imported done tickets stay informational only until a logged-in user marks them finished.</div>
                 </div>
 
                 <div className="grid gap-3">
-                  <label className="rounded-2xl border border-dashed border-zinc-300 p-4 text-sm text-zinc-600 hover:border-zinc-400">
-                    <div className="font-medium text-zinc-800">Upload Label Traxx TXT</div>
+                  <label className="rounded-2xl border border-dashed border-stone-300 bg-white p-4 text-sm text-stone-700 hover:border-emerald-800">
+                    <div className="font-medium text-stone-900">Upload Label Traxx TXT</div>
                     <input type="file" accept=".txt,.tsv,text/plain" onChange={handleUpload} className="mt-3 block w-full text-xs" />
                   </label>
 
-                  <div className="rounded-2xl border border-zinc-200 p-3">
+                  <div className="rounded-2xl border border-stone-300 bg-white p-3">
                     <div className="mb-2 flex items-center justify-between">
                       <div className="text-sm font-medium">Paste export text</div>
-                      <button onClick={() => importText(pasteText)} className="rounded-xl bg-zinc-900 px-3 py-2 text-xs font-medium text-white">
+                      <button onClick={() => importText(pasteText)} className="rounded-xl bg-emerald-900 px-3 py-2 text-xs font-medium text-white">
                         Import
                       </button>
                     </div>
@@ -1672,25 +1673,25 @@ export default function App() {
                       value={pasteText}
                       onChange={(event) => setPasteText(event.target.value)}
                       placeholder="Paste the full TXT export here..."
-                      className="h-32 w-full rounded-2xl border border-zinc-200 p-3 text-xs outline-none placeholder:text-zinc-400 focus:border-zinc-400"
+                      className="h-32 w-full rounded-2xl border border-stone-300 bg-stone-50 p-3 text-xs outline-none placeholder:text-stone-400 focus:border-emerald-800"
                     />
                   </div>
 
-                  <div className="rounded-2xl bg-zinc-50 px-4 py-3 text-sm text-zinc-700">
+                  <div className="rounded-2xl bg-stone-200/70 px-4 py-3 text-sm text-stone-800">
                     Finishing jobs and completing requests will be recorded under <span className="font-semibold">{currentUser.username}</span>.
                   </div>
 
                   <div className="grid grid-cols-2 gap-2">
-                    <button onClick={loadDemo} className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm">
+                    <button onClick={loadDemo} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
                       Load demo
                     </button>
-                    <button onClick={autoPlace} className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm">
+                    <button onClick={autoPlace} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
                       Auto-place
                     </button>
-                    <button onClick={exportSchedule} className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm">
+                    <button onClick={exportSchedule} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
                       Export CSV
                     </button>
-                    <button onClick={clearBoard} className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700">
+                    <button onClick={clearBoard} className="rounded-2xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
                       Clear
                     </button>
                   </div>
@@ -1698,7 +1699,7 @@ export default function App() {
                   {canAccessTab(currentUser, "New Request") && (
                     <button
                       onClick={() => setActiveTab("New Request")}
-                      className="rounded-2xl bg-emerald-600 px-3 py-2 text-sm font-medium text-white"
+                      className="rounded-2xl bg-emerald-900 px-3 py-2 text-sm font-medium text-white"
                     >
                       Create a request
                     </button>
@@ -1706,13 +1707,13 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+              <div className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
                 <div className="mb-3 flex items-center justify-between">
                   <div>
                     <div className="text-sm font-semibold">Press queue</div>
-                    <div className="text-xs text-zinc-500">Search by ticket, then filter the queue by imported status or press number.</div>
+                    <div className="text-xs text-stone-600">Search by ticket, then filter the queue by imported status or press number.</div>
                   </div>
-                  <div className="rounded-xl bg-zinc-100 px-2 py-1 text-xs text-zinc-600">{unscheduledJobs.length}</div>
+                  <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{unscheduledJobs.length}</div>
                 </div>
 
                 <input
@@ -1720,14 +1721,14 @@ export default function App() {
                   value={unscheduledSearch}
                   onChange={(event) => setUnscheduledSearch(event.target.value)}
                   placeholder="Search ticket, customer, or description"
-                  className="mb-3 w-full rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                  className="mb-3 w-full rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
                 />
 
                 <div className="mb-3 grid grid-cols-2 gap-2">
                   <select
                     value={queueStatusFilter}
                     onChange={(event) => setQueueStatusFilter(event.target.value)}
-                    className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
                   >
                     <option>All</option>
                     <option>Open</option>
@@ -1736,7 +1737,7 @@ export default function App() {
                   <select
                     value={queuePressFilter}
                     onChange={(event) => setQueuePressFilter(event.target.value)}
-                    className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
                   >
                     {queuePressOptions.map((press) => (
                       <option key={press}>{press}</option>
@@ -1759,7 +1760,7 @@ export default function App() {
                     />
                   ))}
                   {!unscheduledJobs.length && (
-                    <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+                    <div className="rounded-2xl border border-dashed border-stone-300 bg-white/70 p-4 text-sm text-stone-600">
                       No open queue jobs match your search.
                     </div>
                   )}
@@ -1767,22 +1768,22 @@ export default function App() {
               </div>
             </div>
 
-            <div className="rounded-3xl border border-zinc-200 bg-white p-3 shadow-sm">
-              <div className="mb-3 flex flex-col gap-3 rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-3 shadow-sm shadow-stone-300/30">
+              <div className="mb-3 flex flex-col gap-3 rounded-2xl border border-stone-300 bg-gradient-to-r from-stone-100 via-stone-50 to-stone-100 px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
                 <div>
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Week view</div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-600">Week view</div>
                   <div className="mt-1 text-base font-semibold">
                     {formatShortDate(weekColumns[0]?.date)} - {formatShortDate(weekColumns[4]?.date)}
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <button onClick={() => setWeekStart(addDays(weekStart, -7))} className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm">
+                  <button onClick={() => setWeekStart(addDays(weekStart, -7))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
                     Previous
                   </button>
-                  <button onClick={() => setWeekStart(startOfWeek(new Date()))} className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm">
+                  <button onClick={() => setWeekStart(startOfWeek(new Date()))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
                     This week
                   </button>
-                  <button onClick={() => setWeekStart(addDays(weekStart, 7))} className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm">
+                  <button onClick={() => setWeekStart(addDays(weekStart, 7))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
                     Next
                   </button>
                   <input
@@ -1790,15 +1791,15 @@ export default function App() {
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
                     placeholder="Search all jobs"
-                    className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
                   />
                 </div>
               </div>
               <div className="grid grid-cols-5 gap-3">
                 {weekColumns.map((day) => (
-                  <div key={day.key} className="rounded-3xl bg-zinc-50 p-3">
-                    <div className="mb-3 rounded-2xl border border-zinc-200 bg-white px-3 py-3">
-                      <div className="text-xs uppercase tracking-[0.16em] text-zinc-500">{day.label}</div>
+                  <div key={day.key} className="rounded-3xl bg-stone-200/60 p-3">
+                    <div className="mb-3 rounded-2xl border border-stone-300 bg-white px-3 py-3">
+                      <div className="text-xs uppercase tracking-[0.16em] text-stone-600">{day.label}</div>
                       <div className="mt-1 text-lg font-semibold">{formatShortDate(day.date)}</div>
                     </div>
                     <div className="space-y-3">
@@ -1810,16 +1811,16 @@ export default function App() {
                             key={`${day.key}-${press}`}
                             onDragOver={(event) => event.preventDefault()}
                             onDrop={(event) => handleScheduleDrop(event, day.key, press)}
-                            className="rounded-2xl border border-zinc-200 bg-white p-2"
+                            className="rounded-2xl border border-stone-300 bg-white p-2"
                           >
                             <div className="mb-2 flex items-start justify-between gap-2">
                               <div>
                                 <div className="text-sm font-semibold">Press {press}</div>
-                                <div className="text-[11px] text-zinc-500">
+                                <div className="text-[11px] text-stone-600">
                                   {laneJobs.length} jobs - {totalHours.toFixed(2)} hrs
                                 </div>
                               </div>
-                              <span className="rounded-full bg-zinc-100 px-2 py-1 text-[10px] font-medium text-zinc-600">
+                              <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">
                                 drop
                               </span>
                             </div>
@@ -1838,7 +1839,7 @@ export default function App() {
                                 />
                               ))}
                               {!laneJobs.length && (
-                                <div className="rounded-2xl border border-dashed border-zinc-200 p-3 text-center text-[11px] text-zinc-400">
+                                <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50 p-3 text-center text-[11px] text-stone-500">
                                   Drop here
                                 </div>
                               )}
@@ -1853,11 +1854,11 @@ export default function App() {
             </div>
 
             <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
-                <div ref={jobDetailsRef} className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+                <div ref={jobDetailsRef} className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
                   <div className="mb-3 flex items-center justify-between">
                     <div>
                       <div className="text-sm font-semibold">Job details</div>
-                      <div className="text-xs text-zinc-500">Select a job from the queue or board.</div>
+                      <div className="text-xs text-stone-600">Select a job from the queue or board.</div>
                     </div>
                     {selectedJob && (
                       <span
@@ -1876,9 +1877,9 @@ export default function App() {
                         <div className="text-lg font-semibold">
                           {selectedJob.customerName} {selectedJob.number}
                         </div>
-                        <div className="text-zinc-600">{selectedJob.generalDescr}</div>
+                        <div className="text-stone-700">{selectedJob.generalDescr}</div>
                       </div>
-                      <div className="grid grid-cols-2 gap-3 text-xs text-zinc-600">
+                      <div className="grid grid-cols-2 gap-3 text-xs text-stone-700">
                         <Detail label="Default press" value={selectedJob.press || "-"} />
                         <Detail label="Priority" value={selectedJob.priority || "-"} />
                         <Detail label="Ship by" value={formatDate(selectedJob.shipByDate)} />
@@ -1891,23 +1892,23 @@ export default function App() {
                         <Detail label="Stock" value={selectedJob.stockDisplay || "-"} />
                       </div>
                       <div>
-                        <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Notes</div>
-                        <div className="max-h-56 overflow-auto whitespace-pre-wrap rounded-2xl bg-zinc-50 p-3 text-sm text-zinc-700">
+                        <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Notes</div>
+                        <div className="max-h-56 overflow-auto whitespace-pre-wrap rounded-2xl bg-stone-100 p-3 text-sm text-stone-800">
                           {selectedJob.notes || "No notes on this job."}
                         </div>
                       </div>
                     </div>
                   ) : (
-                    <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+                    <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
                       No job selected yet.
                     </div>
                   )}
                 </div>
 
-                <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+                <div className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
                   <div className="mb-3">
                     <div className="text-sm font-semibold">Ship ready today</div>
-                    <div className="text-xs text-zinc-500">These are only the jobs marked finished today by a logged-in user.</div>
+                    <div className="text-xs text-stone-600">These are only the jobs marked finished today by a logged-in user.</div>
                   </div>
                   <div className="max-h-[56vh] space-y-3 overflow-y-auto">
                     {doneJobs
@@ -1923,7 +1924,7 @@ export default function App() {
                         />
                       ))}
                     {!doneJobs.filter((job) => sameDay(job.finishMeta?.finishedAt, todayKey())).length && (
-                      <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+                      <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
                         No jobs marked finished today yet.
                       </div>
                     )}
@@ -1935,10 +1936,10 @@ export default function App() {
 
         {activeTab === "New Request" && (
           <div className="grid gap-4 xl:grid-cols-[minmax(0,760px)_minmax(0,1fr)]">
-            <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
               <div className="mb-5">
                 <div className="text-sm font-semibold">Request form</div>
-                <div className="text-xs text-zinc-500">Requests are stamped with the logged-in account, and you can attach supporting documents before saving.</div>
+                <div className="text-xs text-stone-600">Requests are stamped with the logged-in account, and you can attach supporting documents before saving.</div>
               </div>
               <form onSubmit={submitRequest} className="grid gap-4">
                 <Field
@@ -1960,20 +1961,20 @@ export default function App() {
                   placeholder="Who is asking for it"
                 />
                 <div>
-                  <div className="mb-2 text-sm font-medium text-zinc-800">Description</div>
+                  <div className="mb-2 text-sm font-medium text-stone-800">Description</div>
                   <textarea
                     value={requestForm.description}
                     onChange={(event) =>
                       setRequestForm((current) => ({ ...current, description: event.target.value }))
                     }
                     placeholder="Include QTY and any extra details here"
-                    className="h-36 w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                    className="h-36 w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
                   />
                 </div>
                 <div>
-                  <div className="mb-2 text-sm font-medium text-zinc-800">Documents</div>
-                  <label className="block rounded-2xl border border-dashed border-zinc-300 p-4 text-sm text-zinc-600 hover:border-zinc-400">
-                    <div className="font-medium text-zinc-800">Upload PDF, Word, Excel, or other request files</div>
+                  <div className="mb-2 text-sm font-medium text-stone-800">Documents</div>
+                  <label className="block rounded-2xl border border-dashed border-stone-300 bg-white p-4 text-sm text-stone-700 hover:border-emerald-800">
+                    <div className="font-medium text-stone-900">Upload PDF, Word, Excel, or other request files</div>
                     <input
                       type="file"
                       accept={ATTACHMENT_ACCEPT}
@@ -1985,7 +1986,7 @@ export default function App() {
                 </div>
                 <AttachmentList attachments={requestDraftAttachments} onRemove={removeDraftAttachment} />
                 <div className="flex gap-2">
-                  <button type="submit" className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white">
+                  <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
                     Save request
                   </button>
                   <button
@@ -1994,7 +1995,7 @@ export default function App() {
                       setRequestForm(EMPTY_REQUEST_FORM);
                       setRequestDraftAttachments([]);
                     }}
-                    className="rounded-2xl border border-zinc-200 px-4 py-3 text-sm"
+                    className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
                   >
                     Reset
                   </button>
@@ -2002,10 +2003,10 @@ export default function App() {
               </form>
             </div>
 
-            <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
               <div className="mb-4">
                 <div className="text-sm font-semibold">Request workflow</div>
-                <div className="text-xs text-zinc-500">Open requests live in their own tab. Mark done records which logged-in user completed the request and when.</div>
+                <div className="text-xs text-stone-600">Open requests live in their own tab. Mark done records which logged-in user completed the request and when.</div>
               </div>
               <div className="grid gap-3">
                 <StatRow label="Open requests" value={openRequests.length} />
@@ -2014,7 +2015,7 @@ export default function App() {
                 {canAccessTab(currentUser, "Open Requests") && (
                   <button
                     onClick={() => setActiveTab("Open Requests")}
-                    className="rounded-2xl border border-zinc-200 px-4 py-3 text-left text-sm"
+                    className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-left text-sm text-stone-800"
                   >
                     Open the request queue
                   </button>
@@ -2025,15 +2026,15 @@ export default function App() {
         )}
 
         {activeTab === "Open Requests" && (
-          <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+          <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
             <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
               <div>
                 <div className="text-sm font-semibold">Open requests</div>
-                <div className="text-xs text-zinc-500">Mark done to move a request into history under your login. Uploads added here stay attached to the request.</div>
+                <div className="text-xs text-stone-600">Mark done to move a request into history under your login. Uploads added here stay attached to the request.</div>
               </div>
               <button
                 onClick={() => setActiveTab("New Request")}
-                className="rounded-2xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white"
+                className="rounded-2xl bg-emerald-900 px-4 py-2 text-sm font-medium text-white"
               >
                 New request
               </button>
@@ -2051,7 +2052,7 @@ export default function App() {
                 />
               ))}
               {!openRequests.length && (
-                <div className="rounded-2xl border border-dashed border-zinc-200 p-5 text-sm text-zinc-500">
+                <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-5 text-sm text-stone-600">
                   No open requests right now.
                 </div>
               )}
@@ -2060,25 +2061,25 @@ export default function App() {
         )}
 
         {activeTab === "Request History" && (
-          <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+          <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
             <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
               <div>
                 <div className="text-sm font-semibold">Request history</div>
-                <div className="text-xs text-zinc-500">Completed requests are sorted by completion time and show which login completed them.</div>
+                <div className="text-xs text-stone-600">Completed requests are sorted by completion time and show which login completed them.</div>
               </div>
               <div className="flex items-end gap-2">
                 <div>
-                  <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Filter date</div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Filter date</div>
                   <input
                     type="date"
                     value={requestHistoryFilterDate}
                     onChange={(event) => setRequestHistoryFilterDate(event.target.value)}
-                    className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
                   />
                 </div>
                 <button
                   onClick={() => setRequestHistoryFilterDate("")}
-                  className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm"
+                  className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800"
                 >
                   Clear
                 </button>
@@ -2089,7 +2090,7 @@ export default function App() {
                 <RequestCard key={request.id} request={request} readOnly />
               ))}
               {!requestHistory.length && (
-                <div className="rounded-2xl border border-dashed border-zinc-200 p-5 text-sm text-zinc-500">
+                <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-5 text-sm text-stone-600">
                   No completed requests yet.
                 </div>
               )}
@@ -2099,18 +2100,18 @@ export default function App() {
 
         {activeTab === "Pull Paper Request" && (
           <div className="grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
-            <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
               <div className="mb-5">
                 <div className="text-sm font-semibold">Pull paper request</div>
-                <div className="text-xs text-zinc-500">Send a paper pull note to a press or digital and keep the open list here.</div>
+                <div className="text-xs text-stone-600">Send a paper pull note to a press or digital and keep the open list here.</div>
               </div>
               <form onSubmit={submitPullPaperRequest} className="grid gap-4">
                 <div>
-                  <div className="mb-2 text-sm font-medium text-zinc-800">Send to</div>
+                  <div className="mb-2 text-sm font-medium text-stone-800">Send to</div>
                   <select
                     value={pullPaperForm.target}
                     onChange={(event) => setPullPaperForm((current) => ({ ...current, target: event.target.value }))}
-                    className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                    className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
                   >
                     {PULL_PAPER_TARGETS.map((target) => (
                       <option key={target} value={target}>
@@ -2120,25 +2121,25 @@ export default function App() {
                   </select>
                 </div>
                 <div>
-                  <div className="mb-2 text-sm font-medium text-zinc-800">Paper note</div>
+                  <div className="mb-2 text-sm font-medium text-stone-800">Paper note</div>
                   <textarea
                     value={pullPaperForm.details}
                     onChange={(event) => setPullPaperForm((current) => ({ ...current, details: event.target.value }))}
                     placeholder='Stock 266 Width 9.5" 1 roll'
-                    className="h-40 w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                    className="h-40 w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
                   />
                 </div>
-                <div className="rounded-2xl bg-zinc-50 px-4 py-3 text-sm text-zinc-700">
+                <div className="rounded-2xl bg-stone-200/70 px-4 py-3 text-sm text-stone-800">
                   Requesting as <span className="font-semibold">{currentUser.username}</span>
                 </div>
                 <div className="flex gap-2">
-                  <button type="submit" className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white">
+                  <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
                     Save pull request
                   </button>
                   <button
                     type="button"
                     onClick={() => setPullPaperForm(EMPTY_PULL_PAPER_FORM)}
-                    className="rounded-2xl border border-zinc-200 px-4 py-3 text-sm"
+                    className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
                   >
                     Reset
                   </button>
@@ -2147,13 +2148,13 @@ export default function App() {
             </div>
 
             <div className="space-y-4">
-              <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+              <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
                 <div className="mb-4 flex items-center justify-between">
                   <div>
                     <div className="text-sm font-semibold">Open pull paper requests</div>
-                    <div className="text-xs text-zinc-500">Mark done when the paper is pulled, or delete it if it is no longer needed.</div>
+                    <div className="text-xs text-stone-600">Mark done when the paper is pulled, or delete it if it is no longer needed.</div>
                   </div>
-                  <div className="rounded-xl bg-zinc-100 px-2 py-1 text-xs text-zinc-600">{openPullPaperRequests.length}</div>
+                  <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{openPullPaperRequests.length}</div>
                 </div>
                 <div className="space-y-3">
                   {openPullPaperRequests.map((request) => (
@@ -2165,27 +2166,27 @@ export default function App() {
                     />
                   ))}
                   {!openPullPaperRequests.length && (
-                    <div className="rounded-2xl border border-dashed border-zinc-200 p-5 text-sm text-zinc-500">
+                    <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-5 text-sm text-stone-600">
                       No open pull paper requests right now.
                     </div>
                   )}
                 </div>
               </div>
 
-              <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+              <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
                 <div className="mb-4 flex items-center justify-between">
                   <div>
                     <div className="text-sm font-semibold">Completed pull paper requests</div>
-                    <div className="text-xs text-zinc-500">Recent completed paper pulls stay here so you can see who closed them out.</div>
+                    <div className="text-xs text-stone-600">Recent completed paper pulls stay here so you can see who closed them out.</div>
                   </div>
-                  <div className="rounded-xl bg-zinc-100 px-2 py-1 text-xs text-zinc-600">{completedPullPaperRequests.length}</div>
+                  <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{completedPullPaperRequests.length}</div>
                 </div>
                 <div className="space-y-3">
                   {completedPullPaperRequests.slice(0, 12).map((request) => (
                     <PaperPullCard key={request.id} request={request} readOnly />
                   ))}
                   {!completedPullPaperRequests.length && (
-                    <div className="rounded-2xl border border-dashed border-zinc-200 p-5 text-sm text-zinc-500">
+                    <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-5 text-sm text-stone-600">
                       No completed paper pull requests yet.
                     </div>
                   )}
@@ -2197,39 +2198,39 @@ export default function App() {
 
         {activeTab === "Daily Shipment" && (
           <div className="space-y-4">
-            <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
               <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
                 <div>
                   <div className="text-sm font-semibold">Daily shipment</div>
-                  <div className="text-xs text-zinc-500">
+                  <div className="text-xs text-stone-600">
                     Only jobs a logged-in user marked finished on the selected day show as ready to ship for that day.
                   </div>
                 </div>
                 <div>
-                  <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Ship date</div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Ship date</div>
                   <input
                     type="date"
                     value={selectedShipDate}
                     onChange={(event) => setSelectedShipDate(event.target.value)}
-                    className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
                   />
                 </div>
               </div>
             </div>
 
             <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_420px]">
-              <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+              <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
                 <div className="mb-4 flex items-center justify-between">
                   <div>
                     <div className="text-sm font-semibold">Ready to ship on {selectedShipDate}</div>
-                    <div className="text-xs text-zinc-500">Select one or more jobs, then create a shipment group.</div>
+                    <div className="text-xs text-stone-600">Select one or more jobs, then create a shipment group.</div>
                   </div>
-                  <div className="rounded-xl bg-zinc-100 px-2 py-1 text-xs text-zinc-600">{readyToShipJobs.length}</div>
+                  <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{readyToShipJobs.length}</div>
                 </div>
 
                 <div className="space-y-3">
                   {readyToShipJobs.map((job) => (
-                    <label key={job.id} className="flex gap-3 rounded-2xl border border-zinc-200 p-3">
+                    <label key={job.id} className="flex gap-3 rounded-2xl border border-stone-300 bg-white p-3">
                       <input
                         type="checkbox"
                         checked={selectedShipmentJobs.includes(job.id)}
@@ -2242,11 +2243,11 @@ export default function App() {
                             <div className="text-sm font-semibold">
                               {job.customerName} {job.number}
                             </div>
-                            <div className="mt-1 text-xs text-zinc-600">{job.generalDescr}</div>
+                            <div className="mt-1 text-xs text-stone-700">{job.generalDescr}</div>
                           </div>
                           <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone("ship")}`}>ship</span>
                         </div>
-                        <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-zinc-600 md:grid-cols-4">
+                        <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-stone-700 md:grid-cols-4">
                           <InfoPill label="Press" value={job.press || "-"} />
                           <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
                           <InfoPill label="Finished" value={formatDateTime(job.finishMeta?.finishedAt)} />
@@ -2256,7 +2257,7 @@ export default function App() {
                     </label>
                   ))}
                   {!readyToShipJobs.length && (
-                    <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+                    <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
                       No user-finished jobs are waiting to ship on this date.
                     </div>
                   )}
@@ -2264,10 +2265,10 @@ export default function App() {
               </div>
 
               <div className="space-y-4">
-                <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+                <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
                   <div className="mb-4">
                     <div className="text-sm font-semibold">Create shipment group</div>
-                    <div className="text-xs text-zinc-500">Example: one skid with 3 jobs for $141.17, or separate FedEx transactions.</div>
+                    <div className="text-xs text-stone-600">Example: one skid with 3 jobs for $141.17, or separate FedEx transactions.</div>
                   </div>
                   <form onSubmit={createShipmentGroup} className="grid gap-3">
                     <Field
@@ -2277,11 +2278,11 @@ export default function App() {
                       placeholder="Skid A or FedEx 1"
                     />
                     <div>
-                      <div className="mb-2 text-sm font-medium text-zinc-800">Method</div>
+                      <div className="mb-2 text-sm font-medium text-stone-800">Method</div>
                       <select
                         value={shipmentForm.method}
                         onChange={(event) => setShipmentForm((current) => ({ ...current, method: event.target.value }))}
-                        className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                        className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
                       >
                         <option>Skid</option>
                         <option>FedEx</option>
@@ -2298,13 +2299,13 @@ export default function App() {
                         placeholder="3"
                       />
                       <div>
-                        <div className="mb-2 text-sm font-medium text-zinc-800">Type</div>
+                        <div className="mb-2 text-sm font-medium text-stone-800">Type</div>
                         <select
                           value={shipmentForm.packageType}
                           onChange={(event) =>
                             setShipmentForm((current) => ({ ...current, packageType: event.target.value }))
                           }
-                          className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                          className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
                         >
                           <option>Skids</option>
                           <option>Cartons</option>
@@ -2318,38 +2319,38 @@ export default function App() {
                       placeholder="141.17"
                     />
                     <div>
-                      <div className="mb-2 text-sm font-medium text-zinc-800">Notes</div>
+                      <div className="mb-2 text-sm font-medium text-stone-800">Notes</div>
                       <textarea
                         value={shipmentForm.notes}
                         onChange={(event) => setShipmentForm((current) => ({ ...current, notes: event.target.value }))}
                         placeholder="Optional shipment notes"
-                        className="h-24 w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                        className="h-24 w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
                       />
                     </div>
-                    <button type="submit" className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white">
+                    <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
                       Create shipment group
                     </button>
                   </form>
                 </div>
 
-                <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+                <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
                   <div className="mb-4">
                     <div className="text-sm font-semibold">Shipment history</div>
-                    <div className="text-xs text-zinc-500">Pick a past date to see the exact jobs that shipped that day.</div>
+                    <div className="text-xs text-stone-600">Pick a past date to see the exact jobs that shipped that day.</div>
                   </div>
                   <div className="mb-4 flex items-end gap-2">
                     <div className="flex-1">
-                      <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Filter date</div>
+                      <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Filter date</div>
                       <input
                         type="date"
                         value={shipmentHistoryFilterDate}
                         onChange={(event) => setShipmentHistoryFilterDate(event.target.value)}
-                        className="w-full rounded-2xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
+                        className="w-full rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
                       />
                     </div>
                     <button
                       onClick={() => setShipmentHistoryFilterDate("")}
-                      className="rounded-2xl border border-zinc-200 px-3 py-2 text-sm"
+                      className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800"
                     >
                       Clear
                     </button>
@@ -2361,18 +2362,18 @@ export default function App() {
                         onClick={() => setSelectedShipDate(item.shipDate)}
                         className={`w-full rounded-2xl border px-4 py-3 text-left ${
                           selectedShipDate === item.shipDate
-                            ? "border-zinc-900 bg-zinc-900 text-white"
-                            : "border-zinc-200 bg-white text-zinc-800"
+                            ? "border-emerald-900 bg-emerald-900 text-white"
+                            : "border-stone-300 bg-white text-stone-800"
                         }`}
                       >
                         <div className="text-sm font-semibold">{item.shipDate}</div>
-                        <div className={`mt-1 text-xs ${selectedShipDate === item.shipDate ? "text-zinc-200" : "text-zinc-500"}`}>
+                        <div className={`mt-1 text-xs ${selectedShipDate === item.shipDate ? "text-stone-200" : "text-stone-600"}`}>
                           {item.groupCount} groups - {item.jobCount} jobs - {formatCurrency(item.totalCost)}
                         </div>
                       </button>
                     ))}
                     {!shipmentHistoryDays.length && (
-                      <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+                      <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
                         No shipment history yet.
                       </div>
                     )}
@@ -2381,34 +2382,34 @@ export default function App() {
               </div>
             </div>
 
-            <div className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
               <div className="mb-4">
                 <div className="text-sm font-semibold">Shipped on {selectedShipDate}</div>
-                <div className="text-xs text-zinc-500">Each shipment group keeps the exact jobs and who marked them finished.</div>
+                <div className="text-xs text-stone-600">Each shipment group keeps the exact jobs and who marked them finished.</div>
               </div>
               <div className="space-y-3">
                 {shipmentGroupsForDay.map((group) => {
                   const items = getShipmentItems(group, jobMap, finishedMetaByJobId);
                   return (
-                    <div key={group.id} className="rounded-2xl border border-zinc-200 p-4">
+                    <div key={group.id} className="rounded-2xl border border-stone-300 bg-white p-4">
                       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                         <div>
                           <div className="flex flex-wrap items-center gap-2">
                             <div className="text-sm font-semibold">{group.label}</div>
-                            <span className="rounded-full bg-zinc-900 px-2 py-1 text-[11px] font-medium text-white">
+                            <span className="rounded-full bg-emerald-900 px-2 py-1 text-[11px] font-medium text-white">
                               {group.method}
                             </span>
                           </div>
-                          <div className="mt-1 text-xs text-zinc-500">
+                          <div className="mt-1 text-xs text-stone-600">
                             {items.length} jobs - {formatCurrency(group.totalCost)} - created {formatDateTime(group.createdAt)}
                             {group.createdBy ? ` by ${group.createdBy}` : ""}
                           </div>
                           {!!group.packageCount && (
-                            <div className="mt-1 text-xs text-zinc-500">
+                            <div className="mt-1 text-xs text-stone-600">
                               {group.packageCount} {safeText(group.packageType || "Skids").toLowerCase()}
                             </div>
                           )}
-                          {group.notes && <div className="mt-2 text-sm text-zinc-700">{group.notes}</div>}
+                          {group.notes && <div className="mt-2 text-sm text-stone-800">{group.notes}</div>}
                         </div>
                         <button
                           onClick={() => deleteShipmentGroup(group.id)}
@@ -2419,12 +2420,12 @@ export default function App() {
                       </div>
                       <div className="mt-3 grid gap-2 md:grid-cols-2">
                         {items.map((item) => (
-                          <div key={item.id} className="rounded-2xl bg-zinc-50 p-3">
+                            <div key={item.id} className="rounded-2xl bg-stone-100 p-3">
                             <div className="text-sm font-semibold">
                               {item.customerName} {item.number}
                             </div>
-                            <div className="mt-1 text-xs text-zinc-600">{item.generalDescr}</div>
-                            <div className="mt-2 text-[11px] text-zinc-500">
+                              <div className="mt-1 text-xs text-stone-700">{item.generalDescr}</div>
+                              <div className="mt-2 text-[11px] text-stone-600">
                               Finished {formatDateTime(item.finishedAt)} by {item.finishedBy || "-"}
                             </div>
                           </div>
@@ -2434,7 +2435,7 @@ export default function App() {
                   );
                 })}
                 {!shipmentGroupsForDay.length && (
-                  <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+                  <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
                     No shipment groups created for this date yet.
                   </div>
                 )}
@@ -2445,10 +2446,10 @@ export default function App() {
 
         {activeTab === "User Admin" && userCanManageUsers && (
           <div className="grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
-            <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
               <div className="mb-5">
                 <div className="text-sm font-semibold">Add user</div>
-                <div className="text-xs text-zinc-500">Management can create logins, assign roles, and set passwords here.</div>
+                <div className="text-xs text-stone-600">Management can create logins, assign roles, and set passwords here.</div>
               </div>
               <form onSubmit={createUser} className="grid gap-4">
                 <Field
@@ -2464,11 +2465,11 @@ export default function App() {
                   placeholder="Set a password"
                 />
                 <div>
-                  <div className="mb-2 text-sm font-medium text-zinc-800">Role</div>
+                  <div className="mb-2 text-sm font-medium text-stone-800">Role</div>
                   <select
                     value={userForm.role}
                     onChange={(event) => setUserForm((current) => ({ ...current, role: event.target.value }))}
-                    className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                    className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
                   >
                     {ROLE_OPTIONS.map((role) => (
                       <option key={role} value={role}>
@@ -2477,29 +2478,29 @@ export default function App() {
                     ))}
                   </select>
                 </div>
-                <button type="submit" className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white">
+                <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
                   Create user
                 </button>
               </form>
             </div>
 
-            <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
               <div className="mb-5">
                 <div className="text-sm font-semibold">Manage users</div>
-                <div className="text-xs text-zinc-500">Reset passwords for any user. The seeded management login is `Admin / 1234`.</div>
+                <div className="text-xs text-stone-600">Reset passwords for any user. The seeded management login is `Admin / 1234`.</div>
               </div>
               <div className="space-y-3">
                 {users.map((user) => (
-                  <div key={user.id} className="rounded-2xl border border-zinc-200 p-4">
+                  <div key={user.id} className="rounded-2xl border border-stone-300 bg-white p-4">
                     <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                       <div>
                         <div className="flex items-center gap-2">
                           <div className="text-sm font-semibold">{user.username}</div>
-                          <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${hasManagementAccess(user) ? "bg-zinc-900 text-white" : "bg-zinc-100 text-zinc-700"}`}>
+                          <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${hasManagementAccess(user) ? "bg-emerald-900 text-white" : "bg-stone-200 text-stone-800"}`}>
                             {getUserRole(user)}
                           </span>
                         </div>
-                        <div className="mt-1 text-xs text-zinc-500">
+                        <div className="mt-1 text-xs text-stone-600">
                           Created {formatDateTime(user.createdAt)} by {user.createdBy || "-"}
                         </div>
                       </div>
@@ -2511,11 +2512,11 @@ export default function App() {
                             setUserPasswordDrafts((current) => ({ ...current, [user.id]: event.target.value }))
                           }
                           placeholder={`Set new password for ${user.username}`}
-                          className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+                          className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
                         />
                         <button
                           onClick={() => updateUserPassword(user.id)}
-                          className="rounded-2xl border border-zinc-200 px-4 py-3 text-sm"
+                          className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
                         >
                           Save password
                         </button>
@@ -2534,12 +2535,12 @@ export default function App() {
 
 function LoginScreen({ loginForm, loginError, onChange, onSubmit }) {
   return (
-    <div className="min-h-screen bg-zinc-50 p-6 text-zinc-900">
-      <div className="mx-auto max-w-xl rounded-[2rem] border border-zinc-200 bg-white p-8 shadow-sm">
+    <div className="min-h-screen bg-stone-100 p-6 text-stone-900">
+      <div className="mx-auto max-w-xl rounded-[2rem] border border-stone-300 bg-gradient-to-br from-stone-50 via-white to-stone-100 p-8 shadow-sm shadow-stone-300/40">
         <div className="mb-6">
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700">Secure Access</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-900">Secure Access</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">Label Traxx Scheduler login</h1>
-          <p className="mt-2 text-sm text-zinc-600">
+          <p className="mt-2 text-sm text-stone-700">
             Sign in to open the scheduler, save your work, and stamp finished jobs and request history with your account.
           </p>
         </div>
@@ -2551,21 +2552,21 @@ function LoginScreen({ loginForm, loginError, onChange, onSubmit }) {
             placeholder="Admin"
           />
           <div>
-            <div className="mb-2 text-sm font-medium text-zinc-800">Password</div>
+            <div className="mb-2 text-sm font-medium text-stone-800">Password</div>
             <input
               type="password"
               value={loginForm.password}
               onChange={(event) => onChange((current) => ({ ...current, password: event.target.value }))}
               placeholder="1234"
-              className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+              className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
             />
           </div>
           {loginError && <div className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{loginError}</div>}
-          <button type="submit" className="rounded-2xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white">
+          <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
             Log in
           </button>
         </form>
-        <div className="mt-4 rounded-2xl bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
+        <div className="mt-4 rounded-2xl bg-stone-200/70 px-4 py-3 text-sm text-stone-700">
           Default admin login: <span className="font-semibold">Admin</span> / <span className="font-semibold">1234</span>
         </div>
       </div>
@@ -2575,9 +2576,9 @@ function LoginScreen({ loginForm, loginError, onChange, onSubmit }) {
 
 function Detail({ label, value }) {
   return (
-    <div className="rounded-2xl bg-zinc-50 p-3">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">{label}</div>
-      <div className="mt-1 text-sm font-medium text-zinc-800">{value}</div>
+    <div className="rounded-2xl bg-stone-100 p-3">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-stone-600">{label}</div>
+      <div className="mt-1 text-sm font-medium text-stone-800">{value}</div>
     </div>
   );
 }
@@ -2585,13 +2586,13 @@ function Detail({ label, value }) {
 function Field({ label, value, onChange, placeholder }) {
   return (
     <div>
-      <div className="mb-2 text-sm font-medium text-zinc-800">{label}</div>
+      <div className="mb-2 text-sm font-medium text-stone-800">{label}</div>
       <input
         type="text"
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
-        className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-sm outline-none focus:border-zinc-400"
+        className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
       />
     </div>
   );
@@ -2599,9 +2600,9 @@ function Field({ label, value, onChange, placeholder }) {
 
 function StatRow({ label, value }) {
   return (
-    <div className="rounded-2xl bg-zinc-50 px-4 py-3">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">{label}</div>
-      <div className="mt-1 text-lg font-semibold text-zinc-900">{value}</div>
+    <div className="rounded-2xl bg-stone-100 px-4 py-3">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-stone-600">{label}</div>
+      <div className="mt-1 text-lg font-semibold text-stone-900">{value}</div>
     </div>
   );
 }
@@ -2609,7 +2610,7 @@ function StatRow({ label, value }) {
 function AttachmentList({ attachments, onRemove = null }) {
   if (!attachments.length) {
     return (
-      <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-500">
+      <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
         No documents attached yet.
       </div>
     );
@@ -2618,16 +2619,16 @@ function AttachmentList({ attachments, onRemove = null }) {
   return (
     <div className="space-y-2">
       {attachments.map((attachment) => (
-        <div key={attachment.id} className="flex flex-col gap-3 rounded-2xl border border-zinc-200 p-3 md:flex-row md:items-center md:justify-between">
+        <div key={attachment.id} className="flex flex-col gap-3 rounded-2xl border border-stone-300 bg-white p-3 md:flex-row md:items-center md:justify-between">
           <div className="min-w-0">
             <a
               href={attachment.dataUrl}
               download={attachment.name}
-              className="block truncate text-sm font-semibold text-zinc-900 underline-offset-2 hover:underline"
+              className="block truncate text-sm font-semibold text-stone-900 underline-offset-2 hover:underline"
             >
               {attachment.name}
             </a>
-            <div className="mt-1 text-xs text-zinc-500">
+            <div className="mt-1 text-xs text-stone-600">
               {formatFileSize(attachment.size)} • uploaded {formatDateTime(attachment.uploadedAt)}
               {attachment.uploadedBy ? ` by ${attachment.uploadedBy}` : ""}
             </div>
@@ -2655,7 +2656,7 @@ function RequestCard({
   readOnly = false,
 }) {
   return (
-    <div className="rounded-2xl border border-zinc-200 p-4">
+    <div className="rounded-2xl border border-stone-300 bg-white p-4">
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div className="min-w-0 flex-1">
@@ -2667,21 +2668,21 @@ function RequestCard({
                 {request.status}
               </span>
             </div>
-            <div className="mt-1 text-xs text-zinc-500">
+            <div className="mt-1 text-xs text-stone-600">
               Requested by {request.requestorName} on {formatDateTime(request.createdAt)}
               {request.createdByAccount ? ` using ${request.createdByAccount}` : ""}
             </div>
             {request.completedAt && (
-              <div className="mt-1 text-xs text-zinc-500">
+              <div className="mt-1 text-xs text-stone-600">
                 Completed on {formatDateTime(request.completedAt)}
                 {request.completedByAccount ? ` by ${request.completedByAccount}` : ""}
               </div>
             )}
-            <div className="mt-3 whitespace-pre-wrap text-sm text-zinc-700">{request.description}</div>
+            <div className="mt-3 whitespace-pre-wrap text-sm text-stone-800">{request.description}</div>
           </div>
           {!readOnly && (
             <div className="flex gap-2">
-              <button onClick={onDone} className="rounded-2xl bg-zinc-900 px-3 py-2 text-sm text-white">
+              <button onClick={onDone} className="rounded-2xl bg-emerald-900 px-3 py-2 text-sm text-white">
                 Mark done
               </button>
               <button onClick={onDelete} className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700">
@@ -2692,7 +2693,7 @@ function RequestCard({
         </div>
 
         <div>
-          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Documents</div>
+          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Documents</div>
           <AttachmentList
             attachments={request.attachments || []}
             onRemove={readOnly ? null : onRemoveAttachment}
@@ -2700,8 +2701,8 @@ function RequestCard({
         </div>
 
         {!readOnly && onAddAttachments && (
-          <label className="block rounded-2xl border border-dashed border-zinc-300 p-4 text-sm text-zinc-600 hover:border-zinc-400">
-            <div className="font-medium text-zinc-800">Add more files to this request</div>
+          <label className="block rounded-2xl border border-dashed border-stone-300 bg-stone-50 p-4 text-sm text-stone-700 hover:border-emerald-800">
+            <div className="font-medium text-stone-900">Add more files to this request</div>
             <input
               type="file"
               accept={ATTACHMENT_ACCEPT}
@@ -2748,7 +2749,7 @@ function JobCard({
       }}
       onClick={() => onClick?.()}
       onDoubleClick={() => onDoubleClick?.()}
-      className={`rounded-2xl border border-zinc-200 bg-white p-3 shadow-sm ${isDraggable ? "cursor-grab" : ""}`}
+      className={`rounded-2xl border border-stone-300 bg-white p-3 shadow-sm shadow-stone-300/20 ${isDraggable ? "cursor-grab" : ""}`}
     >
       <div className="mb-2 flex items-start justify-between gap-2">
         <div
@@ -2760,24 +2761,24 @@ function JobCard({
           }}
           className="min-w-0 flex-1 cursor-pointer text-left"
         >
-          <div className="text-sm font-semibold leading-tight text-zinc-900">
+          <div className="text-sm font-semibold leading-tight text-stone-900">
             {job.customerName} {job.number}
           </div>
-          <div className="mt-1 line-clamp-2 text-xs leading-5 text-zinc-600">{job.generalDescr}</div>
+          <div className="mt-1 line-clamp-2 text-xs leading-5 text-stone-700">{job.generalDescr}</div>
         </div>
         <div className="flex flex-col items-end gap-2">
           <span className={`rounded-full border px-2 py-1 text-[11px] font-medium ${priorityTone(job.priority)}`}>
             {job.priority || "-"}
           </span>
           {isDraggable && (
-            <span className="rounded-full bg-zinc-100 px-2 py-1 text-[10px] font-medium text-zinc-600">
+            <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">
               drag
             </span>
           )}
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-2 text-xs text-zinc-600">
+      <div className="grid grid-cols-2 gap-2 text-xs text-stone-700">
         <InfoPill label="Press" value={job.press || "-"} />
         <InfoPill label="EST" value={`${job.estPressTime.toFixed(2)}h`} />
         <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
@@ -2787,14 +2788,14 @@ function JobCard({
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone(state)}`}>{state}</span>
         {job.ticketStatus && (
-          <span className="rounded-full bg-zinc-100 px-2 py-1 text-[11px] font-medium text-zinc-600">
+          <span className="rounded-full bg-stone-200 px-2 py-1 text-[11px] font-medium text-stone-700">
             import: {job.ticketStatus}
           </span>
         )}
       </div>
 
-      {finishedAt && <div className="mt-2 text-xs text-zinc-500">Finished {formatDateTime(finishedAt)}</div>}
-      {finishedBy && <div className="mt-1 text-xs text-zinc-500">Finished by {finishedBy}</div>}
+      {finishedAt && <div className="mt-2 text-xs text-stone-600">Finished {formatDateTime(finishedAt)}</div>}
+      {finishedBy && <div className="mt-1 text-xs text-stone-600">Finished by {finishedBy}</div>}
 
       {state === "open" && ((weekColumns && canMove) || onFinish) && (
         <div className="mt-3 flex flex-wrap gap-2">
@@ -2806,7 +2807,7 @@ function JobCard({
                   event.stopPropagation();
                   onQuickAssign?.(day.key);
                 }}
-                className="rounded-xl border border-zinc-200 px-2 py-1 text-[11px] text-zinc-700 hover:bg-zinc-50"
+                className="rounded-xl border border-stone-300 bg-stone-50 px-2 py-1 text-[11px] text-stone-800 hover:bg-stone-100"
               >
                 {day.label.slice(0, 3)}
               </button>
@@ -2817,7 +2818,7 @@ function JobCard({
                 event.stopPropagation();
                 onFinish();
               }}
-              className="rounded-xl bg-zinc-900 px-2 py-1 text-[11px] text-white"
+              className="rounded-xl bg-emerald-900 px-2 py-1 text-[11px] text-white"
             >
               Finish
             </button>
@@ -2830,28 +2831,28 @@ function JobCard({
 
 function PaperPullCard({ request, onDone, onDelete, readOnly = false }) {
   return (
-    <div className="rounded-2xl border border-zinc-200 p-4">
+    <div className="rounded-2xl border border-stone-300 bg-white p-4">
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="rounded-full bg-zinc-100 px-2 py-1 text-[11px] font-medium text-zinc-700">{request.target}</span>
+            <span className="rounded-full bg-stone-200 px-2 py-1 text-[11px] font-medium text-stone-800">{request.target}</span>
             <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${request.status === "done" ? statusTone("done") : statusTone("open")}`}>
               {request.status}
             </span>
           </div>
-          <div className="whitespace-pre-wrap text-sm text-zinc-800">{request.details}</div>
-          <div className="text-xs text-zinc-500">
+          <div className="whitespace-pre-wrap text-sm text-stone-800">{request.details}</div>
+          <div className="text-xs text-stone-600">
             Requested by {request.createdBy || "-"} on {formatDateTime(request.createdAt)}
           </div>
           {request.completedAt && (
-            <div className="text-xs text-zinc-500">
+            <div className="text-xs text-stone-600">
               Completed by {request.completedBy || "-"} on {formatDateTime(request.completedAt)}
             </div>
           )}
         </div>
         {!readOnly && (
           <div className="flex gap-2">
-            <button onClick={onDone} className="rounded-2xl bg-zinc-900 px-3 py-2 text-sm font-medium text-white">
+            <button onClick={onDone} className="rounded-2xl bg-emerald-900 px-3 py-2 text-sm font-medium text-white">
               Done
             </button>
             <button onClick={onDelete} className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700">
@@ -2887,7 +2888,7 @@ function CompactScheduleCard({
           makeDragPayload({ type: "scheduled", assignmentId: assignment.id, jobId: job.id })
         );
       }}
-      className={`rounded-2xl border border-zinc-200 bg-zinc-50 p-2 ${draggable ? "cursor-grab" : ""}`}
+      className={`rounded-2xl border border-stone-300 bg-stone-100 p-2 ${draggable ? "cursor-grab" : ""}`}
     >
       <div className="flex items-start justify-between gap-2">
         <div
@@ -2899,37 +2900,37 @@ function CompactScheduleCard({
           }}
           className="min-w-0 flex-1 cursor-pointer"
         >
-          <div className="truncate text-xs font-semibold text-zinc-900">
+          <div className="truncate text-xs font-semibold text-stone-900">
             {job.customerName} {job.number}
           </div>
-          <div className="mt-1 line-clamp-2 text-[11px] text-zinc-600">{job.generalDescr}</div>
+          <div className="mt-1 line-clamp-2 text-[11px] text-stone-700">{job.generalDescr}</div>
         </div>
         <span className={`rounded-full px-2 py-1 text-[10px] font-medium ${statusTone(state)}`}>{state}</span>
       </div>
-      {draggable && <div className="mt-1 text-[10px] text-zinc-500">Drag to move</div>}
-      <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-zinc-600">
+      {draggable && <div className="mt-1 text-[10px] text-stone-600">Drag to move</div>}
+      <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-stone-700">
         <InfoPill label="Est" value={`${job.estPressTime.toFixed(2)}h`} />
         <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
       </div>
       {finishMeta?.finishedAt && (
-        <div className="mt-2 text-[11px] text-zinc-500">
+        <div className="mt-2 text-[11px] text-stone-600">
           {formatDateTime(finishMeta.finishedAt)} {finishMeta.finishedBy ? `- ${finishMeta.finishedBy}` : ""}
         </div>
       )}
       {(onUnschedule || onFinish || onDuplicate) && (
         <div className="mt-2 flex gap-2">
           {onUnschedule && (
-            <button onClick={onUnschedule} className="rounded-xl border border-zinc-200 px-2 py-1 text-[11px] text-zinc-700">
+            <button onClick={onUnschedule} className="rounded-xl border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800">
               Remove
             </button>
           )}
           {onDuplicate && (
-            <button onClick={onDuplicate} className="rounded-xl border border-zinc-200 px-2 py-1 text-[11px] text-zinc-700">
+            <button onClick={onDuplicate} className="rounded-xl border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800">
               Duplicate
             </button>
           )}
           {onFinish && (
-            <button onClick={onFinish} className="rounded-xl bg-zinc-900 px-2 py-1 text-[11px] text-white">
+            <button onClick={onFinish} className="rounded-xl bg-emerald-900 px-2 py-1 text-[11px] text-white">
               Finish
             </button>
           )}
@@ -2941,9 +2942,9 @@ function CompactScheduleCard({
 
 function InfoPill({ label, value }) {
   return (
-    <div className="rounded-xl bg-white px-2 py-2">
-      <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">{label}</div>
-      <div className="mt-1 font-medium text-zinc-800">{value}</div>
+    <div className="rounded-xl border border-stone-200 bg-white px-2 py-2">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-600">{label}</div>
+      <div className="mt-1 font-medium text-stone-800">{value}</div>
     </div>
   );
 }
