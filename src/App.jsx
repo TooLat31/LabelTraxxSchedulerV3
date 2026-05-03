@@ -501,6 +501,13 @@ function snapshotJobForShipment(job, finishMeta) {
   };
 }
 
+function effectiveFinishedShipDate(finishMeta) {
+  if (!finishMeta) return "";
+  if (finishMeta.shipDate) return finishMeta.shipDate;
+  if (finishMeta.dayKey) return finishMeta.dayKey;
+  return finishMeta.finishedAt ? isoDate(new Date(finishMeta.finishedAt)) : "";
+}
+
 function getShipmentItems(group, jobMap, finishedMetaByJobId) {
   if (Array.isArray(group.jobItems) && group.jobItems.length) return group.jobItems;
   return (group.jobIds || [])
@@ -539,7 +546,9 @@ export default function App() {
   const [pullPaperForm, setPullPaperForm] = useState(EMPTY_PULL_PAPER_FORM);
   const [requestDraftAttachments, setRequestDraftAttachments] = useState([]);
   const [selectedShipDate, setSelectedShipDate] = useState(todayKey());
+  const [shipDateDraft, setShipDateDraft] = useState(todayKey());
   const [selectedShipmentJobs, setSelectedShipmentJobs] = useState([]);
+  const [selectedShipQueueJobs, setSelectedShipQueueJobs] = useState([]);
   const [shipmentForm, setShipmentForm] = useState({ ...EMPTY_SHIPMENT_FORM, shipDate: todayKey() });
   const [loginForm, setLoginForm] = useState(EMPTY_LOGIN_FORM);
   const [loginError, setLoginError] = useState("");
@@ -774,6 +783,7 @@ export default function App() {
 
   useEffect(() => {
     setShipmentForm((current) => ({ ...current, shipDate: selectedShipDate }));
+    setShipDateDraft(selectedShipDate);
     setSelectedShipmentJobs([]);
   }, [selectedShipDate]);
 
@@ -816,6 +826,7 @@ export default function App() {
           finishedAt: assignment.finishedAt || null,
           finishedBy: assignment.finishedBy || "",
           dayKey: assignment.finishedAt ? isoDate(new Date(assignment.finishedAt)) : assignment.dayKey,
+          shipDate: assignment.shipDate || (assignment.finishedAt ? isoDate(new Date(assignment.finishedAt)) : assignment.dayKey),
         });
       }
     });
@@ -950,12 +961,17 @@ export default function App() {
     return ids;
   }, [finishedMetaByJobId, jobMap, shipmentGroups]);
 
-  const readyToShipJobs = useMemo(() => {
+  const unassignedFinishedJobs = useMemo(() => {
     return allUserFinishedJobs
-      .filter((job) => sameDay(job.finishMeta?.finishedAt, selectedShipDate))
       .filter((job) => !assignedShipmentJobIds.has(job.id))
       .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
-  }, [allUserFinishedJobs, assignedShipmentJobIds, selectedShipDate]);
+  }, [allUserFinishedJobs, assignedShipmentJobIds]);
+
+  const readyToShipJobs = useMemo(() => {
+    return unassignedFinishedJobs
+      .filter((job) => effectiveFinishedShipDate(job.finishMeta) === selectedShipDate)
+      .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
+  }, [selectedShipDate, unassignedFinishedJobs]);
 
   const shipmentGroupsForDay = useMemo(
     () =>
@@ -1004,6 +1020,16 @@ export default function App() {
       shipGroupsOnDate: shipmentGroupsForDay.length,
     };
   }, [activePressAssignments.length, allUserFinishedJobs.length, importedSummary.closedCount, importedSummary.openCount, openRequests.length, shipmentGroupsForDay.length]);
+
+  useEffect(() => {
+    const validIds = new Set(readyToShipJobs.map((job) => job.id));
+    setSelectedShipmentJobs((current) => current.filter((jobId) => validIds.has(jobId)));
+  }, [readyToShipJobs]);
+
+  useEffect(() => {
+    const validIds = new Set(unassignedFinishedJobs.map((job) => job.id));
+    setSelectedShipQueueJobs((current) => current.filter((jobId) => validIds.has(jobId)));
+  }, [unassignedFinishedJobs]);
 
   function selectJob(jobId, shouldScroll = false) {
     setSelectedJobId(jobId);
@@ -1165,6 +1191,7 @@ export default function App() {
   function finishJob(jobId) {
     if (!currentUser) return;
     const finishedAt = new Date().toISOString();
+    const defaultShipDate = isoDate(new Date(finishedAt));
     const finishedBy = currentUser.username;
     const job = jobMap.get(jobId);
     const fallbackDayKey = job?.shipByDate ? isoDate(job.shipByDate) : weekColumns[0]?.key || todayKey();
@@ -1180,6 +1207,7 @@ export default function App() {
           status: "finished",
           finishedAt,
           finishedBy,
+          shipDate: assignment.shipDate || defaultShipDate,
         };
       });
 
@@ -1196,6 +1224,7 @@ export default function App() {
             createdAt: finishedAt,
             finishedAt,
             finishedBy,
+            shipDate: defaultShipDate,
           },
         ];
       }
@@ -1447,6 +1476,30 @@ export default function App() {
     );
   }
 
+  function toggleShipQueueJob(jobId) {
+    setSelectedShipQueueJobs((current) =>
+      current.includes(jobId) ? current.filter((value) => value !== jobId) : [...current, jobId]
+    );
+  }
+
+  function assignShipDateToFinishedJobs() {
+    if (!selectedShipQueueJobs.length || !shipDateDraft) return;
+    const targetIds = new Set(selectedShipQueueJobs);
+    setAssignments((current) =>
+      current.map((assignment) => {
+        if (!targetIds.has(assignment.jobId) || assignment.kind !== "press" || assignment.status !== "finished") {
+          return assignment;
+        }
+        return {
+          ...assignment,
+          shipDate: shipDateDraft,
+        };
+      })
+    );
+    setSelectedShipDate(shipDateDraft);
+    setSelectedShipQueueJobs([]);
+  }
+
   function createShipmentGroup(event) {
     event.preventDefault();
     if (!selectedShipmentJobs.length) return;
@@ -1565,6 +1618,7 @@ export default function App() {
       <LoginScreen
         loginForm={loginForm}
         loginError={loginError}
+        users={users}
         onChange={setLoginForm}
         onSubmit={handleLogin}
       />
@@ -2203,7 +2257,7 @@ export default function App() {
                 <div>
                   <div className="text-sm font-semibold">Daily shipment</div>
                   <div className="text-xs text-stone-600">
-                    Only jobs a logged-in user marked finished on the selected day show as ready to ship for that day.
+                    Finished jobs can be assigned to a ship date first, then grouped under that shipping day.
                   </div>
                 </div>
                 <div>
@@ -2215,6 +2269,91 @@ export default function App() {
                     className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
                   />
                 </div>
+              </div>
+            </div>
+
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
+              <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                <div>
+                  <div className="text-sm font-semibold">Assign ship date</div>
+                  <div className="text-xs text-stone-600">
+                    Pick the finished jobs that have not been grouped yet, assign them to a ship date, and they will move into that day's shipment queue.
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-end gap-2">
+                  <div>
+                    <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Ship date</div>
+                    <input
+                      type="date"
+                      value={shipDateDraft}
+                      onChange={(event) => setShipDateDraft(event.target.value)}
+                      className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedShipQueueJobs(unassignedFinishedJobs.map((job) => job.id))}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800"
+                  >
+                    Select all
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedShipQueueJobs([])}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    type="button"
+                    onClick={assignShipDateToFinishedJobs}
+                    className="rounded-2xl bg-emerald-900 px-4 py-2 text-sm font-medium text-white"
+                  >
+                    Assign date
+                  </button>
+                </div>
+              </div>
+
+              <div className="mb-3 flex items-center justify-between">
+                <div className="text-xs text-stone-600">
+                  {selectedShipQueueJobs.length} selected
+                </div>
+                <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{unassignedFinishedJobs.length}</div>
+              </div>
+
+              <div className="max-h-[320px] space-y-3 overflow-y-auto pr-1">
+                {unassignedFinishedJobs.map((job) => (
+                  <label key={job.id} className="flex gap-3 rounded-2xl border border-stone-300 bg-white p-3">
+                    <input
+                      type="checkbox"
+                      checked={selectedShipQueueJobs.includes(job.id)}
+                      onChange={() => toggleShipQueueJob(job.id)}
+                      className="mt-1 h-4 w-4"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <div className="text-sm font-semibold">
+                            {job.customerName} {job.number}
+                          </div>
+                          <div className="mt-1 text-xs text-stone-700">{job.generalDescr}</div>
+                        </div>
+                        <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone("done")}`}>done</span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-stone-700 md:grid-cols-4">
+                        <InfoPill label="Press" value={job.press || "-"} />
+                        <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
+                        <InfoPill label="Finished" value={formatDateTime(job.finishMeta?.finishedAt)} />
+                        <InfoPill label="Ship date" value={effectiveFinishedShipDate(job.finishMeta) || "-"} />
+                      </div>
+                    </div>
+                  </label>
+                ))}
+                {!unassignedFinishedJobs.length && (
+                  <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
+                    All finished jobs are already grouped into shipments.
+                  </div>
+                )}
               </div>
             </div>
 
@@ -2487,7 +2626,7 @@ export default function App() {
             <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
               <div className="mb-5">
                 <div className="text-sm font-semibold">Manage users</div>
-                <div className="text-xs text-stone-600">Reset passwords for any user. The seeded management login is `Admin / 1234`.</div>
+                <div className="text-xs text-stone-600">Reset passwords for any user and manage access from here.</div>
               </div>
               <div className="space-y-3">
                 {users.map((user) => (
@@ -2533,7 +2672,7 @@ export default function App() {
   );
 }
 
-function LoginScreen({ loginForm, loginError, onChange, onSubmit }) {
+function LoginScreen({ loginForm, loginError, users, onChange, onSubmit }) {
   return (
     <div className="min-h-screen bg-stone-100 p-6 text-stone-900">
       <div className="mx-auto max-w-xl rounded-[2rem] border border-stone-300 bg-gradient-to-br from-stone-50 via-white to-stone-100 p-8 shadow-sm shadow-stone-300/40">
@@ -2545,19 +2684,28 @@ function LoginScreen({ loginForm, loginError, onChange, onSubmit }) {
           </p>
         </div>
         <form onSubmit={onSubmit} className="grid gap-4">
-          <Field
-            label="Username"
-            value={loginForm.username}
-            onChange={(value) => onChange((current) => ({ ...current, username: value }))}
-            placeholder="Admin"
-          />
+          <div>
+            <div className="mb-2 text-sm font-medium text-stone-800">Username</div>
+            <select
+              value={loginForm.username}
+              onChange={(event) => onChange((current) => ({ ...current, username: event.target.value }))}
+              className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+            >
+              <option value="">Select a username</option>
+              {users.map((user) => (
+                <option key={user.id} value={user.username}>
+                  {user.username}
+                </option>
+              ))}
+            </select>
+          </div>
           <div>
             <div className="mb-2 text-sm font-medium text-stone-800">Password</div>
             <input
               type="password"
               value={loginForm.password}
               onChange={(event) => onChange((current) => ({ ...current, password: event.target.value }))}
-              placeholder="1234"
+              placeholder="Enter password"
               className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
             />
           </div>
@@ -2566,9 +2714,6 @@ function LoginScreen({ loginForm, loginError, onChange, onSubmit }) {
             Log in
           </button>
         </form>
-        <div className="mt-4 rounded-2xl bg-stone-200/70 px-4 py-3 text-sm text-stone-700">
-          Default admin login: <span className="font-semibold">Admin</span> / <span className="font-semibold">1234</span>
-        </div>
       </div>
     </div>
   );
