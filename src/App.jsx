@@ -5,11 +5,12 @@ const PRESS_ORDER = ["5.1", "6.1", "1.1", "2.1", "8", "9", "Rewind"];
 const STORAGE_KEY = "labeltraxx-scheduler-v4";
 const SESSION_STORAGE_KEY = "labeltraxx-scheduler-session-v1";
 const SHARED_STATE_ROW_ID = "labeltraxx-shared-state";
-const BASE_TABS = ["Scheduler", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Daily Shipment"];
+const BASE_TABS = ["Scheduler", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment"];
 const ATTACHMENT_ACCEPT =
   ".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.png,.jpg,.jpeg,.zip,.msg,.eml";
 const PULL_PAPER_TARGETS = ["Press 5.1", "Press 6.1", "Press 2.1", "Press 1.1", "Digital"];
 const ROLE_OPTIONS = ["Management", "Warehouse/Shipper", "Operator"];
+const DEFAULT_SHIPMENT_METHODS = ["Skid", "FedEx", "UPS", "LTL", "Customer Pickup"];
 
 const EMPTY_REQUEST_FORM = {
   jobNumber: "",
@@ -21,6 +22,10 @@ const EMPTY_REQUEST_FORM = {
 const EMPTY_PULL_PAPER_FORM = {
   details: "",
   target: PULL_PAPER_TARGETS[0],
+};
+
+const EMPTY_SUPPLIES_FORM = {
+  details: "",
 };
 
 const EMPTY_LOGIN_FORM = {
@@ -36,7 +41,7 @@ const EMPTY_USER_FORM = {
 
 const EMPTY_SHIPMENT_FORM = {
   label: "",
-  method: "Skid",
+  method: DEFAULT_SHIPMENT_METHODS[0],
   packageCount: "",
   packageType: "Skids",
   totalCost: "",
@@ -245,6 +250,15 @@ function normalizePullPaperRequests(requests) {
   return Array.isArray(requests) ? requests : [];
 }
 
+function normalizeSuppliesRequests(requests) {
+  return Array.isArray(requests)
+    ? requests.map((request) => ({
+        ...request,
+        attachments: Array.isArray(request.attachments) ? request.attachments : [],
+      }))
+    : [];
+}
+
 function normalizeAssignments(assignments) {
   return Array.isArray(assignments)
     ? assignments.filter((assignment) => assignment.kind !== "rewind")
@@ -252,7 +266,19 @@ function normalizeAssignments(assignments) {
 }
 
 function normalizeShipmentGroups(groups) {
-  return Array.isArray(groups) ? groups : [];
+  return Array.isArray(groups)
+    ? groups.map((group) => ({
+        ...group,
+        attachments: Array.isArray(group.attachments) ? group.attachments : [],
+      }))
+    : [];
+}
+
+function normalizeShipmentMethods(methods) {
+  const next = Array.isArray(methods)
+    ? methods.map((method) => safeText(method)).filter(Boolean)
+    : [];
+  return next.length ? Array.from(new Set(next)) : [...DEFAULT_SHIPMENT_METHODS];
 }
 
 function defaultSharedSnapshot() {
@@ -261,7 +287,9 @@ function defaultSharedSnapshot() {
     assignments: [],
     requests: [],
     pullPaperRequests: [],
+    suppliesRequests: [],
     shipmentGroups: [],
+    shipmentMethods: [...DEFAULT_SHIPMENT_METHODS],
     users: [buildDefaultAdmin()],
     weekStart: startOfWeek(new Date()).toISOString(),
   };
@@ -274,7 +302,9 @@ function normalizeSharedSnapshot(snapshot) {
     assignments: normalizeAssignments(source.assignments),
     requests: normalizeRequests(source.requests),
     pullPaperRequests: normalizePullPaperRequests(source.pullPaperRequests),
+    suppliesRequests: normalizeSuppliesRequests(source.suppliesRequests),
     shipmentGroups: normalizeShipmentGroups(source.shipmentGroups),
+    shipmentMethods: normalizeShipmentMethods(source.shipmentMethods),
     users: normalizeUsers(source.users),
     weekStart: source.weekStart ? new Date(source.weekStart) : startOfWeek(new Date()),
   };
@@ -286,7 +316,9 @@ function buildSharedSnapshot(state) {
     assignments: state.assignments,
     requests: state.requests,
     pullPaperRequests: state.pullPaperRequests,
+    suppliesRequests: state.suppliesRequests,
     shipmentGroups: state.shipmentGroups,
+    shipmentMethods: state.shipmentMethods,
     users: state.users,
     weekStart: state.weekStart.toISOString(),
   };
@@ -531,7 +563,9 @@ export default function App() {
   const [assignments, setAssignments] = useState([]);
   const [requests, setRequests] = useState([]);
   const [pullPaperRequests, setPullPaperRequests] = useState([]);
+  const [suppliesRequests, setSuppliesRequests] = useState([]);
   const [shipmentGroups, setShipmentGroups] = useState([]);
+  const [shipmentMethods, setShipmentMethods] = useState([...DEFAULT_SHIPMENT_METHODS]);
   const [users, setUsers] = useState([buildDefaultAdmin()]);
   const [currentUsername, setCurrentUsername] = useState("");
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date()));
@@ -544,18 +578,24 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("Scheduler");
   const [requestForm, setRequestForm] = useState(EMPTY_REQUEST_FORM);
   const [pullPaperForm, setPullPaperForm] = useState(EMPTY_PULL_PAPER_FORM);
+  const [suppliesForm, setSuppliesForm] = useState(EMPTY_SUPPLIES_FORM);
   const [requestDraftAttachments, setRequestDraftAttachments] = useState([]);
+  const [suppliesDraftAttachments, setSuppliesDraftAttachments] = useState([]);
   const [selectedShipDate, setSelectedShipDate] = useState(todayKey());
   const [shipDateDraft, setShipDateDraft] = useState(todayKey());
   const [selectedShipmentJobs, setSelectedShipmentJobs] = useState([]);
   const [selectedShipQueueJobs, setSelectedShipQueueJobs] = useState([]);
   const [shipmentForm, setShipmentForm] = useState({ ...EMPTY_SHIPMENT_FORM, shipDate: todayKey() });
+  const [shipmentDraftAttachments, setShipmentDraftAttachments] = useState([]);
+  const [newShipmentMethod, setNewShipmentMethod] = useState("");
   const [loginForm, setLoginForm] = useState(EMPTY_LOGIN_FORM);
   const [loginError, setLoginError] = useState("");
   const [userForm, setUserForm] = useState(EMPTY_USER_FORM);
   const [userPasswordDrafts, setUserPasswordDrafts] = useState({});
   const [requestHistoryFilterDate, setRequestHistoryFilterDate] = useState("");
   const [shipmentHistoryFilterDate, setShipmentHistoryFilterDate] = useState("");
+  const [queueCategoryFilter, setQueueCategoryFilter] = useState("All");
+  const [schedulePressFilter, setSchedulePressFilter] = useState("All");
   const [syncStatus, setSyncStatus] = useState(isSupabaseConfigured ? "Connecting..." : "Local only");
   const [lastSyncAt, setLastSyncAt] = useState("");
   const jobDetailsRef = useRef(null);
@@ -571,7 +611,9 @@ export default function App() {
       setAssignments(normalized.assignments);
       setRequests(normalized.requests);
       setPullPaperRequests(normalized.pullPaperRequests);
+      setSuppliesRequests(normalized.suppliesRequests);
       setShipmentGroups(normalized.shipmentGroups);
+      setShipmentMethods(normalized.shipmentMethods);
       setUsers(normalized.users);
       setWeekStart(normalized.weekStart);
       return normalized;
@@ -655,7 +697,9 @@ export default function App() {
       assignments,
       requests,
       pullPaperRequests,
+      suppliesRequests,
       shipmentGroups,
+      shipmentMethods,
       users,
       weekStart,
     });
@@ -693,7 +737,7 @@ export default function App() {
     return () => {
       window.clearTimeout(saveTimerRef.current);
     };
-  }, [assignments, currentUsername, isReady, jobs, pullPaperRequests, requests, shipmentGroups, users, weekStart]);
+  }, [assignments, currentUsername, isReady, jobs, pullPaperRequests, requests, shipmentGroups, shipmentMethods, suppliesRequests, users, weekStart]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -755,7 +799,9 @@ export default function App() {
           setAssignments(normalized.assignments);
           setRequests(normalized.requests);
           setPullPaperRequests(normalized.pullPaperRequests);
+          setSuppliesRequests(normalized.suppliesRequests);
           setShipmentGroups(normalized.shipmentGroups);
+          setShipmentMethods(normalized.shipmentMethods);
           setUsers(normalized.users);
           setWeekStart(normalized.weekStart);
           setSyncStatus("Live sync");
@@ -786,6 +832,13 @@ export default function App() {
     setShipDateDraft(selectedShipDate);
     setSelectedShipmentJobs([]);
   }, [selectedShipDate]);
+
+  useEffect(() => {
+    if (!shipmentMethods.length) return;
+    setShipmentForm((current) =>
+      shipmentMethods.includes(current.method) ? current : { ...current, method: shipmentMethods[0] }
+    );
+  }, [shipmentMethods]);
 
   const tabs = useMemo(
     () => [...BASE_TABS, "User Admin"].filter((tab) => canAccessTab(currentUser, tab)),
@@ -856,7 +909,6 @@ export default function App() {
 
   const unscheduledJobs = useMemo(() => {
     return filteredJobs
-      .filter((job) => !activePressJobIds.has(job.id))
       .filter((job) => !userFinishedJobIds.has(job.id))
       .filter((job) => {
         if (queueStatusFilter === "All") return true;
@@ -868,6 +920,10 @@ export default function App() {
         return safeText(job.press) === queuePressFilter;
       })
       .filter((job) => {
+        if (queueCategoryFilter === "All") return true;
+        return safeText(job.priority) === queueCategoryFilter;
+      })
+      .filter((job) => {
         const haystack = `${job.number} ${job.customerName} ${job.generalDescr}`.toLowerCase();
         return !unscheduledSearch.trim() || haystack.includes(unscheduledSearch.toLowerCase());
       })
@@ -877,7 +933,7 @@ export default function App() {
         if (leftDate !== rightDate) return leftDate - rightDate;
         return right.estPressTime - left.estPressTime;
       });
-  }, [activePressJobIds, filteredJobs, queuePressFilter, queueStatusFilter, unscheduledSearch, userFinishedJobIds]);
+  }, [filteredJobs, queueCategoryFilter, queuePressFilter, queueStatusFilter, unscheduledSearch, userFinishedJobIds]);
 
   const allUserFinishedJobs = useMemo(() => {
     return jobs
@@ -953,6 +1009,22 @@ export default function App() {
     [pullPaperRequests]
   );
 
+  const openSuppliesRequests = useMemo(
+    () =>
+      suppliesRequests
+        .filter((request) => request.status === "open")
+        .sort((left, right) => dateSortValue(right.createdAt) - dateSortValue(left.createdAt)),
+    [suppliesRequests]
+  );
+
+  const completedSuppliesRequests = useMemo(
+    () =>
+      suppliesRequests
+        .filter((request) => request.status === "done")
+        .sort((left, right) => dateSortValue(right.completedAt) - dateSortValue(left.completedAt)),
+    [suppliesRequests]
+  );
+
   const assignedShipmentJobIds = useMemo(() => {
     const ids = new Set();
     shipmentGroups.forEach((group) => {
@@ -1008,6 +1080,16 @@ export default function App() {
   const queuePressOptions = useMemo(
     () => ["All", ...Array.from(new Set(jobs.map((job) => safeText(job.press)).filter(Boolean))).sort()],
     [jobs]
+  );
+
+  const queueCategoryOptions = useMemo(
+    () => ["All", ...Array.from(new Set(jobs.map((job) => safeText(job.priority)).filter(Boolean))).sort()],
+    [jobs]
+  );
+
+  const visiblePresses = useMemo(
+    () => (schedulePressFilter === "All" ? PRESS_ORDER : PRESS_ORDER.filter((press) => press === schedulePressFilter)),
+    [schedulePressFilter]
   );
 
   const summary = useMemo(() => {
@@ -1353,6 +1435,32 @@ export default function App() {
     setRequestDraftAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
   }
 
+  async function handleSuppliesDraftAttachmentChange(event) {
+    if (!currentUser) return;
+    const nextAttachments = await buildAttachments(event.target.files, currentUser.username);
+    if (nextAttachments.length) {
+      setSuppliesDraftAttachments((current) => [...current, ...nextAttachments]);
+    }
+    event.target.value = "";
+  }
+
+  function removeSuppliesDraftAttachment(attachmentId) {
+    setSuppliesDraftAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
+  }
+
+  async function handleShipmentDraftAttachmentChange(event) {
+    if (!currentUser) return;
+    const nextAttachments = await buildAttachments(event.target.files, currentUser.username);
+    if (nextAttachments.length) {
+      setShipmentDraftAttachments((current) => [...current, ...nextAttachments]);
+    }
+    event.target.value = "";
+  }
+
+  function removeShipmentDraftAttachment(attachmentId) {
+    setShipmentDraftAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
+  }
+
   function submitRequest(event) {
     event.preventDefault();
     if (!currentUser) return;
@@ -1399,6 +1507,28 @@ export default function App() {
     setPullPaperForm(EMPTY_PULL_PAPER_FORM);
   }
 
+  function submitSuppliesRequest(event) {
+    event.preventDefault();
+    if (!currentUser) return;
+    if (!suppliesForm.details.trim()) return;
+
+    setSuppliesRequests((current) => [
+      {
+        id: makeId("supply"),
+        details: suppliesForm.details.trim(),
+        status: "open",
+        attachments: suppliesDraftAttachments,
+        createdAt: new Date().toISOString(),
+        createdBy: currentUser.username,
+        completedAt: null,
+        completedBy: "",
+      },
+      ...current,
+    ]);
+    setSuppliesForm(EMPTY_SUPPLIES_FORM);
+    setSuppliesDraftAttachments([]);
+  }
+
   function markPullPaperRequestDone(requestId) {
     if (!currentUser) return;
     const completedAt = new Date().toISOString();
@@ -1418,6 +1548,56 @@ export default function App() {
 
   function deletePullPaperRequest(requestId) {
     setPullPaperRequests((current) => current.filter((request) => request.id !== requestId));
+  }
+
+  function markSuppliesRequestDone(requestId) {
+    if (!currentUser) return;
+    const completedAt = new Date().toISOString();
+    setSuppliesRequests((current) =>
+      current.map((request) =>
+        request.id === requestId
+          ? {
+              ...request,
+              status: "done",
+              completedAt,
+              completedBy: currentUser.username,
+            }
+          : request
+      )
+    );
+  }
+
+  function deleteSuppliesRequest(requestId) {
+    setSuppliesRequests((current) => current.filter((request) => request.id !== requestId));
+  }
+
+  async function addSuppliesRequestAttachments(requestId, fileList) {
+    if (!currentUser) return;
+    const attachments = await buildAttachments(fileList, currentUser.username);
+    if (!attachments.length) return;
+    setSuppliesRequests((current) =>
+      current.map((request) =>
+        request.id === requestId
+          ? {
+              ...request,
+              attachments: [...(request.attachments || []), ...attachments],
+            }
+          : request
+      )
+    );
+  }
+
+  function removeSuppliesRequestAttachment(requestId, attachmentId) {
+    setSuppliesRequests((current) =>
+      current.map((request) =>
+        request.id === requestId
+          ? {
+              ...request,
+              attachments: (request.attachments || []).filter((attachment) => attachment.id !== attachmentId),
+            }
+          : request
+      )
+    );
   }
 
   function markRequestDone(requestId) {
@@ -1500,6 +1680,29 @@ export default function App() {
     setSelectedShipQueueJobs([]);
   }
 
+  function addShipmentMethod() {
+    const method = safeText(newShipmentMethod);
+    if (!method) return;
+    setShipmentMethods((current) => {
+      if (current.some((item) => comparableUsername(item) === comparableUsername(method))) return current;
+      return [...current, method];
+    });
+    setShipmentForm((current) => ({ ...current, method }));
+    setNewShipmentMethod("");
+  }
+
+  function removeShipmentMethod(methodToRemove) {
+    setShipmentMethods((current) => {
+      const next = current.filter((method) => method !== methodToRemove);
+      return next.length ? next : current;
+    });
+    setShipmentForm((current) => {
+      if (current.method !== methodToRemove) return current;
+      const fallback = shipmentMethods.find((method) => method !== methodToRemove) || current.method;
+      return { ...current, method: fallback };
+    });
+  }
+
   function createShipmentGroup(event) {
     event.preventDefault();
     if (!selectedShipmentJobs.length) return;
@@ -1523,6 +1726,7 @@ export default function App() {
         shipDate: shipmentForm.shipDate,
         createdAt: new Date().toISOString(),
         createdBy: currentUser?.username || "",
+        attachments: shipmentDraftAttachments,
         jobItems,
       },
       ...current,
@@ -1530,10 +1734,55 @@ export default function App() {
 
     setSelectedShipmentJobs([]);
     setShipmentForm({ ...EMPTY_SHIPMENT_FORM, shipDate: selectedShipDate });
+    setShipmentDraftAttachments([]);
   }
 
   function deleteShipmentGroup(groupId) {
     setShipmentGroups((current) => current.filter((group) => group.id !== groupId));
+  }
+
+  async function addShipmentGroupAttachments(groupId, fileList) {
+    if (!currentUser) return;
+    const attachments = await buildAttachments(fileList, currentUser.username);
+    if (!attachments.length) return;
+    setShipmentGroups((current) =>
+      current.map((group) =>
+        group.id === groupId
+          ? {
+              ...group,
+              attachments: [...(group.attachments || []), ...attachments],
+            }
+          : group
+      )
+    );
+  }
+
+  function removeShipmentGroupAttachment(groupId, attachmentId) {
+    setShipmentGroups((current) =>
+      current.map((group) =>
+        group.id === groupId
+          ? {
+              ...group,
+              attachments: (group.attachments || []).filter((attachment) => attachment.id !== attachmentId),
+            }
+          : group
+      )
+    );
+  }
+
+  function updateJobRecommendedPress(jobId, press) {
+    const nextPress = normalizePressValue(press);
+    if (!PRESS_ORDER.includes(nextPress)) return;
+    setJobs((current) =>
+      current.map((job) =>
+        job.id === jobId
+          ? {
+              ...job,
+              press: nextPress,
+            }
+          : job
+      )
+    );
   }
 
   function loadDemo() {
@@ -1637,6 +1886,7 @@ export default function App() {
   const tabBadges = {
     "Open Requests": openRequests.length,
     "Pull Paper Request": openPullPaperRequests.length,
+    "Supplies Request": openSuppliesRequests.length,
   };
 
   return (
@@ -1765,7 +2015,7 @@ export default function App() {
                 <div className="mb-3 flex items-center justify-between">
                   <div>
                     <div className="text-sm font-semibold">Press queue</div>
-                    <div className="text-xs text-stone-600">Search by ticket, then filter the queue by imported status or press number.</div>
+                    <div className="text-xs text-stone-600">Search by ticket, then filter the queue by status, press, or category. Jobs stay here even after they are scheduled so you can place them on multiple days.</div>
                   </div>
                   <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{unscheduledJobs.length}</div>
                 </div>
@@ -1778,7 +2028,7 @@ export default function App() {
                   className="mb-3 w-full rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
                 />
 
-                <div className="mb-3 grid grid-cols-2 gap-2">
+                <div className="mb-3 grid gap-2 md:grid-cols-3">
                   <select
                     value={queueStatusFilter}
                     onChange={(event) => setQueueStatusFilter(event.target.value)}
@@ -1797,6 +2047,15 @@ export default function App() {
                       <option key={press}>{press}</option>
                     ))}
                   </select>
+                  <select
+                    value={queueCategoryFilter}
+                    onChange={(event) => setQueueCategoryFilter(event.target.value)}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                  >
+                    {queueCategoryOptions.map((category) => (
+                      <option key={category}>{category}</option>
+                    ))}
+                  </select>
                 </div>
 
                 <div className="max-h-[480px] space-y-3 overflow-y-auto pr-1">
@@ -1810,6 +2069,8 @@ export default function App() {
                       onFinish={() => finishJob(job.id)}
                       weekColumns={weekColumns}
                       canMove={userCanMoveJobs}
+                      pressOptions={PRESS_ORDER}
+                      onUpdatePress={userCanMoveJobs ? (press) => updateJobRecommendedPress(job.id, press) : undefined}
                       onQuickAssign={(dayKey) => addAssignment(job.id, dayKey, PRESS_ORDER.includes(job.press) ? job.press : "Rewind")}
                     />
                   ))}
@@ -1840,6 +2101,18 @@ export default function App() {
                   <button onClick={() => setWeekStart(addDays(weekStart, 7))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
                     Next
                   </button>
+                  <select
+                    value={schedulePressFilter}
+                    onChange={(event) => setSchedulePressFilter(event.target.value)}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                  >
+                    <option value="All">All presses</option>
+                    {PRESS_ORDER.map((press) => (
+                      <option key={press} value={press}>
+                        Press {press}
+                      </option>
+                    ))}
+                  </select>
                   <input
                     type="text"
                     value={search}
@@ -1857,7 +2130,7 @@ export default function App() {
                       <div className="mt-1 text-lg font-semibold">{formatShortDate(day.date)}</div>
                     </div>
                     <div className="space-y-3">
-                      {PRESS_ORDER.map((press) => {
+                      {visiblePresses.map((press) => {
                         const laneJobs = board[day.key]?.[press] || [];
                         const totalHours = laneJobs.reduce((sum, item) => sum + item.job.estPressTime, 0);
                         return (
@@ -2250,6 +2523,109 @@ export default function App() {
           </div>
         )}
 
+        {activeTab === "Supplies Request" && (
+          <div className="grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+              <div className="mb-5">
+                <div className="text-sm font-semibold">Supplies request</div>
+                <div className="text-xs text-stone-600">Create a supplies request, attach supporting files if needed, and keep the open count visible in the tab.</div>
+              </div>
+              <form onSubmit={submitSuppliesRequest} className="grid gap-4">
+                <div>
+                  <div className="mb-2 text-sm font-medium text-stone-800">Supplies note</div>
+                  <textarea
+                    value={suppliesForm.details}
+                    onChange={(event) => setSuppliesForm((current) => ({ ...current, details: event.target.value }))}
+                    placeholder="Boxes, labels, cores, bags, tape, or any other supply request details"
+                    className="h-40 w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                  />
+                </div>
+                <div>
+                  <div className="mb-2 text-sm font-medium text-stone-800">Documents</div>
+                  <label className="block rounded-2xl border border-dashed border-stone-300 bg-white p-4 text-sm text-stone-700 hover:border-emerald-800">
+                    <div className="font-medium text-stone-900">Upload PDF, PNG, JPG, JPEG, or other supply request files</div>
+                    <input
+                      type="file"
+                      accept={ATTACHMENT_ACCEPT}
+                      multiple
+                      onChange={handleSuppliesDraftAttachmentChange}
+                      className="mt-3 block w-full text-xs"
+                    />
+                  </label>
+                </div>
+                <AttachmentList attachments={suppliesDraftAttachments} onRemove={removeSuppliesDraftAttachment} />
+                <div className="rounded-2xl bg-stone-200/70 px-4 py-3 text-sm text-stone-800">
+                  Requesting as <span className="font-semibold">{currentUser.username}</span>
+                </div>
+                <div className="flex gap-2">
+                  <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
+                    Save supplies request
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSuppliesForm(EMPTY_SUPPLIES_FORM);
+                      setSuppliesDraftAttachments([]);
+                    }}
+                    className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
+                  >
+                    Reset
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            <div className="space-y-4">
+              <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+                <div className="mb-4 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold">Open supplies requests</div>
+                    <div className="text-xs text-stone-600">Mark done when the supplies request is complete, or delete it if it is no longer needed.</div>
+                  </div>
+                  <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{openSuppliesRequests.length}</div>
+                </div>
+                <div className="space-y-3">
+                  {openSuppliesRequests.map((request) => (
+                    <SuppliesRequestCard
+                      key={request.id}
+                      request={request}
+                      onDone={() => markSuppliesRequestDone(request.id)}
+                      onDelete={() => deleteSuppliesRequest(request.id)}
+                      onAddAttachments={(files) => addSuppliesRequestAttachments(request.id, files)}
+                      onRemoveAttachment={(attachmentId) => removeSuppliesRequestAttachment(request.id, attachmentId)}
+                    />
+                  ))}
+                  {!openSuppliesRequests.length && (
+                    <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-5 text-sm text-stone-600">
+                      No open supplies requests right now.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+                <div className="mb-4 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold">Completed supplies requests</div>
+                    <div className="text-xs text-stone-600">Recent completed supplies requests stay here so you can see who closed them out.</div>
+                  </div>
+                  <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{completedSuppliesRequests.length}</div>
+                </div>
+                <div className="space-y-3">
+                  {completedSuppliesRequests.slice(0, 12).map((request) => (
+                    <SuppliesRequestCard key={request.id} request={request} readOnly />
+                  ))}
+                  {!completedSuppliesRequests.length && (
+                    <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-5 text-sm text-stone-600">
+                      No completed supplies requests yet.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {activeTab === "Daily Shipment" && (
           <div className="space-y-4">
             <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
@@ -2407,7 +2783,40 @@ export default function App() {
                 <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
                   <div className="mb-4">
                     <div className="text-sm font-semibold">Create shipment group</div>
-                    <div className="text-xs text-stone-600">Example: one skid with 3 jobs for $141.17, or separate FedEx transactions.</div>
+                    <div className="text-xs text-stone-600">Example: one skid with 3 jobs for $141.17, separate FedEx transactions, or a custom method like JP Express.</div>
+                  </div>
+                  <div className="mb-4 rounded-2xl border border-stone-300 bg-white p-4">
+                    <div className="mb-3 text-sm font-semibold">Shipping methods</div>
+                    <div className="mb-3 flex gap-2">
+                      <input
+                        type="text"
+                        value={newShipmentMethod}
+                        onChange={(event) => setNewShipmentMethod(event.target.value)}
+                        placeholder="Add a method like JP Express"
+                        className="flex-1 rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                      />
+                      <button
+                        type="button"
+                        onClick={addShipmentMethod}
+                        className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white"
+                      >
+                        Add
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {shipmentMethods.map((method) => (
+                        <div key={method} className="flex items-center gap-2 rounded-full border border-stone-300 bg-stone-100 px-3 py-2 text-xs text-stone-800">
+                          <span>{method}</span>
+                          <button
+                            type="button"
+                            onClick={() => removeShipmentMethod(method)}
+                            className="text-rose-700"
+                          >
+                            remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                   <form onSubmit={createShipmentGroup} className="grid gap-3">
                     <Field
@@ -2423,11 +2832,11 @@ export default function App() {
                         onChange={(event) => setShipmentForm((current) => ({ ...current, method: event.target.value }))}
                         className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
                       >
-                        <option>Skid</option>
-                        <option>FedEx</option>
-                        <option>UPS</option>
-                        <option>LTL</option>
-                        <option>Customer Pickup</option>
+                        {shipmentMethods.map((method) => (
+                          <option key={method} value={method}>
+                            {method}
+                          </option>
+                        ))}
                       </select>
                     </div>
                     <div className="grid grid-cols-[minmax(0,1fr)_160px] gap-3">
@@ -2466,6 +2875,20 @@ export default function App() {
                         className="h-24 w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
                       />
                     </div>
+                    <div>
+                      <div className="mb-2 text-sm font-medium text-stone-800">Documents</div>
+                      <label className="block rounded-2xl border border-dashed border-stone-300 bg-white p-4 text-sm text-stone-700 hover:border-emerald-800">
+                        <div className="font-medium text-stone-900">Upload PDF, PNG, JPG, JPEG, or other shipment files</div>
+                        <input
+                          type="file"
+                          accept={ATTACHMENT_ACCEPT}
+                          multiple
+                          onChange={handleShipmentDraftAttachmentChange}
+                          className="mt-3 block w-full text-xs"
+                        />
+                      </label>
+                    </div>
+                    <AttachmentList attachments={shipmentDraftAttachments} onRemove={removeShipmentDraftAttachment} />
                     <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
                       Create shipment group
                     </button>
@@ -2549,6 +2972,27 @@ export default function App() {
                             </div>
                           )}
                           {group.notes && <div className="mt-2 text-sm text-stone-800">{group.notes}</div>}
+                          <div className="mt-3">
+                            <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Documents</div>
+                            <AttachmentList
+                              attachments={group.attachments || []}
+                              onRemove={(attachmentId) => removeShipmentGroupAttachment(group.id, attachmentId)}
+                            />
+                          </div>
+                          <label className="mt-3 block rounded-2xl border border-dashed border-stone-300 bg-stone-50 p-4 text-sm text-stone-700 hover:border-emerald-800">
+                            <div className="font-medium text-stone-900">Add more shipment files</div>
+                            <input
+                              type="file"
+                              accept={ATTACHMENT_ACCEPT}
+                              multiple
+                              onChange={(event) => {
+                                const files = event.target.files;
+                                if (files?.length) addShipmentGroupAttachments(group.id, files);
+                                event.target.value = "";
+                              }}
+                              className="mt-3 block w-full text-xs"
+                            />
+                          </label>
                         </div>
                         <button
                           onClick={() => deleteShipmentGroup(group.id)}
@@ -2873,12 +3317,14 @@ function JobCard({
   onDoubleClick,
   onQuickAssign,
   onFinish,
+  onUpdatePress,
+  pressOptions = [],
   weekColumns,
   finishedAt,
   finishedBy,
   canMove = true,
 }) {
-  const isDraggable = state === "open" && canMove;
+  const isDraggable = state !== "finished" && canMove;
 
   return (
     <div
@@ -2930,6 +3376,27 @@ function JobCard({
         <InfoPill label="Ship" value={formatDate(job.shipByDate)} />
       </div>
 
+      {onUpdatePress && pressOptions.length > 0 && (
+        <div className="mt-2">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-600">Recommended press</div>
+          <select
+            value={PRESS_ORDER.includes(job.press) ? job.press : ""}
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) => {
+              event.stopPropagation();
+              onUpdatePress(event.target.value);
+            }}
+            className="w-full rounded-xl border border-stone-300 bg-stone-50 px-3 py-2 text-xs outline-none focus:border-emerald-800"
+          >
+            {pressOptions.map((press) => (
+              <option key={press} value={press}>
+                Press {press}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone(state)}`}>{state}</span>
         {job.ticketStatus && (
@@ -2942,7 +3409,7 @@ function JobCard({
       {finishedAt && <div className="mt-2 text-xs text-stone-600">Finished {formatDateTime(finishedAt)}</div>}
       {finishedBy && <div className="mt-1 text-xs text-stone-600">Finished by {finishedBy}</div>}
 
-      {state === "open" && ((weekColumns && canMove) || onFinish) && (
+      {state !== "finished" && ((weekColumns && canMove) || onFinish) && (
         <div className="mt-3 flex flex-wrap gap-2">
           {weekColumns && canMove &&
             weekColumns.map((day) => (
@@ -3004,6 +3471,73 @@ function PaperPullCard({ request, onDone, onDelete, readOnly = false }) {
               Delete
             </button>
           </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SuppliesRequestCard({
+  request,
+  onDone,
+  onDelete,
+  onAddAttachments,
+  onRemoveAttachment,
+  readOnly = false,
+}) {
+  return (
+    <div className="rounded-2xl border border-stone-300 bg-white p-4">
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="text-sm font-semibold">Supplies request</div>
+              <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone(request.status)}`}>
+                {request.status}
+              </span>
+            </div>
+            <div className="mt-1 text-xs text-stone-600">
+              Requested by {request.createdBy || "-"} on {formatDateTime(request.createdAt)}
+            </div>
+            {request.completedAt && (
+              <div className="mt-1 text-xs text-stone-600">
+                Completed by {request.completedBy || "-"} on {formatDateTime(request.completedAt)}
+              </div>
+            )}
+            <div className="mt-3 whitespace-pre-wrap text-sm text-stone-800">{request.details}</div>
+          </div>
+          {!readOnly && (
+            <div className="flex gap-2">
+              <button onClick={onDone} className="rounded-2xl bg-emerald-900 px-3 py-2 text-sm font-medium text-white">
+                Done
+              </button>
+              <button onClick={onDelete} className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700">
+                Delete
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div>
+          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Documents</div>
+          <AttachmentList attachments={request.attachments || []} onRemove={readOnly ? null : onRemoveAttachment} />
+        </div>
+
+        {!readOnly && onAddAttachments && (
+          <label className="block rounded-2xl border border-dashed border-stone-300 bg-stone-50 p-4 text-sm text-stone-700 hover:border-emerald-800">
+            <div className="font-medium text-stone-900">Add more files to this supplies request</div>
+            <input
+              type="file"
+              accept={ATTACHMENT_ACCEPT}
+              multiple
+              onChange={(event) => {
+                const files = event.target.files;
+                if (files?.length) onAddAttachments(files);
+                event.target.value = "";
+              }}
+              className="mt-3 block w-full text-xs"
+            />
+          </label>
         )}
       </div>
     </div>
