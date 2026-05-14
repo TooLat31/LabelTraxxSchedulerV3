@@ -5,7 +5,9 @@ const PRESS_ORDER = ["5.1", "6.1", "1.1", "2.1", "8", "9", "Rewind"];
 const STORAGE_KEY = "labeltraxx-scheduler-v4";
 const SESSION_STORAGE_KEY = "labeltraxx-scheduler-session-v1";
 const SHARED_STATE_ROW_ID = "labeltraxx-shared-state";
-const BASE_TABS = ["Scheduler", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment"];
+const LOGIN_SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
+const BASE_TABS = ["Scheduler", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails"];
+const ACCESS_MODE_OPTIONS = ["edit", "view"];
 const ATTACHMENT_ACCEPT =
   ".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.png,.jpg,.jpeg,.zip,.msg,.eml";
 const PULL_PAPER_TARGETS = ["Press 5.1", "Press 6.1", "Press 2.1", "Press 1.1", "Digital"];
@@ -28,7 +30,16 @@ const EMPTY_SUPPLIES_FORM = {
   details: "",
 };
 
+const EMPTY_NOTE_FORM = {
+  text: "",
+};
+
 const EMPTY_LOGIN_FORM = {
+  username: "",
+  password: "",
+};
+
+const EMPTY_REGISTER_FORM = {
   username: "",
   password: "",
 };
@@ -36,7 +47,9 @@ const EMPTY_LOGIN_FORM = {
 const EMPTY_USER_FORM = {
   username: "",
   password: "",
-  role: ROLE_OPTIONS[0],
+  accessMode: "edit",
+  canManageUsers: false,
+  tabs: BASE_TABS.filter((tab) => !["New Request", "Open Requests"].includes(tab)),
 };
 
 const EMPTY_SHIPMENT_FORM = {
@@ -45,7 +58,12 @@ const EMPTY_SHIPMENT_FORM = {
   packageCount: "",
   packageType: "Skids",
   totalCost: "",
+  billAmount: "",
   notes: "",
+};
+
+const EMPTY_EMAIL_FORM = {
+  recipients: "",
 };
 
 function safeText(value) {
@@ -161,6 +179,34 @@ function comparableUsername(value) {
   return safeText(value).toLowerCase();
 }
 
+function getDefaultTabsForRole(role, isAdmin = false) {
+  const normalizedRole = normalizeRole(role, isAdmin);
+  if (normalizedRole === "Management") return [...BASE_TABS, "User Admin"];
+  if (normalizedRole === "Warehouse/Shipper") {
+    return BASE_TABS.filter((tab) => !["New Request", "Open Requests"].includes(tab));
+  }
+  if (normalizedRole === "Operator") return ["Scheduler"];
+  return ["Scheduler"];
+}
+
+function normalizeAccessMode(mode, role, isAdmin = false) {
+  const normalized = safeText(mode).toLowerCase();
+  if (ACCESS_MODE_OPTIONS.includes(normalized)) return normalized;
+  return normalizeRole(role, isAdmin) === "Operator" ? "view" : "edit";
+}
+
+function normalizeUserTabs(tabs, role, isAdmin = false, canManageUsers = false) {
+  const next = Array.isArray(tabs)
+    ? tabs
+        .map((tab) => safeText(tab))
+        .filter((tab) => BASE_TABS.includes(tab) || (canManageUsers && tab === "User Admin"))
+    : [];
+  const fallback = next.length ? Array.from(new Set(next)) : getDefaultTabsForRole(role, isAdmin);
+  const filtered = canManageUsers ? fallback : fallback.filter((tab) => tab !== "User Admin");
+  if (canManageUsers && !filtered.includes("User Admin")) filtered.push("User Admin");
+  return filtered;
+}
+
 function normalizeRole(role, isAdmin) {
   const normalized = safeText(role);
   if (ROLE_OPTIONS.includes(normalized)) return normalized;
@@ -168,27 +214,33 @@ function normalizeRole(role, isAdmin) {
 }
 
 function getUserRole(user) {
+  if (user?.canManageUsers) return "Management";
   return normalizeRole(user?.role, user?.isAdmin);
 }
 
 function hasManagementAccess(user) {
-  return getUserRole(user) === "Management";
+  return !!user?.canManageUsers || getUserRole(user) === "Management";
+}
+
+function getUserAccessMode(user) {
+  return normalizeAccessMode(user?.accessMode, user?.role, user?.canManageUsers || user?.isAdmin);
+}
+
+function canEdit(user) {
+  return getUserAccessMode(user) === "edit";
+}
+
+function getVisibleTabs(user) {
+  if (!user) return ["Scheduler"];
+  return normalizeUserTabs(user.tabs, user.role, user.isAdmin, user.canManageUsers);
 }
 
 function canMoveJobs(user) {
-  return getUserRole(user) !== "Operator";
+  return canEdit(user) && canAccessTab(user, "Scheduler");
 }
 
 function canAccessTab(user, tab) {
-  const role = getUserRole(user);
-  if (role === "Management") return true;
-  if (role === "Warehouse/Shipper") {
-    return !["New Request", "Open Requests", "User Admin"].includes(tab);
-  }
-  if (role === "Operator") {
-    return tab === "Scheduler";
-  }
-  return tab === "Scheduler";
+  return getVisibleTabs(user).includes(tab);
 }
 
 function buildDefaultAdmin() {
@@ -197,6 +249,9 @@ function buildDefaultAdmin() {
     username: "Admin",
     password: "1234",
     role: "Management",
+    accessMode: "edit",
+    tabs: [...BASE_TABS, "User Admin"],
+    canManageUsers: true,
     isAdmin: true,
     createdAt: new Date().toISOString(),
     createdBy: "system",
@@ -210,8 +265,16 @@ function normalizeUsers(users) {
           id: user.id || `user-${index + 1}`,
           username: safeText(user.username),
           password: safeText(user.password),
-          role: normalizeRole(user.role, user.isAdmin),
-          isAdmin: hasManagementAccess(user),
+          role: normalizeRole(user.role, user.isAdmin || user.canManageUsers),
+          accessMode: normalizeAccessMode(user.accessMode, user.role, user.isAdmin || user.canManageUsers),
+          canManageUsers: !!user.canManageUsers || normalizeRole(user.role, user.isAdmin) === "Management",
+          tabs: normalizeUserTabs(
+            user.tabs,
+            user.role,
+            user.isAdmin || user.canManageUsers,
+            !!user.canManageUsers || normalizeRole(user.role, user.isAdmin) === "Management"
+          ),
+          isAdmin: !!user.canManageUsers || normalizeRole(user.role, user.isAdmin) === "Management",
           createdAt: user.createdAt || new Date().toISOString(),
           createdBy: user.createdBy || "system",
         }))
@@ -250,6 +313,40 @@ function normalizePullPaperRequests(requests) {
   return Array.isArray(requests) ? requests : [];
 }
 
+function normalizeNotes(notes) {
+  return Array.isArray(notes)
+    ? notes
+        .map((note, index) => ({
+          id: note.id || `note-${index + 1}`,
+          ownerUsername: safeText(note.ownerUsername || note.username),
+          text: safeText(note.text),
+          completed: !!note.completed,
+          createdAt: note.createdAt || new Date().toISOString(),
+          completedAt: note.completedAt || "",
+        }))
+        .filter((note) => note.ownerUsername && note.text)
+    : [];
+}
+
+function normalizeRegistrationRequests(requests) {
+  return Array.isArray(requests)
+    ? requests
+        .map((request, index) => ({
+          id: request.id || `registration-${index + 1}`,
+          username: safeText(request.username),
+          password: safeText(request.password),
+          status: safeText(request.status) || "pending",
+          createdAt: request.createdAt || new Date().toISOString(),
+          createdBy: request.createdBy || safeText(request.username),
+          approvedAt: request.approvedAt || "",
+          approvedBy: request.approvedBy || "",
+          deniedAt: request.deniedAt || "",
+          deniedBy: request.deniedBy || "",
+        }))
+        .filter((request) => request.username && request.password)
+    : [];
+}
+
 function normalizeSuppliesRequests(requests) {
   return Array.isArray(requests)
     ? requests.map((request) => ({
@@ -270,6 +367,7 @@ function normalizeShipmentGroups(groups) {
     ? groups.map((group) => ({
         ...group,
         attachments: Array.isArray(group.attachments) ? group.attachments : [],
+        billAmount: parseCurrency(group.billAmount),
       }))
     : [];
 }
@@ -281,14 +379,37 @@ function normalizeShipmentMethods(methods) {
   return next.length ? Array.from(new Set(next)) : [...DEFAULT_SHIPMENT_METHODS];
 }
 
+function normalizeShipmentEmailLogs(logs) {
+  return Array.isArray(logs)
+    ? logs
+        .map((log, index) => ({
+          id: log.id || `email-${index + 1}`,
+          shipDate: safeText(log.shipDate),
+          recipients: safeText(log.recipients),
+          subject: safeText(log.subject),
+          body: safeText(log.body),
+          jobCount: parseNumber(log.jobCount),
+          totalCost: parseCurrency(log.totalCost),
+          totalBill: parseCurrency(log.totalBill),
+          methods: Array.isArray(log.methods) ? log.methods.map((method) => safeText(method)).filter(Boolean) : [],
+          createdAt: log.createdAt || new Date().toISOString(),
+          createdBy: safeText(log.createdBy),
+        }))
+        .filter((log) => log.shipDate)
+    : [];
+}
+
 function defaultSharedSnapshot() {
   return {
     jobs: [],
     assignments: [],
     requests: [],
     pullPaperRequests: [],
+    notes: [],
+    registrationRequests: [],
     suppliesRequests: [],
     shipmentGroups: [],
+    shipmentEmailLogs: [],
     shipmentMethods: [...DEFAULT_SHIPMENT_METHODS],
     users: [buildDefaultAdmin()],
     weekStart: startOfWeek(new Date()).toISOString(),
@@ -302,8 +423,11 @@ function normalizeSharedSnapshot(snapshot) {
     assignments: normalizeAssignments(source.assignments),
     requests: normalizeRequests(source.requests),
     pullPaperRequests: normalizePullPaperRequests(source.pullPaperRequests),
+    notes: normalizeNotes(source.notes),
+    registrationRequests: normalizeRegistrationRequests(source.registrationRequests),
     suppliesRequests: normalizeSuppliesRequests(source.suppliesRequests),
     shipmentGroups: normalizeShipmentGroups(source.shipmentGroups),
+    shipmentEmailLogs: normalizeShipmentEmailLogs(source.shipmentEmailLogs),
     shipmentMethods: normalizeShipmentMethods(source.shipmentMethods),
     users: normalizeUsers(source.users),
     weekStart: source.weekStart ? new Date(source.weekStart) : startOfWeek(new Date()),
@@ -316,8 +440,11 @@ function buildSharedSnapshot(state) {
     assignments: state.assignments,
     requests: state.requests,
     pullPaperRequests: state.pullPaperRequests,
+    notes: state.notes,
+    registrationRequests: state.registrationRequests,
     suppliesRequests: state.suppliesRequests,
     shipmentGroups: state.shipmentGroups,
+    shipmentEmailLogs: state.shipmentEmailLogs,
     shipmentMethods: state.shipmentMethods,
     users: state.users,
     weekStart: state.weekStart.toISOString(),
@@ -563,8 +690,11 @@ export default function App() {
   const [assignments, setAssignments] = useState([]);
   const [requests, setRequests] = useState([]);
   const [pullPaperRequests, setPullPaperRequests] = useState([]);
+  const [notes, setNotes] = useState([]);
+  const [registrationRequests, setRegistrationRequests] = useState([]);
   const [suppliesRequests, setSuppliesRequests] = useState([]);
   const [shipmentGroups, setShipmentGroups] = useState([]);
+  const [shipmentEmailLogs, setShipmentEmailLogs] = useState([]);
   const [shipmentMethods, setShipmentMethods] = useState([...DEFAULT_SHIPMENT_METHODS]);
   const [users, setUsers] = useState([buildDefaultAdmin()]);
   const [currentUsername, setCurrentUsername] = useState("");
@@ -579,6 +709,7 @@ export default function App() {
   const [requestForm, setRequestForm] = useState(EMPTY_REQUEST_FORM);
   const [pullPaperForm, setPullPaperForm] = useState(EMPTY_PULL_PAPER_FORM);
   const [suppliesForm, setSuppliesForm] = useState(EMPTY_SUPPLIES_FORM);
+  const [noteForm, setNoteForm] = useState(EMPTY_NOTE_FORM);
   const [requestDraftAttachments, setRequestDraftAttachments] = useState([]);
   const [suppliesDraftAttachments, setSuppliesDraftAttachments] = useState([]);
   const [selectedShipDate, setSelectedShipDate] = useState(todayKey());
@@ -588,14 +719,22 @@ export default function App() {
   const [shipmentForm, setShipmentForm] = useState({ ...EMPTY_SHIPMENT_FORM, shipDate: todayKey() });
   const [shipmentDraftAttachments, setShipmentDraftAttachments] = useState([]);
   const [newShipmentMethod, setNewShipmentMethod] = useState("");
+  const [shipmentEmailForm, setShipmentEmailForm] = useState(EMPTY_EMAIL_FORM);
   const [loginForm, setLoginForm] = useState(EMPTY_LOGIN_FORM);
   const [loginError, setLoginError] = useState("");
+  const [authView, setAuthView] = useState("login");
+  const [registerForm, setRegisterForm] = useState(EMPTY_REGISTER_FORM);
+  const [registerError, setRegisterError] = useState("");
+  const [registerSuccess, setRegisterSuccess] = useState("");
+  const [sessionExpiresAt, setSessionExpiresAt] = useState("");
   const [userForm, setUserForm] = useState(EMPTY_USER_FORM);
   const [userPasswordDrafts, setUserPasswordDrafts] = useState({});
   const [requestHistoryFilterDate, setRequestHistoryFilterDate] = useState("");
   const [shipmentHistoryFilterDate, setShipmentHistoryFilterDate] = useState("");
+  const [shipmentEmailHistoryFilterDate, setShipmentEmailHistoryFilterDate] = useState("");
   const [queueCategoryFilter, setQueueCategoryFilter] = useState("All");
   const [schedulePressFilter, setSchedulePressFilter] = useState("All");
+  const [locationSearch, setLocationSearch] = useState("");
   const [syncStatus, setSyncStatus] = useState(isSupabaseConfigured ? "Connecting..." : "Local only");
   const [lastSyncAt, setLastSyncAt] = useState("");
   const jobDetailsRef = useRef(null);
@@ -611,8 +750,11 @@ export default function App() {
       setAssignments(normalized.assignments);
       setRequests(normalized.requests);
       setPullPaperRequests(normalized.pullPaperRequests);
+      setNotes(normalized.notes);
+      setRegistrationRequests(normalized.registrationRequests);
       setSuppliesRequests(normalized.suppliesRequests);
       setShipmentGroups(normalized.shipmentGroups);
+      setShipmentEmailLogs(normalized.shipmentEmailLogs);
       setShipmentMethods(normalized.shipmentMethods);
       setUsers(normalized.users);
       setWeekStart(normalized.weekStart);
@@ -665,11 +807,25 @@ export default function App() {
         const digest = JSON.stringify(buildSharedSnapshot(normalized));
         lastSharedSnapshotRef.current = digest;
         const sessionUsername = safeText(session.currentUsername);
-        if (sessionUsername) {
+        const storedExpiresAt = safeText(session.expiresAt);
+        const expiresAtValue = storedExpiresAt ? new Date(storedExpiresAt).getTime() : 0;
+        const isSessionActive = sessionUsername && Number.isFinite(expiresAtValue) && expiresAtValue > Date.now();
+        if (isSessionActive) {
           const match = normalized.users.find(
             (user) => comparableUsername(user.username) === comparableUsername(sessionUsername)
           );
-          if (match) setCurrentUsername(match.username);
+          if (match) {
+            setCurrentUsername(match.username);
+            setSessionExpiresAt(storedExpiresAt);
+          }
+        } else if (sessionUsername || storedExpiresAt) {
+          localStorage.setItem(
+            SESSION_STORAGE_KEY,
+            JSON.stringify({
+              currentUsername: "",
+              expiresAt: "",
+            })
+          );
         }
       } catch (error) {
         console.error("Failed to load shared scheduler state.", error);
@@ -697,8 +853,11 @@ export default function App() {
       assignments,
       requests,
       pullPaperRequests,
+      notes,
+      registrationRequests,
       suppliesRequests,
       shipmentGroups,
+      shipmentEmailLogs,
       shipmentMethods,
       users,
       weekStart,
@@ -737,16 +896,17 @@ export default function App() {
     return () => {
       window.clearTimeout(saveTimerRef.current);
     };
-  }, [assignments, currentUsername, isReady, jobs, pullPaperRequests, requests, shipmentGroups, shipmentMethods, suppliesRequests, users, weekStart]);
+  }, [assignments, currentUsername, isReady, jobs, notes, pullPaperRequests, registrationRequests, requests, shipmentEmailLogs, shipmentGroups, shipmentMethods, suppliesRequests, users, weekStart]);
 
   useEffect(() => {
     localStorage.setItem(
       SESSION_STORAGE_KEY,
       JSON.stringify({
         currentUsername,
+        expiresAt: currentUsername ? sessionExpiresAt : "",
       })
     );
-  }, [currentUsername]);
+  }, [currentUsername, sessionExpiresAt]);
 
   const currentUser = useMemo(
     () =>
@@ -755,6 +915,8 @@ export default function App() {
   );
 
   const currentUserRole = useMemo(() => getUserRole(currentUser), [currentUser]);
+  const currentUserAccessMode = useMemo(() => getUserAccessMode(currentUser), [currentUser]);
+  const userCanEdit = useMemo(() => canEdit(currentUser), [currentUser]);
   const userCanManageUsers = useMemo(() => hasManagementAccess(currentUser), [currentUser]);
   const userCanMoveJobs = useMemo(() => canMoveJobs(currentUser), [currentUser]);
 
@@ -762,7 +924,29 @@ export default function App() {
     if (currentUser) return;
     if (!currentUsername) return;
     setCurrentUsername("");
+    setSessionExpiresAt("");
   }, [currentUser, currentUsername]);
+
+  useEffect(() => {
+    if (!currentUsername || !sessionExpiresAt) return;
+    const expiresAtValue = new Date(sessionExpiresAt).getTime();
+    if (!Number.isFinite(expiresAtValue)) {
+      setCurrentUsername("");
+      setSessionExpiresAt("");
+      return;
+    }
+    const timeoutMs = expiresAtValue - Date.now();
+    if (timeoutMs <= 0) {
+      setCurrentUsername("");
+      setSessionExpiresAt("");
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setCurrentUsername("");
+      setSessionExpiresAt("");
+    }, timeoutMs);
+    return () => window.clearTimeout(timer);
+  }, [currentUsername, sessionExpiresAt]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -799,8 +983,11 @@ export default function App() {
           setAssignments(normalized.assignments);
           setRequests(normalized.requests);
           setPullPaperRequests(normalized.pullPaperRequests);
+          setNotes(normalized.notes);
+          setRegistrationRequests(normalized.registrationRequests);
           setSuppliesRequests(normalized.suppliesRequests);
           setShipmentGroups(normalized.shipmentGroups);
+          setShipmentEmailLogs(normalized.shipmentEmailLogs);
           setShipmentMethods(normalized.shipmentMethods);
           setUsers(normalized.users);
           setWeekStart(normalized.weekStart);
@@ -993,6 +1180,14 @@ export default function App() {
     [requestHistoryFilterDate, requests]
   );
 
+  const pendingRegistrationRequests = useMemo(
+    () =>
+      registrationRequests
+        .filter((request) => request.status === "pending")
+        .sort((left, right) => dateSortValue(right.createdAt) - dateSortValue(left.createdAt)),
+    [registrationRequests]
+  );
+
   const openPullPaperRequests = useMemo(
     () =>
       pullPaperRequests
@@ -1023,6 +1218,17 @@ export default function App() {
         .filter((request) => request.status === "done")
         .sort((left, right) => dateSortValue(right.completedAt) - dateSortValue(left.completedAt)),
     [suppliesRequests]
+  );
+
+  const userNotes = useMemo(
+    () =>
+      notes
+        .filter((note) => comparableUsername(note.ownerUsername) === comparableUsername(currentUser?.username))
+        .sort((left, right) => {
+          if (left.completed !== right.completed) return left.completed ? 1 : -1;
+          return dateSortValue(right.createdAt) - dateSortValue(left.createdAt);
+        }),
+    [currentUser?.username, notes]
   );
 
   const assignedShipmentJobIds = useMemo(() => {
@@ -1077,6 +1283,26 @@ export default function App() {
   const selectedJob = selectedJobId ? jobs.find((job) => job.id === selectedJobId) : null;
   const selectedJobFinishMeta = selectedJob ? finishedMetaByJobId.get(selectedJob.id) : null;
 
+  const jobLocationResults = useMemo(() => {
+    const query = locationSearch.trim().toLowerCase();
+    if (!query) return [];
+    return jobs
+      .filter((job) => {
+        const haystack = `${job.number} ${job.customerName} ${job.generalDescr} ${job.notes}`.toLowerCase();
+        return haystack.includes(query);
+      })
+      .slice(0, 20)
+      .map((job) => {
+        const locations = assignments
+          .filter((assignment) => assignment.kind === "press" && assignment.jobId === job.id)
+          .sort((left, right) => {
+            if (left.dayKey !== right.dayKey) return left.dayKey.localeCompare(right.dayKey);
+            return left.press.localeCompare(right.press);
+          });
+        return { job, locations };
+      });
+  }, [assignments, jobs, locationSearch]);
+
   const queuePressOptions = useMemo(
     () => ["All", ...Array.from(new Set(jobs.map((job) => safeText(job.press)).filter(Boolean))).sort()],
     [jobs]
@@ -1102,6 +1328,22 @@ export default function App() {
       shipGroupsOnDate: shipmentGroupsForDay.length,
     };
   }, [activePressAssignments.length, allUserFinishedJobs.length, importedSummary.closedCount, importedSummary.openCount, openRequests.length, shipmentGroupsForDay.length]);
+
+  const shipmentEmailsForSelectedDate = useMemo(
+    () =>
+      shipmentEmailLogs
+        .filter((log) => log.shipDate === selectedShipDate)
+        .sort((left, right) => dateSortValue(right.createdAt) - dateSortValue(left.createdAt)),
+    [selectedShipDate, shipmentEmailLogs]
+  );
+
+  const shipmentEmailHistory = useMemo(
+    () =>
+      shipmentEmailLogs
+        .filter((log) => !shipmentEmailHistoryFilterDate || log.shipDate === shipmentEmailHistoryFilterDate)
+        .sort((left, right) => dateSortValue(right.createdAt) - dateSortValue(left.createdAt)),
+    [shipmentEmailHistoryFilterDate, shipmentEmailLogs]
+  );
 
   useEffect(() => {
     const validIds = new Set(readyToShipJobs.map((job) => job.id));
@@ -1271,7 +1513,7 @@ export default function App() {
   }
 
   function finishJob(jobId) {
-    if (!currentUser) return;
+    if (!currentUser || !userCanEdit) return;
     const finishedAt = new Date().toISOString();
     const defaultShipDate = isoDate(new Date(finishedAt));
     const finishedBy = currentUser.username;
@@ -1423,7 +1665,7 @@ export default function App() {
   }
 
   async function handleDraftAttachmentChange(event) {
-    if (!currentUser) return;
+    if (!currentUser || !userCanEdit) return;
     const nextAttachments = await buildAttachments(event.target.files, currentUser.username);
     if (nextAttachments.length) {
       setRequestDraftAttachments((current) => [...current, ...nextAttachments]);
@@ -1436,7 +1678,7 @@ export default function App() {
   }
 
   async function handleSuppliesDraftAttachmentChange(event) {
-    if (!currentUser) return;
+    if (!currentUser || !userCanEdit) return;
     const nextAttachments = await buildAttachments(event.target.files, currentUser.username);
     if (nextAttachments.length) {
       setSuppliesDraftAttachments((current) => [...current, ...nextAttachments]);
@@ -1449,7 +1691,7 @@ export default function App() {
   }
 
   async function handleShipmentDraftAttachmentChange(event) {
-    if (!currentUser) return;
+    if (!currentUser || !userCanEdit) return;
     const nextAttachments = await buildAttachments(event.target.files, currentUser.username);
     if (nextAttachments.length) {
       setShipmentDraftAttachments((current) => [...current, ...nextAttachments]);
@@ -1463,7 +1705,7 @@ export default function App() {
 
   function submitRequest(event) {
     event.preventDefault();
-    if (!currentUser) return;
+    if (!currentUser || !userCanEdit) return;
     if (!requestForm.jobNumber || !requestForm.customer || !requestForm.requestorName || !requestForm.description) {
       return;
     }
@@ -1488,7 +1730,7 @@ export default function App() {
 
   function submitPullPaperRequest(event) {
     event.preventDefault();
-    if (!currentUser) return;
+    if (!currentUser || !userCanEdit) return;
     if (!pullPaperForm.details.trim()) return;
 
     setPullPaperRequests((current) => [
@@ -1509,7 +1751,7 @@ export default function App() {
 
   function submitSuppliesRequest(event) {
     event.preventDefault();
-    if (!currentUser) return;
+    if (!currentUser || !userCanEdit) return;
     if (!suppliesForm.details.trim()) return;
 
     setSuppliesRequests((current) => [
@@ -1530,7 +1772,7 @@ export default function App() {
   }
 
   function markPullPaperRequestDone(requestId) {
-    if (!currentUser) return;
+    if (!currentUser || !userCanEdit) return;
     const completedAt = new Date().toISOString();
     setPullPaperRequests((current) =>
       current.map((request) =>
@@ -1547,11 +1789,12 @@ export default function App() {
   }
 
   function deletePullPaperRequest(requestId) {
+    if (!userCanEdit) return;
     setPullPaperRequests((current) => current.filter((request) => request.id !== requestId));
   }
 
   function markSuppliesRequestDone(requestId) {
-    if (!currentUser) return;
+    if (!currentUser || !userCanEdit) return;
     const completedAt = new Date().toISOString();
     setSuppliesRequests((current) =>
       current.map((request) =>
@@ -1568,11 +1811,12 @@ export default function App() {
   }
 
   function deleteSuppliesRequest(requestId) {
+    if (!userCanEdit) return;
     setSuppliesRequests((current) => current.filter((request) => request.id !== requestId));
   }
 
   async function addSuppliesRequestAttachments(requestId, fileList) {
-    if (!currentUser) return;
+    if (!currentUser || !userCanEdit) return;
     const attachments = await buildAttachments(fileList, currentUser.username);
     if (!attachments.length) return;
     setSuppliesRequests((current) =>
@@ -1588,6 +1832,7 @@ export default function App() {
   }
 
   function removeSuppliesRequestAttachment(requestId, attachmentId) {
+    if (!userCanEdit) return;
     setSuppliesRequests((current) =>
       current.map((request) =>
         request.id === requestId
@@ -1601,7 +1846,7 @@ export default function App() {
   }
 
   function markRequestDone(requestId) {
-    if (!currentUser) return;
+    if (!currentUser || !userCanEdit) return;
     const completedAt = new Date().toISOString();
     setRequests((current) =>
       current.map((request) =>
@@ -1618,11 +1863,12 @@ export default function App() {
   }
 
   function deleteRequest(requestId) {
+    if (!userCanEdit) return;
     setRequests((current) => current.filter((request) => request.id !== requestId));
   }
 
   async function addRequestAttachments(requestId, fileList) {
-    if (!currentUser) return;
+    if (!currentUser || !userCanEdit) return;
     const attachments = await buildAttachments(fileList, currentUser.username);
     if (!attachments.length) return;
     setRequests((current) =>
@@ -1638,6 +1884,7 @@ export default function App() {
   }
 
   function removeRequestAttachment(requestId, attachmentId) {
+    if (!userCanEdit) return;
     setRequests((current) =>
       current.map((request) =>
         request.id === requestId
@@ -1663,6 +1910,7 @@ export default function App() {
   }
 
   function assignShipDateToFinishedJobs() {
+    if (!userCanEdit) return;
     if (!selectedShipQueueJobs.length || !shipDateDraft) return;
     const targetIds = new Set(selectedShipQueueJobs);
     setAssignments((current) =>
@@ -1681,6 +1929,7 @@ export default function App() {
   }
 
   function addShipmentMethod() {
+    if (!userCanEdit) return;
     const method = safeText(newShipmentMethod);
     if (!method) return;
     setShipmentMethods((current) => {
@@ -1692,6 +1941,7 @@ export default function App() {
   }
 
   function removeShipmentMethod(methodToRemove) {
+    if (!userCanEdit) return;
     setShipmentMethods((current) => {
       const next = current.filter((method) => method !== methodToRemove);
       return next.length ? next : current;
@@ -1705,6 +1955,7 @@ export default function App() {
 
   function createShipmentGroup(event) {
     event.preventDefault();
+    if (!userCanEdit) return;
     if (!selectedShipmentJobs.length) return;
     const jobItems = selectedShipmentJobs
       .map((jobId) => {
@@ -1722,6 +1973,7 @@ export default function App() {
         packageCount: parseNumber(shipmentForm.packageCount),
         packageType: shipmentForm.packageType,
         totalCost: parseCurrency(shipmentForm.totalCost),
+        billAmount: parseCurrency(shipmentForm.billAmount),
         notes: shipmentForm.notes,
         shipDate: shipmentForm.shipDate,
         createdAt: new Date().toISOString(),
@@ -1738,11 +1990,12 @@ export default function App() {
   }
 
   function deleteShipmentGroup(groupId) {
+    if (!userCanEdit) return;
     setShipmentGroups((current) => current.filter((group) => group.id !== groupId));
   }
 
   async function addShipmentGroupAttachments(groupId, fileList) {
-    if (!currentUser) return;
+    if (!currentUser || !userCanEdit) return;
     const attachments = await buildAttachments(fileList, currentUser.username);
     if (!attachments.length) return;
     setShipmentGroups((current) =>
@@ -1758,6 +2011,7 @@ export default function App() {
   }
 
   function removeShipmentGroupAttachment(groupId, attachmentId) {
+    if (!userCanEdit) return;
     setShipmentGroups((current) =>
       current.map((group) =>
         group.id === groupId
@@ -1771,6 +2025,7 @@ export default function App() {
   }
 
   function updateJobRecommendedPress(jobId, press) {
+    if (!userCanEdit) return;
     const nextPress = normalizePressValue(press);
     if (!PRESS_ORDER.includes(nextPress)) return;
     setJobs((current) =>
@@ -1785,6 +2040,169 @@ export default function App() {
     );
   }
 
+  function addNote(event) {
+    event.preventDefault();
+    if (!currentUser || !userCanEdit) return;
+    const text = safeText(noteForm.text);
+    if (!text) return;
+    setNotes((current) => [
+      {
+        id: makeId("note"),
+        ownerUsername: currentUser.username,
+        text,
+        completed: false,
+        createdAt: new Date().toISOString(),
+        completedAt: "",
+      },
+      ...current,
+    ]);
+    setNoteForm(EMPTY_NOTE_FORM);
+  }
+
+  function toggleNote(noteId) {
+    if (!currentUser || !userCanEdit) return;
+    setNotes((current) =>
+      current.map((note) =>
+        note.id === noteId
+          ? {
+              ...note,
+              completed: !note.completed,
+              completedAt: note.completed ? "" : new Date().toISOString(),
+            }
+          : note
+      )
+    );
+  }
+
+  function deleteNote(noteId) {
+    if (!currentUser || !userCanEdit) return;
+    setNotes((current) => current.filter((note) => note.id !== noteId));
+  }
+
+  function toggleUserTab(userId, tab) {
+    if (!userCanManageUsers) return;
+    setUsers((current) =>
+      current.map((user) => {
+        if (user.id !== userId) return user;
+        const nextTabs = user.tabs.includes(tab)
+          ? user.tabs.filter((value) => value !== tab)
+          : [...user.tabs, tab];
+        return { ...user, tabs: normalizeUserTabs(nextTabs, user.role, user.isAdmin, user.canManageUsers) };
+      })
+    );
+  }
+
+  function updateUserAccess(userId, updates) {
+    if (!userCanManageUsers) return;
+    setUsers((current) => {
+      const target = current.find((user) => user.id === userId);
+      if (!target) return current;
+
+      if (Object.prototype.hasOwnProperty.call(updates, "canManageUsers")) {
+        const managers = current.filter((user) => user.canManageUsers);
+        if (target.canManageUsers && !updates.canManageUsers && managers.length <= 1) {
+          window.alert("Keep at least one user with admin access.");
+          return current;
+        }
+      }
+
+      return current.map((user) => {
+        if (user.id !== userId) return user;
+        const nextCanManageUsers = Object.prototype.hasOwnProperty.call(updates, "canManageUsers")
+          ? !!updates.canManageUsers
+          : user.canManageUsers;
+        const nextRole = nextCanManageUsers ? "Management" : user.role === "Management" ? "Warehouse/Shipper" : user.role;
+        return {
+          ...user,
+          ...updates,
+          role: nextRole,
+          isAdmin: nextCanManageUsers,
+          canManageUsers: nextCanManageUsers,
+          accessMode: Object.prototype.hasOwnProperty.call(updates, "accessMode")
+            ? normalizeAccessMode(updates.accessMode, nextRole, nextCanManageUsers)
+            : user.accessMode,
+          tabs: normalizeUserTabs(
+            Object.prototype.hasOwnProperty.call(updates, "tabs") ? updates.tabs : user.tabs,
+            nextRole,
+            nextCanManageUsers,
+            nextCanManageUsers
+          ),
+        };
+      });
+    });
+  }
+
+  function buildShipmentEmailDraft() {
+    const groups = shipmentGroupsForDay;
+    const totalCost = groups.reduce((sum, group) => sum + parseCurrency(group.totalCost), 0);
+    const totalBill = groups.reduce((sum, group) => sum + parseCurrency(group.billAmount), 0);
+    const methods = Array.from(new Set(groups.map((group) => group.method).filter(Boolean)));
+    const lines = [`Daily shipment summary for ${selectedShipDate}`, ""];
+
+    groups.forEach((group) => {
+      const items = getShipmentItems(group, jobMap, finishedMetaByJobId);
+      lines.push(`${group.label} | ${group.method}`);
+      lines.push(`Skids / cartons: ${group.packageCount || 0} ${group.packageType || "Skids"}`);
+      lines.push(`Our cost: ${formatCurrency(group.totalCost)}`);
+      lines.push(`Bill: ${formatCurrency(group.billAmount)}`);
+      items.forEach((item) => {
+        lines.push(`- ${item.customerName} ${item.number}: ${item.generalDescr}`);
+      });
+      if (group.notes) lines.push(`Notes: ${group.notes}`);
+      lines.push("");
+    });
+
+    if (!groups.length) {
+      lines.push("No shipment groups have been created for this date yet.");
+      lines.push("");
+    }
+
+    lines.push(`Total cost: ${formatCurrency(totalCost)}`);
+    lines.push(`Total bill: ${formatCurrency(totalBill)}`);
+
+    return {
+      subject: `Daily shipments for ${selectedShipDate}`,
+      body: lines.join("\n"),
+      groupCount: groups.length,
+      jobCount: groups.reduce((sum, group) => sum + getShipmentItems(group, jobMap, finishedMetaByJobId).length, 0),
+      totalCost,
+      totalBill,
+      methods,
+    };
+  }
+
+  function openShipmentEmailDraft() {
+    if (!userCanEdit) return;
+    const recipients = safeText(shipmentEmailForm.recipients);
+    const draft = buildShipmentEmailDraft();
+    const params = new URLSearchParams({
+      subject: draft.subject,
+      body: draft.body,
+    });
+    window.location.href = `mailto:${encodeURIComponent(recipients)}?${params.toString()}`;
+  }
+
+  function logShipmentEmail() {
+    if (!currentUser || !selectedShipDate || !userCanEdit) return;
+    const draft = buildShipmentEmailDraft();
+    setShipmentEmailLogs((current) => [
+      {
+        id: makeId("email"),
+        shipDate: selectedShipDate,
+        recipients: safeText(shipmentEmailForm.recipients),
+        subject: draft.subject,
+        body: draft.body,
+        jobCount: draft.jobCount,
+        totalCost: draft.totalCost,
+        totalBill: draft.totalBill,
+        methods: draft.methods,
+        createdAt: new Date().toISOString(),
+        createdBy: currentUser.username,
+      },
+      ...current,
+    ]);
+  }
+
   function loadDemo() {
     const sample = `Press\tNumber\tCustomerName\tGeneralDescr\tCustPONum\tPriority\tShip_by_Date\tEntryDate\tDue_on_Site_Date\tStockNum2\tStockNum1\tStatus\tMainTool\tToolNo2\tTicQuantity\tEstFootage\tEstPressTime\tNotes
 5.1\t10159\tData Graphics\t1.625" Cap One Circle 70072\t223000DG\tHigh\t04/28/26\t04/18/26\t04/29/26\t266\t\tOpen\t946\t\t3,612,279\t113,847\t9.76\tExample long notes
@@ -1792,6 +2210,13 @@ export default function App() {
 6.1\t11194\tPremio Foods\t3.25"x5" Premio Contract Release\t4500081729\tRelease\t04/28/26\t04/21/26\t04/29/26\t266\t590\tOpen\t668\t\t48,000\t13,020\t4.64\tContract PO 4600004905
 9\t11022\tData Graphics\t1.625" Cap One Circle 69797\t\tHigh\t04/29/26\t03/24/26\t05/04/26\t266\t\tOpen\t946\t\t2,686,950\t86,266\t7.91\tArt Due 4/23`;
     importText(sample);
+  }
+
+  function switchAuthView(nextView) {
+    setAuthView(nextView);
+    setLoginError("");
+    setRegisterError("");
+    setRegisterSuccess("");
   }
 
   function handleLogin(event) {
@@ -1806,13 +2231,67 @@ export default function App() {
       return;
     }
     setCurrentUsername(match.username);
+    setSessionExpiresAt(new Date(Date.now() + LOGIN_SESSION_DURATION_MS).toISOString());
     setLoginForm(EMPTY_LOGIN_FORM);
     setLoginError("");
+    setRegisterSuccess("");
+    setAuthView("login");
     setActiveTab("Scheduler");
+  }
+
+  function submitRegistrationRequest(event) {
+    event.preventDefault();
+    const username = safeText(registerForm.username);
+    const password = safeText(registerForm.password);
+
+    if (!username || !password) {
+      setRegisterError("Enter both a name and password.");
+      setRegisterSuccess("");
+      return;
+    }
+
+    const hasUser = users.some((user) => comparableUsername(user.username) === comparableUsername(username));
+    if (hasUser) {
+      setRegisterError("That username already exists.");
+      setRegisterSuccess("");
+      return;
+    }
+
+    const hasPendingRequest = registrationRequests.some(
+      (request) =>
+        comparableUsername(request.username) === comparableUsername(username) && request.status === "pending"
+    );
+    if (hasPendingRequest) {
+      setRegisterError("That account request is already waiting for approval.");
+      setRegisterSuccess("");
+      return;
+    }
+
+    setRegistrationRequests((current) => [
+      ...current,
+      {
+        id: makeId("registration"),
+        username,
+        password,
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        createdBy: username,
+        approvedAt: "",
+        approvedBy: "",
+        deniedAt: "",
+        deniedBy: "",
+      },
+    ]);
+    setRegisterForm(EMPTY_REGISTER_FORM);
+    setRegisterError("");
+    setRegisterSuccess("Registration request sent. A manager will need to approve it.");
+    setAuthView("login");
   }
 
   function handleLogout() {
     setCurrentUsername("");
+    setSessionExpiresAt("");
+    setAuthView("login");
     setActiveTab("Scheduler");
   }
 
@@ -1833,13 +2312,16 @@ export default function App() {
         id: makeId("user"),
         username,
         password,
-        role: normalizeRole(userForm.role),
-        isAdmin: normalizeRole(userForm.role) === "Management",
+        role: userForm.canManageUsers ? "Management" : "Warehouse/Shipper",
+        accessMode: normalizeAccessMode(userForm.accessMode, userForm.canManageUsers ? "Management" : "Warehouse/Shipper", userForm.canManageUsers),
+        tabs: normalizeUserTabs(userForm.tabs, userForm.canManageUsers ? "Management" : "Warehouse/Shipper", userForm.canManageUsers, userForm.canManageUsers),
+        canManageUsers: !!userForm.canManageUsers,
+        isAdmin: !!userForm.canManageUsers,
         createdAt: new Date().toISOString(),
         createdBy: currentUser.username,
       },
     ]);
-    setUserForm(EMPTY_USER_FORM);
+    setUserForm({ ...EMPTY_USER_FORM, tabs: [...EMPTY_USER_FORM.tabs] });
   }
 
   function updateUserPassword(userId) {
@@ -1850,6 +2332,42 @@ export default function App() {
       current.map((user) => (user.id === userId ? { ...user, password: nextPassword } : user))
     );
     setUserPasswordDrafts((current) => ({ ...current, [userId]: "" }));
+  }
+
+  function approveRegistrationRequest(requestId) {
+    if (!userCanManageUsers) return;
+    const request = registrationRequests.find((item) => item.id === requestId);
+    if (!request) return;
+
+    const exists = users.some(
+      (user) => comparableUsername(user.username) === comparableUsername(request.username)
+    );
+    if (exists) {
+      window.alert("That username already exists. Delete or rename the pending request first.");
+      return;
+    }
+
+    setUsers((current) => [
+      ...current,
+      {
+        id: makeId("user"),
+        username: request.username,
+        password: request.password,
+        role: "Warehouse/Shipper",
+        accessMode: "edit",
+        tabs: normalizeUserTabs(EMPTY_USER_FORM.tabs, "Warehouse/Shipper", false, false),
+        canManageUsers: false,
+        isAdmin: false,
+        createdAt: new Date().toISOString(),
+        createdBy: currentUser.username,
+      },
+    ]);
+    setRegistrationRequests((current) => current.filter((item) => item.id !== requestId));
+  }
+
+  function denyRegistrationRequest(requestId) {
+    if (!userCanManageUsers) return;
+    setRegistrationRequests((current) => current.filter((item) => item.id !== requestId));
   }
 
   if (!isReady) {
@@ -1865,11 +2383,18 @@ export default function App() {
   if (!currentUser) {
     return (
       <LoginScreen
+        authView={authView}
         loginForm={loginForm}
         loginError={loginError}
+        registerForm={registerForm}
+        registerError={registerError}
+        registerSuccess={registerSuccess}
         users={users}
-        onChange={setLoginForm}
-        onSubmit={handleLogin}
+        onChangeLogin={setLoginForm}
+        onChangeRegister={setRegisterForm}
+        onChangeView={switchAuthView}
+        onSubmitLogin={handleLogin}
+        onSubmitRegister={submitRegistrationRequest}
       />
     );
   }
@@ -1884,6 +2409,7 @@ export default function App() {
   ];
 
   const tabBadges = {
+    Notes: userNotes.filter((note) => !note.completed).length,
     "Open Requests": openRequests.length,
     "Pull Paper Request": openPullPaperRequests.length,
     "Supplies Request": openSuppliesRequests.length,
@@ -1932,7 +2458,7 @@ export default function App() {
                   {lastSyncAt ? ` • ${formatDateTime(lastSyncAt)}` : ""}
                 </span>
                 <span className="rounded-full bg-stone-200 px-3 py-2 text-stone-800">
-                  {currentUserRole}: {currentUser.username}
+                  {currentUserRole} / {currentUserAccessMode === "edit" ? "Edit" : "View only"}: {currentUser.username}
                 </span>
                 <button onClick={handleLogout} className="rounded-2xl border border-stone-300 bg-stone-50 px-3 py-2 text-stone-800">
                   Log out
@@ -2066,7 +2592,7 @@ export default function App() {
                       state={deriveVisibleJobState(job.id, activePressJobIds, userFinishedJobIds)}
                       onClick={() => selectJob(job.id)}
                       onDoubleClick={() => selectJob(job.id, true)}
-                      onFinish={() => finishJob(job.id)}
+                      onFinish={userCanEdit ? () => finishJob(job.id) : undefined}
                       weekColumns={weekColumns}
                       canMove={userCanMoveJobs}
                       pressOptions={PRESS_ORDER}
@@ -2160,7 +2686,7 @@ export default function App() {
                                   finishMeta={finishedMetaByJobId.get(job.id)}
                                   onSelect={() => selectJob(job.id)}
                                   onUnschedule={userCanMoveJobs ? () => removeAssignment(assignment.id) : undefined}
-                                  onFinish={() => finishJob(job.id)}
+                                  onFinish={userCanEdit ? () => finishJob(job.id) : undefined}
                                   onDuplicate={userCanMoveJobs ? () => duplicateAssignmentToNextDay(assignment.id) : undefined}
                                   draggable={userCanMoveJobs && assignment.status !== "finished"}
                                 />
@@ -2232,31 +2758,168 @@ export default function App() {
                   )}
                 </div>
 
-                <div className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
-                  <div className="mb-3">
-                    <div className="text-sm font-semibold">Ship ready today</div>
-                    <div className="text-xs text-stone-600">These are only the jobs marked finished today by a logged-in user.</div>
-                  </div>
-                  <div className="max-h-[56vh] space-y-3 overflow-y-auto">
-                    {doneJobs
-                      .filter((job) => sameDay(job.finishMeta?.finishedAt, todayKey()))
-                      .map((job) => (
-                        <JobCard
-                          key={job.id}
-                          job={job}
-                          state="ship"
-                          onClick={() => selectJob(job.id)}
-                          finishedAt={job.finishMeta?.finishedAt}
-                          finishedBy={job.finishMeta?.finishedBy}
-                        />
+                <div className="space-y-4">
+                  <div className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
+                    <div className="mb-3">
+                      <div className="text-sm font-semibold">Job location search</div>
+                      <div className="text-xs text-stone-600">Search any ticket, customer, or description to see every scheduled or finished day and press.</div>
+                    </div>
+                    <input
+                      type="text"
+                      value={locationSearch}
+                      onChange={(event) => setLocationSearch(event.target.value)}
+                      placeholder="Search job number, customer, or description"
+                      className="w-full rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                    />
+                    <div className="mt-3 max-h-[32vh] space-y-3 overflow-y-auto">
+                      {jobLocationResults.map(({ job, locations }) => (
+                        <div key={job.id} className="rounded-2xl border border-stone-300 bg-white p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-semibold">{job.customerName} {job.number}</div>
+                              <div className="mt-1 text-xs text-stone-700">{job.generalDescr}</div>
+                            </div>
+                            <button
+                              onClick={() => selectJob(job.id, true)}
+                              className="rounded-xl border border-stone-300 bg-stone-50 px-2 py-1 text-[11px] text-stone-800"
+                            >
+                              Open
+                            </button>
+                          </div>
+                          <div className="mt-3 space-y-2">
+                            {locations.length ? locations.map((location) => (
+                              <button
+                                key={location.id}
+                                onClick={() => {
+                                  setWeekStart(startOfWeek(new Date(location.dayKey)));
+                                  selectJob(job.id, true);
+                                }}
+                                className="flex w-full items-center justify-between rounded-2xl bg-stone-100 px-3 py-2 text-left text-xs text-stone-800"
+                              >
+                                <span>{location.dayKey}</span>
+                                <span>
+                                  Press {location.press} · {location.status === "finished" ? "done" : location.status}
+                                </span>
+                              </button>
+                            )) : (
+                              <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-3 text-xs text-stone-600">
+                                This job is not on the schedule yet.
+                              </div>
+                            )}
+                          </div>
+                        </div>
                       ))}
-                    {!doneJobs.filter((job) => sameDay(job.finishMeta?.finishedAt, todayKey())).length && (
-                      <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
-                        No jobs marked finished today yet.
-                      </div>
-                    )}
+                      {!jobLocationResults.length && (
+                        <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
+                          {locationSearch.trim() ? "No jobs matched that search." : "Type a search to see where jobs are scheduled or finished."}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
+                    <div className="mb-3">
+                      <div className="text-sm font-semibold">Ship ready today</div>
+                      <div className="text-xs text-stone-600">These are only the jobs marked finished today by a logged-in user.</div>
+                    </div>
+                    <div className="max-h-[56vh] space-y-3 overflow-y-auto">
+                      {doneJobs
+                        .filter((job) => sameDay(job.finishMeta?.finishedAt, todayKey()))
+                        .map((job) => (
+                          <JobCard
+                            key={job.id}
+                            job={job}
+                            state="ship"
+                            onClick={() => selectJob(job.id)}
+                            finishedAt={job.finishMeta?.finishedAt}
+                            finishedBy={job.finishMeta?.finishedBy}
+                          />
+                        ))}
+                      {!doneJobs.filter((job) => sameDay(job.finishMeta?.finishedAt, todayKey())).length && (
+                        <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
+                          No jobs marked finished today yet.
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "Notes" && (
+          <div className="grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+              <div className="mb-5">
+                <div className="text-sm font-semibold">My internal checklist</div>
+                <div className="text-xs text-stone-600">These notes are tied only to the signed-in user.</div>
+              </div>
+              <form onSubmit={addNote} className="grid gap-4">
+                <div>
+                  <div className="mb-2 text-sm font-medium text-stone-800">Checklist item</div>
+                  <textarea
+                    value={noteForm.text}
+                    onChange={(event) => setNoteForm({ text: event.target.value })}
+                    placeholder="Write a reminder, checklist item, or personal note"
+                    className="h-36 w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={!userCanEdit}
+                  className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Add note
+                </button>
+              </form>
+            </div>
+
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+              <div className="mb-4 flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-semibold">My notes</div>
+                  <div className="text-xs text-stone-600">Only {currentUser.username} can see these checklist items.</div>
+                </div>
+                <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">
+                  {userNotes.filter((note) => !note.completed).length} open
+                </div>
+              </div>
+              <div className="space-y-3">
+                {userNotes.map((note) => (
+                  <div key={note.id} className="rounded-2xl border border-stone-300 bg-white p-4">
+                    <div className="flex gap-3">
+                      <input
+                        type="checkbox"
+                        checked={note.completed}
+                        disabled={!userCanEdit}
+                        onChange={() => toggleNote(note.id)}
+                        className="mt-1 h-4 w-4"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className={`whitespace-pre-wrap text-sm ${note.completed ? "text-stone-500 line-through" : "text-stone-800"}`}>
+                          {note.text}
+                        </div>
+                        <div className="mt-2 text-xs text-stone-600">
+                          Added {formatDateTime(note.createdAt)}
+                          {note.completedAt ? ` · completed ${formatDateTime(note.completedAt)}` : ""}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => deleteNote(note.id)}
+                        disabled={!userCanEdit}
+                        className="rounded-xl border border-rose-200 px-3 py-2 text-xs text-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {!userNotes.length && (
+                  <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-5 text-sm text-stone-600">
+                    No personal notes yet.
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -2368,16 +3031,17 @@ export default function App() {
             </div>
 
             <div className="space-y-3">
-              {openRequests.map((request) => (
-                <RequestCard
-                  key={request.id}
-                  request={request}
-                  onDone={() => markRequestDone(request.id)}
-                  onDelete={() => deleteRequest(request.id)}
-                  onAddAttachments={(files) => addRequestAttachments(request.id, files)}
-                  onRemoveAttachment={(attachmentId) => removeRequestAttachment(request.id, attachmentId)}
-                />
-              ))}
+                  {openRequests.map((request) => (
+                    <RequestCard
+                      key={request.id}
+                      request={request}
+                      onDone={() => markRequestDone(request.id)}
+                      onDelete={() => deleteRequest(request.id)}
+                      onAddAttachments={(files) => addRequestAttachments(request.id, files)}
+                      onRemoveAttachment={(attachmentId) => removeRequestAttachment(request.id, attachmentId)}
+                      readOnly={!userCanEdit}
+                    />
+                  ))}
               {!openRequests.length && (
                 <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-5 text-sm text-stone-600">
                   No open requests right now.
@@ -2490,6 +3154,7 @@ export default function App() {
                       request={request}
                       onDone={() => markPullPaperRequestDone(request.id)}
                       onDelete={() => deletePullPaperRequest(request.id)}
+                      readOnly={!userCanEdit}
                     />
                   ))}
                   {!openPullPaperRequests.length && (
@@ -2593,6 +3258,7 @@ export default function App() {
                       onDelete={() => deleteSuppliesRequest(request.id)}
                       onAddAttachments={(files) => addSuppliesRequestAttachments(request.id, files)}
                       onRemoveAttachment={(attachmentId) => removeSuppliesRequestAttachment(request.id, attachmentId)}
+                      readOnly={!userCanEdit}
                     />
                   ))}
                   {!openSuppliesRequests.length && (
@@ -2634,6 +3300,11 @@ export default function App() {
                   <div className="text-sm font-semibold">Daily shipment</div>
                   <div className="text-xs text-stone-600">
                     Finished jobs can be assigned to a ship date first, then grouped under that shipping day.
+                  </div>
+                  <div className="mt-2 text-xs text-stone-700">
+                    {shipmentEmailsForSelectedDate.length
+                      ? `${shipmentEmailsForSelectedDate.length} shipment email${shipmentEmailsForSelectedDate.length === 1 ? "" : "s"} already logged for this date.`
+                      : "No shipment email has been logged for this date yet."}
                   </div>
                 </div>
                 <div>
@@ -2866,6 +3537,12 @@ export default function App() {
                       onChange={(value) => setShipmentForm((current) => ({ ...current, totalCost: value }))}
                       placeholder="141.17"
                     />
+                    <Field
+                      label="Bill customer"
+                      value={shipmentForm.billAmount}
+                      onChange={(value) => setShipmentForm((current) => ({ ...current, billAmount: value }))}
+                      placeholder="185.00"
+                    />
                     <div>
                       <div className="mb-2 text-sm font-medium text-stone-800">Notes</div>
                       <textarea
@@ -2893,6 +3570,43 @@ export default function App() {
                       Create shipment group
                     </button>
                   </form>
+                </div>
+
+                <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
+                  <div className="mb-4">
+                    <div className="text-sm font-semibold">Daily shipment email</div>
+                    <div className="text-xs text-stone-600">Draft the summary email for this ship date, then log it so everyone can see it was already sent.</div>
+                  </div>
+                  <div className="grid gap-3">
+                    <Field
+                      label="Recipients"
+                      value={shipmentEmailForm.recipients}
+                      onChange={(value) => setShipmentEmailForm({ recipients: value })}
+                      placeholder="shipping@company.com; billing@company.com"
+                    />
+                    <div className="rounded-2xl bg-stone-100 p-4 text-sm text-stone-800">
+                      <div className="font-semibold">{buildShipmentEmailDraft().subject}</div>
+                      <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap text-xs text-stone-700">{buildShipmentEmailDraft().body}</pre>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        disabled={!userCanEdit}
+                        onClick={openShipmentEmailDraft}
+                        className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Open email draft
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!userCanEdit}
+                        onClick={logShipmentEmail}
+                        className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Mark emailed
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
@@ -2966,6 +3680,9 @@ export default function App() {
                             {items.length} jobs - {formatCurrency(group.totalCost)} - created {formatDateTime(group.createdAt)}
                             {group.createdBy ? ` by ${group.createdBy}` : ""}
                           </div>
+                          <div className="mt-1 text-xs text-stone-600">
+                            Bill {formatCurrency(group.billAmount)}
+                          </div>
                           {!!group.packageCount && (
                             <div className="mt-1 text-xs text-stone-600">
                               {group.packageCount} {safeText(group.packageType || "Skids").toLowerCase()}
@@ -3027,12 +3744,83 @@ export default function App() {
           </div>
         )}
 
+        {activeTab === "Shipment Emails" && (
+          <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+            <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+              <div>
+                <div className="text-sm font-semibold">Shipment email log</div>
+                <div className="text-xs text-stone-600">Use this to confirm which shipment dates were already emailed so you do not double-send them.</div>
+              </div>
+              <div className="flex items-end gap-2">
+                <div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Filter date</div>
+                  <input
+                    type="date"
+                    value={shipmentEmailHistoryFilterDate}
+                    onChange={(event) => setShipmentEmailHistoryFilterDate(event.target.value)}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                  />
+                </div>
+                <button
+                  onClick={() => setShipmentEmailHistoryFilterDate("")}
+                  className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+            <div className="space-y-3">
+              {shipmentEmailHistory.map((log) => (
+                <div key={log.id} className="rounded-2xl border border-stone-300 bg-white p-4">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="text-sm font-semibold">{log.shipDate}</div>
+                        <span className="rounded-full bg-stone-200 px-2 py-1 text-[11px] font-medium text-stone-800">
+                          {log.jobCount} jobs
+                        </span>
+                      </div>
+                      <div className="mt-1 text-xs text-stone-600">
+                        Sent by {log.createdBy || "-"} on {formatDateTime(log.createdAt)}
+                      </div>
+                      <div className="mt-1 text-xs text-stone-600">Recipients: {log.recipients || "-"}</div>
+                      <div className="mt-1 text-xs text-stone-600">
+                        Methods: {log.methods.length ? log.methods.join(", ") : "-"} · Cost {formatCurrency(log.totalCost)} · Bill {formatCurrency(log.totalBill)}
+                      </div>
+                      <div className="mt-3 rounded-2xl bg-stone-100 p-3">
+                        <div className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Subject</div>
+                        <div className="mt-1 text-sm text-stone-800">{log.subject}</div>
+                        <div className="mt-3 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Body</div>
+                        <pre className="mt-1 whitespace-pre-wrap text-xs text-stone-700">{log.body}</pre>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setSelectedShipDate(log.shipDate);
+                        setActiveTab("Daily Shipment");
+                      }}
+                      className="rounded-2xl border border-stone-300 bg-stone-50 px-3 py-2 text-sm text-stone-800"
+                    >
+                      Open date
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {!shipmentEmailHistory.length && (
+                <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-5 text-sm text-stone-600">
+                  No shipment emails have been logged yet.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {activeTab === "User Admin" && userCanManageUsers && (
           <div className="grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
             <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
               <div className="mb-5">
                 <div className="text-sm font-semibold">Add user</div>
-                <div className="text-xs text-stone-600">Management can create logins, assign roles, and set passwords here.</div>
+                <div className="text-xs text-stone-600">Management can create logins, choose edit or view-only access, and decide which tabs each user can see.</div>
               </div>
               <form onSubmit={createUser} className="grid gap-4">
                 <Field
@@ -3048,18 +3836,51 @@ export default function App() {
                   placeholder="Set a password"
                 />
                 <div>
-                  <div className="mb-2 text-sm font-medium text-stone-800">Role</div>
+                  <div className="mb-2 text-sm font-medium text-stone-800">Access</div>
                   <select
-                    value={userForm.role}
-                    onChange={(event) => setUserForm((current) => ({ ...current, role: event.target.value }))}
+                    value={userForm.accessMode}
+                    onChange={(event) => setUserForm((current) => ({ ...current, accessMode: event.target.value }))}
                     className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
                   >
-                    {ROLE_OPTIONS.map((role) => (
-                      <option key={role} value={role}>
-                        {role}
+                    {ACCESS_MODE_OPTIONS.map((mode) => (
+                      <option key={mode} value={mode}>
+                        {mode === "edit" ? "Edit" : "View only"}
                       </option>
                     ))}
                   </select>
+                </div>
+                <label className="flex items-center gap-3 rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800">
+                  <input
+                    type="checkbox"
+                    checked={userForm.canManageUsers}
+                    onChange={(event) => setUserForm((current) => ({ ...current, canManageUsers: event.target.checked }))}
+                    className="h-4 w-4"
+                  />
+                  <span>Allow user admin access</span>
+                </label>
+                <div>
+                  <div className="mb-2 text-sm font-medium text-stone-800">Visible tabs</div>
+                  <div className="grid gap-2 md:grid-cols-2">
+                    {[...BASE_TABS, "User Admin"].map((tab) => (
+                      <label key={tab} className="flex items-center gap-3 rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800">
+                        <input
+                          type="checkbox"
+                          checked={userForm.canManageUsers && tab === "User Admin" ? true : userForm.tabs.includes(tab)}
+                          disabled={tab === "User Admin"}
+                          onChange={() =>
+                            setUserForm((current) => {
+                              const nextTabs = current.tabs.includes(tab)
+                                ? current.tabs.filter((value) => value !== tab)
+                                : [...current.tabs, tab];
+                              return { ...current, tabs: normalizeUserTabs(nextTabs, "Warehouse/Shipper", false, current.canManageUsers) };
+                            })
+                          }
+                          className="h-4 w-4"
+                        />
+                        <span>{tab}</span>
+                      </label>
+                    ))}
+                  </div>
                 </div>
                 <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
                   Create user
@@ -3067,46 +3888,139 @@ export default function App() {
               </form>
             </div>
 
-            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
-              <div className="mb-5">
-                <div className="text-sm font-semibold">Manage users</div>
-                <div className="text-xs text-stone-600">Reset passwords for any user and manage access from here.</div>
-              </div>
-              <div className="space-y-3">
-                {users.map((user) => (
-                  <div key={user.id} className="rounded-2xl border border-stone-300 bg-white p-4">
-                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <div className="text-sm font-semibold">{user.username}</div>
-                          <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${hasManagementAccess(user) ? "bg-emerald-900 text-white" : "bg-stone-200 text-stone-800"}`}>
-                            {getUserRole(user)}
-                          </span>
+            <div className="space-y-4">
+              <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+                <div className="mb-5 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold">Registration approvals</div>
+                    <div className="text-xs text-stone-600">Approve new account requests before they can log in.</div>
+                  </div>
+                  <div className="rounded-full bg-stone-200 px-3 py-1 text-xs font-semibold text-stone-800">
+                    {pendingRegistrationRequests.length} pending
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  {pendingRegistrationRequests.map((request) => (
+                    <div key={request.id} className="rounded-2xl border border-stone-300 bg-white p-4">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <div className="text-sm font-semibold">{request.username}</div>
+                          <div className="mt-1 text-xs text-stone-600">
+                            Requested {formatDateTime(request.createdAt)}
+                          </div>
                         </div>
-                        <div className="mt-1 text-xs text-stone-600">
-                          Created {formatDateTime(user.createdAt)} by {user.createdBy || "-"}
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => approveRegistrationRequest(request.id)}
+                            className="rounded-2xl bg-emerald-900 px-4 py-2 text-sm font-medium text-white"
+                          >
+                            Approve
+                          </button>
+                          <button
+                            onClick={() => denyRegistrationRequest(request.id)}
+                            className="rounded-2xl border border-stone-300 bg-white px-4 py-2 text-sm text-stone-800"
+                          >
+                            Deny
+                          </button>
                         </div>
-                      </div>
-                      <div className="flex flex-col gap-2 md:w-[320px]">
-                        <input
-                          type="text"
-                          value={userPasswordDrafts[user.id] || ""}
-                          onChange={(event) =>
-                            setUserPasswordDrafts((current) => ({ ...current, [user.id]: event.target.value }))
-                          }
-                          placeholder={`Set new password for ${user.username}`}
-                          className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
-                        />
-                        <button
-                          onClick={() => updateUserPassword(user.id)}
-                          className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
-                        >
-                          Save password
-                        </button>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
+                  {!pendingRegistrationRequests.length && (
+                    <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
+                      No pending registration requests right now.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+                <div className="mb-5">
+                  <div className="text-sm font-semibold">Manage users</div>
+                  <div className="text-xs text-stone-600">Reset passwords, choose edit or view-only, and control which tabs each account can see.</div>
+                </div>
+                <div className="space-y-3">
+                  {users.map((user) => (
+                    <div key={user.id} className="rounded-2xl border border-stone-300 bg-white p-4">
+                      <div className="space-y-4">
+                        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <div className="text-sm font-semibold">{user.username}</div>
+                              <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${hasManagementAccess(user) ? "bg-emerald-900 text-white" : "bg-stone-200 text-stone-800"}`}>
+                                {hasManagementAccess(user) ? "User Admin" : user.accessMode === "edit" ? "Edit" : "View only"}
+                              </span>
+                            </div>
+                            <div className="mt-1 text-xs text-stone-600">
+                              Created {formatDateTime(user.createdAt)} by {user.createdBy || "-"}
+                            </div>
+                          </div>
+                          <div className="flex flex-col gap-2 md:w-[320px]">
+                            <input
+                              type="text"
+                              value={userPasswordDrafts[user.id] || ""}
+                              onChange={(event) =>
+                                setUserPasswordDrafts((current) => ({ ...current, [user.id]: event.target.value }))
+                              }
+                              placeholder={`Set new password for ${user.username}`}
+                              className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                            />
+                            <button
+                              onClick={() => updateUserPassword(user.id)}
+                              className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
+                            >
+                              Save password
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="grid gap-3 md:grid-cols-[180px_1fr]">
+                          <div>
+                            <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Access</div>
+                            <select
+                              value={user.accessMode}
+                              onChange={(event) => updateUserAccess(user.id, { accessMode: event.target.value })}
+                              className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                            >
+                              {ACCESS_MODE_OPTIONS.map((mode) => (
+                                <option key={mode} value={mode}>
+                                  {mode === "edit" ? "Edit" : "View only"}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <label className="flex items-center gap-3 rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm text-stone-800">
+                            <input
+                              type="checkbox"
+                              checked={!!user.canManageUsers}
+                              onChange={(event) => updateUserAccess(user.id, { canManageUsers: event.target.checked })}
+                              className="h-4 w-4"
+                            />
+                            <span>Can manage users and registration approvals</span>
+                          </label>
+                        </div>
+
+                        <div>
+                          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Visible tabs</div>
+                          <div className="grid gap-2 md:grid-cols-2">
+                            {[...BASE_TABS, "User Admin"].map((tab) => (
+                              <label key={tab} className="flex items-center gap-3 rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm text-stone-800">
+                                <input
+                                  type="checkbox"
+                                  checked={user.tabs.includes(tab)}
+                                  disabled={tab === "User Admin"}
+                                  onChange={() => toggleUserTab(user.id, tab)}
+                                  className="h-4 w-4"
+                                />
+                                <span>{tab}</span>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
@@ -3116,7 +4030,20 @@ export default function App() {
   );
 }
 
-function LoginScreen({ loginForm, loginError, users, onChange, onSubmit }) {
+function LoginScreen({
+  authView,
+  loginForm,
+  loginError,
+  registerForm,
+  registerError,
+  registerSuccess,
+  users,
+  onChangeLogin,
+  onChangeRegister,
+  onChangeView,
+  onSubmitLogin,
+  onSubmitRegister,
+}) {
   return (
     <div className="min-h-screen bg-stone-100 p-6 text-stone-900">
       <div className="mx-auto max-w-xl rounded-[2rem] border border-stone-300 bg-gradient-to-br from-stone-50 via-white to-stone-100 p-8 shadow-sm shadow-stone-300/40">
@@ -3127,37 +4054,101 @@ function LoginScreen({ loginForm, loginError, users, onChange, onSubmit }) {
             Sign in to open the scheduler, save your work, and stamp finished jobs and request history with your account.
           </p>
         </div>
-        <form onSubmit={onSubmit} className="grid gap-4">
-          <div>
-            <div className="mb-2 text-sm font-medium text-stone-800">Username</div>
-            <select
-              value={loginForm.username}
-              onChange={(event) => onChange((current) => ({ ...current, username: event.target.value }))}
-              className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
-            >
-              <option value="">Select a username</option>
-              {users.map((user) => (
-                <option key={user.id} value={user.username}>
-                  {user.username}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <div className="mb-2 text-sm font-medium text-stone-800">Password</div>
-            <input
-              type="password"
-              value={loginForm.password}
-              onChange={(event) => onChange((current) => ({ ...current, password: event.target.value }))}
-              placeholder="Enter password"
-              className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
-            />
-          </div>
-          {loginError && <div className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{loginError}</div>}
-          <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
+        <div className="mb-5 grid grid-cols-2 gap-2 rounded-2xl bg-stone-200/70 p-1">
+          <button
+            type="button"
+            onClick={() => onChangeView("login")}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+              authView === "login" ? "bg-white text-stone-900 shadow-sm" : "text-stone-700"
+            }`}
+          >
             Log in
           </button>
-        </form>
+          <button
+            type="button"
+            onClick={() => onChangeView("register")}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+              authView === "register" ? "bg-white text-stone-900 shadow-sm" : "text-stone-700"
+            }`}
+          >
+            Register
+          </button>
+        </div>
+        {authView === "login" ? (
+          <form onSubmit={onSubmitLogin} className="grid gap-4">
+            <div>
+              <div className="mb-2 text-sm font-medium text-stone-800">Username</div>
+              <select
+                value={loginForm.username}
+                onChange={(event) => onChangeLogin((current) => ({ ...current, username: event.target.value }))}
+                className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+              >
+                <option value="">Select a username</option>
+                {users.map((user) => (
+                  <option key={user.id} value={user.username}>
+                    {user.username}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <div className="mb-2 text-sm font-medium text-stone-800">Password</div>
+              <input
+                type="password"
+                value={loginForm.password}
+                onChange={(event) => onChangeLogin((current) => ({ ...current, password: event.target.value }))}
+                placeholder="Enter password"
+                className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+              />
+            </div>
+            {loginError && <div className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{loginError}</div>}
+            {registerSuccess && (
+              <div className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{registerSuccess}</div>
+            )}
+            <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
+              Log in
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={onSubmitRegister} className="grid gap-4">
+            <div className="rounded-2xl bg-stone-200/70 px-4 py-3 text-sm text-stone-700">
+              Create a name and password. A manager will need to approve the account before you can sign in.
+            </div>
+            <div>
+              <div className="mb-2 text-sm font-medium text-stone-800">Name</div>
+              <input
+                type="text"
+                value={registerForm.username}
+                onChange={(event) =>
+                  onChangeRegister((current) => ({ ...current, username: event.target.value }))
+                }
+                placeholder="Enter your name"
+                className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+              />
+            </div>
+            <div>
+              <div className="mb-2 text-sm font-medium text-stone-800">Password</div>
+              <input
+                type="password"
+                value={registerForm.password}
+                onChange={(event) =>
+                  onChangeRegister((current) => ({ ...current, password: event.target.value }))
+                }
+                placeholder="Create a password"
+                className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+              />
+            </div>
+            {registerError && (
+              <div className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{registerError}</div>
+            )}
+            <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
+              Send approval request
+            </button>
+          </form>
+        )}
+        <div className="mt-4 rounded-2xl bg-stone-200/70 px-4 py-3 text-sm text-stone-700">
+          Need to make an account? Email <span className="font-semibold">sinthavong@data-mail.com</span>
+        </div>
       </div>
     </div>
   );
