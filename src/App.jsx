@@ -4683,19 +4683,20 @@ function CompactScheduleCard({
   const state = isManual ? "note" : assignment.status === "finished" ? "done" : assignment.status;
   const title = isManual ? assignment.manualTitle || "Manual block" : `${job.customerName} ${job.number}`;
   const subtitle = isManual ? "Manual schedule block" : job.generalDescr;
+  const isCardDraggable = draggable && !!job;
 
   return (
     <div
-      draggable={draggable}
+      draggable={isCardDraggable}
       onDragStart={(event) => {
-        if (!draggable) return;
+        if (!isCardDraggable) return;
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData(
           "application/json",
           makeDragPayload({ type: "scheduled", assignmentId: assignment.id, jobId: job.id })
         );
       }}
-      className={`rounded-2xl border border-stone-300 bg-stone-100 p-2 ${draggable ? "cursor-grab" : ""}`}
+      className={`rounded-2xl border border-stone-300 bg-stone-100 p-2 ${isCardDraggable ? "cursor-grab" : ""}`}
     >
       <div className="flex items-start justify-between gap-2">
         <div
@@ -4714,7 +4715,7 @@ function CompactScheduleCard({
         </div>
         <span className={`rounded-full px-2 py-1 text-[10px] font-medium ${statusTone(state)}`}>{state}</span>
       </div>
-      {draggable && !compact && <div className="mt-1 text-[10px] text-stone-600">Drag to move</div>}
+      {isCardDraggable && !compact && <div className="mt-1 text-[10px] text-stone-600">Drag to move</div>}
       {!compact && !isManual && (
         <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-stone-700">
           <InfoPill label="Est" value={`${job.estPressTime.toFixed(2)}h`} />
