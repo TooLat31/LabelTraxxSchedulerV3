@@ -34,6 +34,12 @@ const EMPTY_NOTE_FORM = {
   text: "",
 };
 
+const EMPTY_MANUAL_SCHEDULE_FORM = {
+  title: "",
+  press: PRESS_ORDER[0],
+  dayKey: "",
+};
+
 const EMPTY_LOGIN_FORM = {
   username: "",
   password: "",
@@ -358,7 +364,15 @@ function normalizeSuppliesRequests(requests) {
 
 function normalizeAssignments(assignments) {
   return Array.isArray(assignments)
-    ? assignments.filter((assignment) => assignment.kind !== "rewind")
+    ? assignments
+        .filter((assignment) => assignment.kind !== "rewind")
+        .map((assignment, index) => ({
+          id: assignment.id || `assignment-${index + 1}`,
+          ...assignment,
+          manualTitle: safeText(assignment.manualTitle),
+          kind: safeText(assignment.kind) || "press",
+          status: safeText(assignment.status) || "scheduled",
+        }))
     : [];
 }
 
@@ -584,6 +598,7 @@ function statusTone(status) {
   if (value === "ship") return "bg-emerald-800 text-white";
   if (value === "scheduled") return "bg-stone-700 text-stone-50";
   if (value === "done") return "bg-emerald-100 text-emerald-900";
+  if (value === "note") return "bg-amber-100 text-amber-900";
   if (value === "open") return "bg-stone-200 text-stone-800";
   return "bg-stone-100 text-stone-700";
 }
@@ -734,6 +749,8 @@ export default function App() {
   const [shipmentEmailHistoryFilterDate, setShipmentEmailHistoryFilterDate] = useState("");
   const [queueCategoryFilter, setQueueCategoryFilter] = useState("All");
   const [schedulePressFilter, setSchedulePressFilter] = useState("All");
+  const [condensedSchedule, setCondensedSchedule] = useState(true);
+  const [manualScheduleForm, setManualScheduleForm] = useState(EMPTY_MANUAL_SCHEDULE_FORM);
   const [locationSearch, setLocationSearch] = useState("");
   const [syncStatus, setSyncStatus] = useState(isSupabaseConfigured ? "Connecting..." : "Local only");
   const [lastSyncAt, setLastSyncAt] = useState("");
@@ -1027,6 +1044,15 @@ export default function App() {
     );
   }, [shipmentMethods]);
 
+  useEffect(() => {
+    if (!weekColumns.length) return;
+    setManualScheduleForm((current) =>
+      current.dayKey && weekColumns.some((day) => day.key === current.dayKey)
+        ? current
+        : { ...current, dayKey: weekColumns[0].key, press: PRESS_ORDER.includes(current.press) ? current.press : PRESS_ORDER[0] }
+    );
+  }, [weekColumns]);
+
   const tabs = useMemo(
     () => [...BASE_TABS, "User Admin"].filter((tab) => canAccessTab(currentUser, tab)),
     [currentUser]
@@ -1147,8 +1173,12 @@ export default function App() {
     });
 
     assignments.forEach((assignment) => {
-      if (!filteredJobIds.has(assignment.jobId)) return;
       if (!map[assignment.dayKey]) return;
+      if (assignment.kind === "manual") {
+        map[assignment.dayKey][assignment.press].push({ assignment, job: null });
+        return;
+      }
+      if (!filteredJobIds.has(assignment.jobId)) return;
       const job = jobMap.get(assignment.jobId);
       if (!job) return;
       map[assignment.dayKey][assignment.press].push({ assignment, job });
@@ -1156,7 +1186,12 @@ export default function App() {
 
     Object.values(map).forEach((pressMap) => {
       Object.values(pressMap).forEach((laneJobs) => {
-        laneJobs.sort((left, right) => right.job.estPressTime - left.job.estPressTime);
+        laneJobs.sort((left, right) => {
+          if (!left.job && !right.job) return left.assignment.manualTitle.localeCompare(right.assignment.manualTitle);
+          if (!left.job) return -1;
+          if (!right.job) return 1;
+          return right.job.estPressTime - left.job.estPressTime;
+        });
       });
     });
 
@@ -1367,7 +1402,11 @@ export default function App() {
     const parsed = parseLabelTraxxText(text);
     if (!parsed.length) return;
     setJobs(parsed);
-    setAssignments((current) => current.filter((assignment) => parsed.some((job) => job.id === assignment.jobId)));
+    setAssignments((current) =>
+      current.filter(
+        (assignment) => assignment.kind === "manual" || parsed.some((job) => job.id === assignment.jobId)
+      )
+    );
     setShipmentGroups((current) =>
       current.map((group) => {
         const nextJobMap = new Map(parsed.map((job) => [job.id, job]));
@@ -1437,22 +1476,53 @@ export default function App() {
     });
   }
 
+  function addManualScheduleEntry(event) {
+    event.preventDefault();
+    if (!userCanMoveJobs) return;
+    const title = safeText(manualScheduleForm.title);
+    const dayKey = safeText(manualScheduleForm.dayKey);
+    const press = safeText(manualScheduleForm.press);
+    if (!title || !dayKey || !PRESS_ORDER.includes(press)) return;
+
+    setAssignments((current) => [
+      {
+        id: makeId("manual"),
+        jobId: "",
+        manualTitle: title,
+        dayKey,
+        press,
+        kind: "manual",
+        status: "scheduled",
+        createdAt: new Date().toISOString(),
+        finishedAt: null,
+        finishedBy: "",
+      },
+      ...current,
+    ]);
+    setManualScheduleForm((current) => ({ ...current, title: "" }));
+  }
+
   function moveAssignment(assignmentId, dayKey, press) {
     if (!userCanMoveJobs) return;
     setAssignments((current) => {
       const assignmentToMove = current.find((assignment) => assignment.id === assignmentId);
       if (!assignmentToMove) return current;
-      if (assignmentToMove.kind !== "press") return current;
-      if (assignmentToMove.status === "finished") return current;
+      if (assignmentToMove.kind === "press" && assignmentToMove.status === "finished") return current;
 
       const duplicate = current.some(
         (assignment) =>
           assignment.id !== assignmentId &&
-          assignment.jobId === assignmentToMove.jobId &&
-          assignment.kind === "press" &&
-          assignment.status !== "finished" &&
           assignment.dayKey === dayKey &&
-          assignment.press === press
+          assignment.press === press &&
+          (
+            (assignmentToMove.kind === "manual" &&
+              assignment.kind === "manual" &&
+              comparableUsername(assignment.manualTitle) === comparableUsername(assignmentToMove.manualTitle)) ||
+            (assignmentToMove.kind === "press" &&
+              assignment.jobId === assignmentToMove.jobId &&
+              assignment.kind === "press" &&
+              assignment.status !== "finished")
+          )
       );
       if (duplicate) return current;
 
@@ -1474,8 +1544,7 @@ export default function App() {
     setAssignments((current) => {
       const assignmentToCopy = current.find((assignment) => assignment.id === assignmentId);
       if (!assignmentToCopy) return current;
-      if (assignmentToCopy.kind !== "press") return current;
-      if (assignmentToCopy.status === "finished") return current;
+      if (assignmentToCopy.kind === "press" && assignmentToCopy.status === "finished") return current;
 
       const currentIndex = weekColumns.findIndex((day) => day.key === assignmentToCopy.dayKey);
       if (currentIndex < 0 || currentIndex >= weekColumns.length - 1) return current;
@@ -1484,11 +1553,17 @@ export default function App() {
       const exists = current.some(
         (assignment) =>
           assignment.id !== assignmentId &&
-          assignment.jobId === assignmentToCopy.jobId &&
-          assignment.kind === "press" &&
-          assignment.status !== "finished" &&
           assignment.dayKey === nextDayKey &&
-          assignment.press === assignmentToCopy.press
+          assignment.press === assignmentToCopy.press &&
+          (
+            (assignmentToCopy.kind === "manual" &&
+              assignment.kind === "manual" &&
+              comparableUsername(assignment.manualTitle) === comparableUsername(assignmentToCopy.manualTitle)) ||
+            (assignmentToCopy.kind === "press" &&
+              assignment.jobId === assignmentToCopy.jobId &&
+              assignment.kind === "press" &&
+              assignment.status !== "finished")
+          )
       );
       if (exists) return current;
 
@@ -2534,6 +2609,56 @@ export default function App() {
                       Create a request
                     </button>
                   )}
+
+                  <div className="rounded-2xl border border-stone-300 bg-white p-4">
+                    <div className="mb-3">
+                      <div className="text-sm font-medium text-stone-900">Manual schedule block</div>
+                      <div className="text-xs text-stone-600">Reserve a press/day for something like Maintenance, Changeover, or Wash-up.</div>
+                    </div>
+                    <form onSubmit={addManualScheduleEntry} className="grid gap-3">
+                      <Field
+                        label="Title"
+                        value={manualScheduleForm.title}
+                        onChange={(value) => setManualScheduleForm((current) => ({ ...current, title: value }))}
+                        placeholder="Maintenance"
+                      />
+                      <div>
+                        <div className="mb-2 text-sm font-medium text-stone-800">Press</div>
+                        <select
+                          value={manualScheduleForm.press}
+                          onChange={(event) => setManualScheduleForm((current) => ({ ...current, press: event.target.value }))}
+                          className="w-full rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                        >
+                          {PRESS_ORDER.map((press) => (
+                            <option key={press} value={press}>
+                              Press {press}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <div className="mb-2 text-sm font-medium text-stone-800">Day</div>
+                        <select
+                          value={manualScheduleForm.dayKey}
+                          onChange={(event) => setManualScheduleForm((current) => ({ ...current, dayKey: event.target.value }))}
+                          className="w-full rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                        >
+                          {weekColumns.map((day) => (
+                            <option key={day.key} value={day.key}>
+                              {day.label} - {formatShortDate(day.date)}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={!userCanMoveJobs}
+                        className="rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm text-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Add block
+                      </button>
+                    </form>
+                  </div>
                 </div>
               </div>
 
@@ -2639,6 +2764,13 @@ export default function App() {
                       </option>
                     ))}
                   </select>
+                  <button
+                    type="button"
+                    onClick={() => setCondensedSchedule((current) => !current)}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800"
+                  >
+                    {condensedSchedule ? "Expanded cards" : "Condensed cards"}
+                  </button>
                   <input
                     type="text"
                     value={search}
@@ -2658,7 +2790,7 @@ export default function App() {
                     <div className="space-y-3">
                       {visiblePresses.map((press) => {
                         const laneJobs = board[day.key]?.[press] || [];
-                        const totalHours = laneJobs.reduce((sum, item) => sum + item.job.estPressTime, 0);
+                        const totalHours = laneJobs.reduce((sum, item) => sum + (item.job?.estPressTime || 0), 0);
                         return (
                           <div
                             key={`${day.key}-${press}`}
@@ -2683,10 +2815,11 @@ export default function App() {
                                   key={assignment.id}
                                   job={job}
                                   assignment={assignment}
-                                  finishMeta={finishedMetaByJobId.get(job.id)}
-                                  onSelect={() => selectJob(job.id)}
+                                  finishMeta={job ? finishedMetaByJobId.get(job.id) : null}
+                                  compact={condensedSchedule}
+                                  onSelect={job ? () => selectJob(job.id) : undefined}
                                   onUnschedule={userCanMoveJobs ? () => removeAssignment(assignment.id) : undefined}
-                                  onFinish={userCanEdit ? () => finishJob(job.id) : undefined}
+                                  onFinish={job && userCanEdit ? () => finishJob(job.id) : undefined}
                                   onDuplicate={userCanMoveJobs ? () => duplicateAssignmentToNextDay(assignment.id) : undefined}
                                   draggable={userCanMoveJobs && assignment.status !== "finished"}
                                 />
@@ -4539,13 +4672,17 @@ function CompactScheduleCard({
   job,
   assignment,
   finishMeta,
+  compact = false,
   onSelect,
   onUnschedule,
   onFinish,
   onDuplicate,
   draggable = false,
 }) {
-  const state = assignment.status === "finished" ? "done" : assignment.status;
+  const isManual = assignment.kind === "manual";
+  const state = isManual ? "note" : assignment.status === "finished" ? "done" : assignment.status;
+  const title = isManual ? assignment.manualTitle || "Manual block" : `${job.customerName} ${job.number}`;
+  const subtitle = isManual ? "Manual schedule block" : job.generalDescr;
 
   return (
     <div
@@ -4568,27 +4705,29 @@ function CompactScheduleCard({
           onKeyDown={(event) => {
             if (event.key === "Enter" || event.key === " ") onSelect?.();
           }}
-          className="min-w-0 flex-1 cursor-pointer"
+          className={`min-w-0 flex-1 ${onSelect ? "cursor-pointer" : ""}`}
         >
           <div className="truncate text-xs font-semibold text-stone-900">
-            {job.customerName} {job.number}
+            {title}
           </div>
-          <div className="mt-1 line-clamp-2 text-[11px] text-stone-700">{job.generalDescr}</div>
+          {!compact && <div className="mt-1 line-clamp-2 text-[11px] text-stone-700">{subtitle}</div>}
         </div>
         <span className={`rounded-full px-2 py-1 text-[10px] font-medium ${statusTone(state)}`}>{state}</span>
       </div>
-      {draggable && <div className="mt-1 text-[10px] text-stone-600">Drag to move</div>}
-      <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-stone-700">
-        <InfoPill label="Est" value={`${job.estPressTime.toFixed(2)}h`} />
-        <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
-      </div>
-      {finishMeta?.finishedAt && (
+      {draggable && !compact && <div className="mt-1 text-[10px] text-stone-600">Drag to move</div>}
+      {!compact && !isManual && (
+        <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-stone-700">
+          <InfoPill label="Est" value={`${job.estPressTime.toFixed(2)}h`} />
+          <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
+        </div>
+      )}
+      {finishMeta?.finishedAt && !compact && !isManual && (
         <div className="mt-2 text-[11px] text-stone-600">
           {formatDateTime(finishMeta.finishedAt)} {finishMeta.finishedBy ? `- ${finishMeta.finishedBy}` : ""}
         </div>
       )}
       {(onUnschedule || onFinish || onDuplicate) && (
-        <div className="mt-2 flex gap-2">
+        <div className={`${compact ? "mt-1" : "mt-2"} flex flex-wrap gap-2`}>
           {onUnschedule && (
             <button onClick={onUnschedule} className="rounded-xl border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800">
               Remove
