@@ -1044,15 +1044,6 @@ function SchedulerApp() {
     );
   }, [shipmentMethods]);
 
-  useEffect(() => {
-    if (!weekColumns.length) return;
-    setManualScheduleForm((current) =>
-      current.dayKey && weekColumns.some((day) => day.key === current.dayKey)
-        ? current
-        : { ...current, dayKey: weekColumns[0].key, press: PRESS_ORDER.includes(current.press) ? current.press : PRESS_ORDER[0] }
-    );
-  }, [weekColumns]);
-
   const tabs = useMemo(
     () => [...BASE_TABS, "User Admin"].filter((tab) => canAccessTab(currentUser, tab)),
     [currentUser]
@@ -1061,6 +1052,15 @@ function SchedulerApp() {
   const weekColumns = useMemo(() => buildWeekColumns(weekStart), [weekStart]);
   const weekKeys = useMemo(() => new Set(weekColumns.map((column) => column.key)), [weekColumns]);
   const jobMap = useMemo(() => new Map(jobs.map((job) => [job.id, job])), [jobs]);
+
+  useEffect(() => {
+    if (!weekColumns.length) return;
+    setManualScheduleForm((current) =>
+      current.dayKey && weekColumns.some((day) => day.key === current.dayKey)
+        ? current
+        : { ...current, dayKey: weekColumns[0].key, press: PRESS_ORDER.includes(current.press) ? current.press : PRESS_ORDER[0] }
+    );
+  }, [weekColumns]);
 
   const filteredJobs = useMemo(() => {
     return jobs.filter((job) => {
