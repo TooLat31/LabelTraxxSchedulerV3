@@ -699,7 +699,7 @@ function deriveVisibleJobState(jobId, activePressJobIds, finishedJobIds) {
   return "open";
 }
 
-export default function App() {
+function SchedulerApp() {
   const [isReady, setIsReady] = useState(false);
   const [jobs, setJobs] = useState([]);
   const [assignments, setAssignments] = useState([]);
@@ -4756,5 +4756,69 @@ function InfoPill({ label, value }) {
       <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-600">{label}</div>
       <div className="mt-1 font-medium text-stone-800">{value}</div>
     </div>
+  );
+}
+
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error) {
+    console.error("Label Traxx Scheduler crashed.", error);
+  }
+
+  resetBrowserData = () => {
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+    window.location.reload();
+  };
+
+  render() {
+    if (!this.state.error) return this.props.children;
+
+    return (
+      <div className="min-h-screen bg-stone-100 p-6 text-stone-900">
+        <div className="mx-auto max-w-2xl rounded-[2rem] border border-rose-200 bg-white p-8 shadow-sm shadow-stone-300/40">
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-rose-700">App error</p>
+          <h1 className="mt-2 text-2xl font-semibold tracking-tight">The scheduler hit a browser-side error.</h1>
+          <p className="mt-3 text-sm text-stone-700">
+            Use the reset button below to clear saved browser data for this device and reload the app.
+          </p>
+          <div className="mt-4 rounded-2xl bg-stone-100 p-4 text-sm text-stone-800">
+            {safeText(this.state.error?.message) || "Unknown error"}
+          </div>
+          <div className="mt-5 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm text-stone-800"
+            >
+              Reload app
+            </button>
+            <button
+              type="button"
+              onClick={this.resetBrowserData}
+              className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white"
+            >
+              Reset saved browser data
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+}
+
+export default function App() {
+  return (
+    <AppErrorBoundary>
+      <SchedulerApp />
+    </AppErrorBoundary>
   );
 }
