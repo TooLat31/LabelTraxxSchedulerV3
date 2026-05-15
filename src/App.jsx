@@ -69,6 +69,12 @@ const EMPTY_SHIPMENT_FORM = {
 };
 
 const EMPTY_EMAIL_FORM = {
+  groupId: "",
+  recipients: "",
+};
+
+const EMPTY_EMAIL_GROUP_FORM = {
+  name: "",
   recipients: "",
 };
 
@@ -413,6 +419,18 @@ function normalizeShipmentEmailLogs(logs) {
     : [];
 }
 
+function normalizeShipmentEmailGroups(groups) {
+  return Array.isArray(groups)
+    ? groups
+        .map((group, index) => ({
+          id: group.id || `email-group-${index + 1}`,
+          name: safeText(group.name),
+          recipients: safeText(group.recipients),
+        }))
+        .filter((group) => group.name && group.recipients)
+    : [];
+}
+
 function defaultSharedSnapshot() {
   return {
     jobs: [],
@@ -424,6 +442,7 @@ function defaultSharedSnapshot() {
     suppliesRequests: [],
     shipmentGroups: [],
     shipmentEmailLogs: [],
+    shipmentEmailGroups: [],
     shipmentMethods: [...DEFAULT_SHIPMENT_METHODS],
     users: [buildDefaultAdmin()],
     weekStart: startOfWeek(new Date()).toISOString(),
@@ -442,6 +461,7 @@ function normalizeSharedSnapshot(snapshot) {
     suppliesRequests: normalizeSuppliesRequests(source.suppliesRequests),
     shipmentGroups: normalizeShipmentGroups(source.shipmentGroups),
     shipmentEmailLogs: normalizeShipmentEmailLogs(source.shipmentEmailLogs),
+    shipmentEmailGroups: normalizeShipmentEmailGroups(source.shipmentEmailGroups),
     shipmentMethods: normalizeShipmentMethods(source.shipmentMethods),
     users: normalizeUsers(source.users),
     weekStart: source.weekStart ? new Date(source.weekStart) : startOfWeek(new Date()),
@@ -459,6 +479,7 @@ function buildSharedSnapshot(state) {
     suppliesRequests: state.suppliesRequests,
     shipmentGroups: state.shipmentGroups,
     shipmentEmailLogs: state.shipmentEmailLogs,
+    shipmentEmailGroups: state.shipmentEmailGroups,
     shipmentMethods: state.shipmentMethods,
     users: state.users,
     weekStart: state.weekStart.toISOString(),
@@ -710,6 +731,7 @@ function SchedulerApp() {
   const [suppliesRequests, setSuppliesRequests] = useState([]);
   const [shipmentGroups, setShipmentGroups] = useState([]);
   const [shipmentEmailLogs, setShipmentEmailLogs] = useState([]);
+  const [shipmentEmailGroups, setShipmentEmailGroups] = useState([]);
   const [shipmentMethods, setShipmentMethods] = useState([...DEFAULT_SHIPMENT_METHODS]);
   const [users, setUsers] = useState([buildDefaultAdmin()]);
   const [currentUsername, setCurrentUsername] = useState("");
@@ -735,6 +757,7 @@ function SchedulerApp() {
   const [shipmentDraftAttachments, setShipmentDraftAttachments] = useState([]);
   const [newShipmentMethod, setNewShipmentMethod] = useState("");
   const [shipmentEmailForm, setShipmentEmailForm] = useState(EMPTY_EMAIL_FORM);
+  const [shipmentEmailGroupForm, setShipmentEmailGroupForm] = useState(EMPTY_EMAIL_GROUP_FORM);
   const [loginForm, setLoginForm] = useState(EMPTY_LOGIN_FORM);
   const [loginError, setLoginError] = useState("");
   const [authView, setAuthView] = useState("login");
@@ -772,6 +795,7 @@ function SchedulerApp() {
       setSuppliesRequests(normalized.suppliesRequests);
       setShipmentGroups(normalized.shipmentGroups);
       setShipmentEmailLogs(normalized.shipmentEmailLogs);
+      setShipmentEmailGroups(normalized.shipmentEmailGroups);
       setShipmentMethods(normalized.shipmentMethods);
       setUsers(normalized.users);
       setWeekStart(normalized.weekStart);
@@ -875,6 +899,7 @@ function SchedulerApp() {
       suppliesRequests,
       shipmentGroups,
       shipmentEmailLogs,
+      shipmentEmailGroups,
       shipmentMethods,
       users,
       weekStart,
@@ -913,7 +938,7 @@ function SchedulerApp() {
     return () => {
       window.clearTimeout(saveTimerRef.current);
     };
-  }, [assignments, currentUsername, isReady, jobs, notes, pullPaperRequests, registrationRequests, requests, shipmentEmailLogs, shipmentGroups, shipmentMethods, suppliesRequests, users, weekStart]);
+  }, [assignments, currentUsername, isReady, jobs, notes, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, suppliesRequests, users, weekStart]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -1005,6 +1030,7 @@ function SchedulerApp() {
           setSuppliesRequests(normalized.suppliesRequests);
           setShipmentGroups(normalized.shipmentGroups);
           setShipmentEmailLogs(normalized.shipmentEmailLogs);
+          setShipmentEmailGroups(normalized.shipmentEmailGroups);
           setShipmentMethods(normalized.shipmentMethods);
           setUsers(normalized.users);
           setWeekStart(normalized.weekStart);
@@ -2278,6 +2304,40 @@ function SchedulerApp() {
     ]);
   }
 
+  function applyShipmentEmailGroup(groupId) {
+    const group = shipmentEmailGroups.find((item) => item.id === groupId);
+    setShipmentEmailForm({
+      groupId,
+      recipients: group?.recipients || "",
+    });
+  }
+
+  function saveShipmentEmailGroup() {
+    if (!userCanEdit) return;
+    const name = safeText(shipmentEmailGroupForm.name);
+    const recipients = safeText(shipmentEmailGroupForm.recipients || shipmentEmailForm.recipients);
+    if (!name || !recipients) return;
+
+    setShipmentEmailGroups((current) => {
+      const existing = current.find((group) => comparableUsername(group.name) === comparableUsername(name));
+      if (existing) {
+        return current.map((group) => (group.id === existing.id ? { ...group, name, recipients } : group));
+      }
+      return [...current, { id: makeId("email-group"), name, recipients }];
+    });
+
+    setShipmentEmailForm((current) => ({ ...current, recipients }));
+    setShipmentEmailGroupForm(EMPTY_EMAIL_GROUP_FORM);
+  }
+
+  function removeShipmentEmailGroup(groupId) {
+    if (!userCanEdit) return;
+    setShipmentEmailGroups((current) => current.filter((group) => group.id !== groupId));
+    setShipmentEmailForm((current) =>
+      current.groupId === groupId ? { groupId: "", recipients: "" } : current
+    );
+  }
+
   function loadDemo() {
     const sample = `Press\tNumber\tCustomerName\tGeneralDescr\tCustPONum\tPriority\tShip_by_Date\tEntryDate\tDue_on_Site_Date\tStockNum2\tStockNum1\tStatus\tMainTool\tToolNo2\tTicQuantity\tEstFootage\tEstPressTime\tNotes
 5.1\t10159\tData Graphics\t1.625" Cap One Circle 70072\t223000DG\tHigh\t04/28/26\t04/18/26\t04/29/26\t266\t\tOpen\t946\t\t3,612,279\t113,847\t9.76\tExample long notes
@@ -2715,6 +2775,7 @@ function SchedulerApp() {
                       key={job.id}
                       job={job}
                       state={deriveVisibleJobState(job.id, activePressJobIds, userFinishedJobIds)}
+                      selected={selectedJobId === job.id}
                       onClick={() => selectJob(job.id)}
                       onDoubleClick={() => selectJob(job.id, true)}
                       onFinish={userCanEdit ? () => finishJob(job.id) : undefined}
@@ -2817,6 +2878,7 @@ function SchedulerApp() {
                                   assignment={assignment}
                                   finishMeta={job ? finishedMetaByJobId.get(job.id) : null}
                                   compact={condensedSchedule}
+                                  selected={job ? selectedJobId === job.id : false}
                                   onSelect={job ? () => selectJob(job.id) : undefined}
                                   onUnschedule={userCanMoveJobs ? () => removeAssignment(assignment.id) : undefined}
                                   onFinish={job && userCanEdit ? () => finishJob(job.id) : undefined}
@@ -2963,6 +3025,7 @@ function SchedulerApp() {
                             key={job.id}
                             job={job}
                             state="ship"
+                            selected={selectedJobId === job.id}
                             onClick={() => selectJob(job.id)}
                             finishedAt={job.finishMeta?.finishedAt}
                             finishedBy={job.finishMeta?.finishedBy}
@@ -3714,9 +3777,56 @@ function SchedulerApp() {
                     <Field
                       label="Recipients"
                       value={shipmentEmailForm.recipients}
-                      onChange={(value) => setShipmentEmailForm({ recipients: value })}
+                      onChange={(value) => setShipmentEmailForm((current) => ({ ...current, recipients: value }))}
                       placeholder="shipping@company.com; billing@company.com"
                     />
+                    <div className="rounded-2xl border border-stone-300 bg-white p-4">
+                      <div className="mb-3 text-sm font-semibold">Email groups</div>
+                      <div className="grid gap-3">
+                        <div className="flex flex-col gap-2 md:flex-row">
+                          <select
+                            value={shipmentEmailForm.groupId}
+                            onChange={(event) => applyShipmentEmailGroup(event.target.value)}
+                            className="flex-1 rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                          >
+                            <option value="">Select a saved email group</option>
+                            {shipmentEmailGroups.map((group) => (
+                              <option key={group.id} value={group.id}>
+                                {group.name}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            disabled={!userCanEdit || !shipmentEmailForm.groupId}
+                            onClick={() => removeShipmentEmailGroup(shipmentEmailForm.groupId)}
+                            className="rounded-2xl border border-rose-200 px-4 py-3 text-sm text-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Remove group
+                          </button>
+                        </div>
+                        <Field
+                          label="Group name"
+                          value={shipmentEmailGroupForm.name}
+                          onChange={(value) => setShipmentEmailGroupForm((current) => ({ ...current, name: value }))}
+                          placeholder="Daily shipment list"
+                        />
+                        <Field
+                          label="Group recipients"
+                          value={shipmentEmailGroupForm.recipients}
+                          onChange={(value) => setShipmentEmailGroupForm((current) => ({ ...current, recipients: value }))}
+                          placeholder="team1@company.com; team2@company.com"
+                        />
+                        <button
+                          type="button"
+                          disabled={!userCanEdit}
+                          onClick={saveShipmentEmailGroup}
+                          className="rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm text-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          Save group
+                        </button>
+                      </div>
+                    </div>
                     <div className="rounded-2xl bg-stone-100 p-4 text-sm text-stone-800">
                       <div className="font-semibold">{buildShipmentEmailDraft().subject}</div>
                       <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap text-xs text-stone-700">{buildShipmentEmailDraft().body}</pre>
@@ -4447,6 +4557,7 @@ function JobCard({
   finishedAt,
   finishedBy,
   canMove = true,
+  selected = false,
 }) {
   const isDraggable = state !== "finished" && canMove;
 
@@ -4464,7 +4575,7 @@ function JobCard({
       }}
       onClick={() => onClick?.()}
       onDoubleClick={() => onDoubleClick?.()}
-      className={`rounded-2xl border border-stone-300 bg-white p-3 shadow-sm shadow-stone-300/20 ${isDraggable ? "cursor-grab" : ""}`}
+      className={`rounded-2xl border p-3 shadow-sm ${selected ? "border-sky-300 bg-sky-50 shadow-sky-100/70" : "border-stone-300 bg-white shadow-stone-300/20"} ${isDraggable ? "cursor-grab" : ""}`}
     >
       <div className="mb-2 flex items-start justify-between gap-2">
         <div
@@ -4673,6 +4784,7 @@ function CompactScheduleCard({
   assignment,
   finishMeta,
   compact = false,
+  selected = false,
   onSelect,
   onUnschedule,
   onFinish,
@@ -4696,7 +4808,7 @@ function CompactScheduleCard({
           makeDragPayload({ type: "scheduled", assignmentId: assignment.id, jobId: job.id })
         );
       }}
-      className={`rounded-2xl border border-stone-300 bg-stone-100 p-2 ${isCardDraggable ? "cursor-grab" : ""}`}
+      className={`rounded-2xl border p-2 ${selected ? "border-sky-300 bg-sky-50" : "border-stone-300 bg-stone-100"} ${isCardDraggable ? "cursor-grab" : ""}`}
     >
       <div className="flex items-start justify-between gap-2">
         <div
