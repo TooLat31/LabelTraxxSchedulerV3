@@ -45,6 +45,36 @@ with check (true);
 
 alter publication supabase_realtime add table public.app_state;
 
+insert into storage.buckets (id, name, public)
+values ('labeltraxx-attachments', 'labeltraxx-attachments', true)
+on conflict (id) do update
+set public = excluded.public;
+
+drop policy if exists "labeltraxx_attachments_select" on storage.objects;
+create policy "labeltraxx_attachments_select"
+on storage.objects
+for select
+using (bucket_id = 'labeltraxx-attachments');
+
+drop policy if exists "labeltraxx_attachments_insert" on storage.objects;
+create policy "labeltraxx_attachments_insert"
+on storage.objects
+for insert
+with check (bucket_id = 'labeltraxx-attachments');
+
+drop policy if exists "labeltraxx_attachments_update" on storage.objects;
+create policy "labeltraxx_attachments_update"
+on storage.objects
+for update
+using (bucket_id = 'labeltraxx-attachments')
+with check (bucket_id = 'labeltraxx-attachments');
+
+drop policy if exists "labeltraxx_attachments_delete" on storage.objects;
+create policy "labeltraxx_attachments_delete"
+on storage.objects
+for delete
+using (bucket_id = 'labeltraxx-attachments');
+
 insert into public.app_state (id, payload, updated_by)
 values (
   'labeltraxx-shared-state',

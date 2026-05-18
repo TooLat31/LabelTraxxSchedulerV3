@@ -7,13 +7,21 @@ const SESSION_STORAGE_KEY = "labeltraxx-scheduler-session-v1";
 const SHARED_STATE_ROW_ID = "labeltraxx-shared-state";
 const LOGIN_SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
 const SHARED_SAVE_DEBOUNCE_MS = 700;
-const BASE_TABS = ["Scheduler", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails"];
+const ATTACHMENT_BUCKET = "labeltraxx-attachments";
+const ACTIVITY_LOG_LIMIT = 300;
+const BASE_TABS = ["Today", "Scheduler", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails", "Activity Log"];
 const ACCESS_MODE_OPTIONS = ["edit", "view"];
 const ATTACHMENT_ACCEPT =
   ".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.png,.jpg,.jpeg,.zip,.msg,.eml";
 const PULL_PAPER_TARGETS = ["Press 5.1", "Press 6.1", "Press 2.1", "Press 1.1", "Digital"];
 const ROLE_OPTIONS = ["Management", "Warehouse/Shipper", "Operator"];
 const DEFAULT_SHIPMENT_METHODS = ["Skid", "FedEx", "UPS", "LTL", "Customer Pickup"];
+const SCHEDULE_DENSITY_OPTIONS = ["compact", "standard", "detailed"];
+const SCHEDULE_DENSITY_LABELS = {
+  compact: "Compact cards",
+  standard: "Standard cards",
+  detailed: "Detailed cards",
+};
 
 const EMPTY_REQUEST_FORM = {
   jobNumber: "",
@@ -77,6 +85,12 @@ const EMPTY_EMAIL_FORM = {
 const EMPTY_EMAIL_GROUP_FORM = {
   name: "",
   recipients: "",
+};
+
+const EMPTY_ACTIVITY_FILTERS = {
+  actor: "All",
+  scope: "All",
+  date: "",
 };
 
 function safeText(value) {
@@ -315,11 +329,78 @@ function buildJobSearchText(job) {
   return `${safeText(job.number)} ${safeText(job.customerName)} ${safeText(job.generalDescr)} ${safeText(job.notes)}`.toLowerCase();
 }
 
+function sanitizeAttachmentName(name) {
+  const cleaned = safeText(name).replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-");
+  return cleaned.replace(/^-|-$/g, "") || "file";
+}
+
+function buildAttachmentPath(id, fileName) {
+  const stamp = new Date().toISOString().slice(0, 10);
+  return `${stamp}/${id}-${sanitizeAttachmentName(fileName)}`;
+}
+
+function normalizeAttachment(attachment, index) {
+  return {
+    id: attachment.id || `attachment-${index + 1}`,
+    name: safeText(attachment.name),
+    size: parseNumber(attachment.size),
+    type: safeText(attachment.type) || "application/octet-stream",
+    uploadedAt: attachment.uploadedAt || new Date().toISOString(),
+    uploadedBy: safeText(attachment.uploadedBy),
+    storagePath: safeText(attachment.storagePath),
+    publicUrl: safeText(attachment.publicUrl),
+    dataUrl: safeText(attachment.dataUrl),
+  };
+}
+
+function normalizeAttachments(attachments) {
+  return Array.isArray(attachments)
+    ? attachments.map((attachment, index) => normalizeAttachment(attachment, index)).filter((attachment) => attachment.name)
+    : [];
+}
+
+function getAttachmentHref(attachment) {
+  return safeText(attachment.publicUrl) || safeText(attachment.dataUrl);
+}
+
+function storageUploadsEnabled() {
+  return !!(isSupabaseConfigured && supabase);
+}
+
+function appendActivityEntry(currentLog, entry) {
+  const nextEntry = {
+    id: entry.id || makeId("activity"),
+    actor: safeText(entry.actor) || "system",
+    action: safeText(entry.action),
+    scope: safeText(entry.scope) || "General",
+    description: safeText(entry.description),
+    createdAt: entry.createdAt || new Date().toISOString(),
+    details: entry.details && typeof entry.details === "object" ? entry.details : {},
+  };
+  return [nextEntry, ...(Array.isArray(currentLog) ? currentLog : [])].slice(0, ACTIVITY_LOG_LIMIT);
+}
+
+function normalizeActivityLog(log) {
+  return Array.isArray(log)
+    ? log
+        .map((entry, index) => ({
+          id: entry.id || `activity-${index + 1}`,
+          actor: safeText(entry.actor) || "system",
+          action: safeText(entry.action),
+          scope: safeText(entry.scope) || "General",
+          description: safeText(entry.description),
+          createdAt: entry.createdAt || new Date().toISOString(),
+          details: entry.details && typeof entry.details === "object" ? entry.details : {},
+        }))
+        .filter((entry) => entry.action || entry.description)
+    : [];
+}
+
 function normalizeRequests(requests) {
   return Array.isArray(requests)
     ? requests.map((request) => ({
         ...request,
-        attachments: Array.isArray(request.attachments) ? request.attachments : [],
+        attachments: normalizeAttachments(request.attachments),
         createdByAccount: request.createdByAccount || "",
         completedByAccount: request.completedByAccount || "",
       }))
@@ -368,7 +449,7 @@ function normalizeSuppliesRequests(requests) {
   return Array.isArray(requests)
     ? requests.map((request) => ({
         ...request,
-        attachments: Array.isArray(request.attachments) ? request.attachments : [],
+        attachments: normalizeAttachments(request.attachments),
       }))
     : [];
 }
@@ -391,7 +472,7 @@ function normalizeShipmentGroups(groups) {
   return Array.isArray(groups)
     ? groups.map((group) => ({
         ...group,
-        attachments: Array.isArray(group.attachments) ? group.attachments : [],
+        attachments: normalizeAttachments(group.attachments),
         billAmount: parseCurrency(group.billAmount),
       }))
     : [];
@@ -448,6 +529,7 @@ function defaultSharedSnapshot() {
     shipmentGroups: [],
     shipmentEmailLogs: [],
     shipmentEmailGroups: [],
+    activityLog: [],
     shipmentMethods: [...DEFAULT_SHIPMENT_METHODS],
     users: [buildDefaultAdmin()],
     weekStart: startOfWeek(new Date()).toISOString(),
@@ -467,6 +549,7 @@ function normalizeSharedSnapshot(snapshot) {
     shipmentGroups: normalizeShipmentGroups(source.shipmentGroups),
     shipmentEmailLogs: normalizeShipmentEmailLogs(source.shipmentEmailLogs),
     shipmentEmailGroups: normalizeShipmentEmailGroups(source.shipmentEmailGroups),
+    activityLog: normalizeActivityLog(source.activityLog),
     shipmentMethods: normalizeShipmentMethods(source.shipmentMethods),
     users: normalizeUsers(source.users),
     weekStart: source.weekStart ? new Date(source.weekStart) : startOfWeek(new Date()),
@@ -485,23 +568,26 @@ function buildSharedSnapshot(state) {
     shipmentGroups: state.shipmentGroups,
     shipmentEmailLogs: state.shipmentEmailLogs,
     shipmentEmailGroups: state.shipmentEmailGroups,
+    activityLog: state.activityLog,
     shipmentMethods: state.shipmentMethods,
     users: state.users,
     weekStart: state.weekStart.toISOString(),
   };
 }
 
-function readFileAsAttachment(file, uploadedBy) {
+function readFileAsDataUrlAttachment(file, uploadedBy, id = makeId("att")) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () =>
       resolve({
-        id: makeId("att"),
+        id,
         name: file.name,
         size: file.size,
         type: file.type || "application/octet-stream",
         uploadedAt: new Date().toISOString(),
         uploadedBy,
+        storagePath: "",
+        publicUrl: "",
         dataUrl: String(reader.result || ""),
       });
     reader.onerror = () => reject(reader.error || new Error("Failed to read file."));
@@ -509,10 +595,63 @@ function readFileAsAttachment(file, uploadedBy) {
   });
 }
 
+async function buildAttachment(file, uploadedBy) {
+  const id = makeId("att");
+  const baseAttachment = {
+    id,
+    name: file.name,
+    size: file.size,
+    type: file.type || "application/octet-stream",
+    uploadedAt: new Date().toISOString(),
+    uploadedBy,
+    storagePath: "",
+    publicUrl: "",
+    dataUrl: "",
+  };
+
+  if (storageUploadsEnabled()) {
+    try {
+      const storagePath = buildAttachmentPath(id, file.name);
+      const { error } = await supabase.storage.from(ATTACHMENT_BUCKET).upload(storagePath, file, {
+        upsert: false,
+        contentType: baseAttachment.type,
+      });
+      if (!error) {
+        const { data } = supabase.storage.from(ATTACHMENT_BUCKET).getPublicUrl(storagePath);
+        return {
+          ...baseAttachment,
+          storagePath,
+          publicUrl: safeText(data?.publicUrl),
+        };
+      }
+      console.warn("Falling back to inline attachment storage.", error);
+    } catch (error) {
+      console.error("Failed to upload attachment to Supabase storage.", error);
+    }
+  }
+
+  return readFileAsDataUrlAttachment(file, uploadedBy, id);
+}
+
 async function buildAttachments(fileList, uploadedBy) {
   const files = Array.from(fileList || []);
   if (!files.length) return [];
-  return Promise.all(files.map((file) => readFileAsAttachment(file, uploadedBy)));
+  return Promise.all(files.map((file) => buildAttachment(file, uploadedBy)));
+}
+
+async function deleteStoredAttachments(attachments) {
+  const removablePaths = normalizeAttachments(attachments)
+    .map((attachment) => safeText(attachment.storagePath))
+    .filter(Boolean);
+  if (!removablePaths.length || !storageUploadsEnabled()) return;
+  try {
+    const { error } = await supabase.storage.from(ATTACHMENT_BUCKET).remove(removablePaths);
+    if (error) {
+      console.error("Failed to delete attachment from Supabase storage.", error);
+    }
+  } catch (error) {
+    console.error("Failed to delete attachment from Supabase storage.", error);
+  }
 }
 
 function looksLikeJobRow(parts) {
@@ -737,6 +876,7 @@ function SchedulerApp() {
   const [shipmentGroups, setShipmentGroups] = useState([]);
   const [shipmentEmailLogs, setShipmentEmailLogs] = useState([]);
   const [shipmentEmailGroups, setShipmentEmailGroups] = useState([]);
+  const [activityLog, setActivityLog] = useState([]);
   const [shipmentMethods, setShipmentMethods] = useState([...DEFAULT_SHIPMENT_METHODS]);
   const [users, setUsers] = useState([buildDefaultAdmin()]);
   const [currentUsername, setCurrentUsername] = useState("");
@@ -775,9 +915,12 @@ function SchedulerApp() {
   const [requestHistoryFilterDate, setRequestHistoryFilterDate] = useState("");
   const [shipmentHistoryFilterDate, setShipmentHistoryFilterDate] = useState("");
   const [shipmentEmailHistoryFilterDate, setShipmentEmailHistoryFilterDate] = useState("");
+  const [activityFilters, setActivityFilters] = useState(EMPTY_ACTIVITY_FILTERS);
   const [queueCategoryFilter, setQueueCategoryFilter] = useState("All");
   const [schedulePressFilter, setSchedulePressFilter] = useState("All");
-  const [condensedSchedule, setCondensedSchedule] = useState(true);
+  const [scheduleCardDensity, setScheduleCardDensity] = useState("compact");
+  const [hideEmptyPresses, setHideEmptyPresses] = useState(false);
+  const [boardFocusMode, setBoardFocusMode] = useState(false);
   const [manualScheduleForm, setManualScheduleForm] = useState(EMPTY_MANUAL_SCHEDULE_FORM);
   const [locationSearch, setLocationSearch] = useState("");
   const [syncStatus, setSyncStatus] = useState(isSupabaseConfigured ? "Connecting..." : "Local only");
@@ -804,6 +947,7 @@ function SchedulerApp() {
       setShipmentGroups(normalized.shipmentGroups);
       setShipmentEmailLogs(normalized.shipmentEmailLogs);
       setShipmentEmailGroups(normalized.shipmentEmailGroups);
+      setActivityLog(normalized.activityLog);
       setShipmentMethods(normalized.shipmentMethods);
       setUsers(normalized.users);
       setWeekStart(normalized.weekStart);
@@ -908,6 +1052,7 @@ function SchedulerApp() {
       shipmentGroups,
       shipmentEmailLogs,
       shipmentEmailGroups,
+      activityLog,
       shipmentMethods,
       users,
       weekStart,
@@ -956,7 +1101,7 @@ function SchedulerApp() {
     return () => {
       window.clearTimeout(saveTimerRef.current);
     };
-  }, [assignments, currentUsername, isReady, jobs, notes, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, suppliesRequests, users, weekStart]);
+  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, suppliesRequests, users, weekStart]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -979,6 +1124,18 @@ function SchedulerApp() {
   const userCanEdit = useMemo(() => canEdit(currentUser), [currentUser]);
   const userCanManageUsers = useMemo(() => hasManagementAccess(currentUser), [currentUser]);
   const userCanMoveJobs = useMemo(() => canMoveJobs(currentUser), [currentUser]);
+
+  function recordActivity(action, scope, description, details = {}) {
+    setActivityLog((current) =>
+      appendActivityEntry(current, {
+        actor: currentUser?.username || "system",
+        action,
+        scope,
+        description,
+        details,
+      })
+    );
+  }
 
   useEffect(() => {
     if (currentUser) return;
@@ -1049,6 +1206,7 @@ function SchedulerApp() {
           setShipmentGroups(normalized.shipmentGroups);
           setShipmentEmailLogs(normalized.shipmentEmailLogs);
           setShipmentEmailGroups(normalized.shipmentEmailGroups);
+          setActivityLog(normalized.activityLog);
           setShipmentMethods(normalized.shipmentMethods);
           setUsers(normalized.users);
           setWeekStart(normalized.weekStart);
@@ -1426,9 +1584,83 @@ function SchedulerApp() {
     [jobs]
   );
 
+  const todayDateKey = todayKey();
   const visiblePresses = useMemo(
     () => (schedulePressFilter === "All" ? PRESS_ORDER : PRESS_ORDER.filter((press) => press === schedulePressFilter)),
     [schedulePressFilter]
+  );
+  const schedulePressesByDay = useMemo(
+    () =>
+      weekColumns.map((day) => ({
+        ...day,
+        presses: visiblePresses.filter((press) => !hideEmptyPresses || (board[day.key]?.[press] || []).length),
+      })),
+    [board, hideEmptyPresses, visiblePresses, weekColumns]
+  );
+  const todayScheduledItems = useMemo(
+    () =>
+      (board[todayDateKey] ? Object.entries(board[todayDateKey]) : [])
+        .flatMap(([press, laneJobs]) =>
+          laneJobs.map(({ assignment, job }) => ({
+            press,
+            assignment,
+            job,
+          }))
+        )
+        .sort((left, right) => {
+          if (!left.job && !right.job) return left.press.localeCompare(right.press);
+          if (!left.job) return -1;
+          if (!right.job) return 1;
+          return left.press.localeCompare(right.press) || right.job.estPressTime - left.job.estPressTime;
+        }),
+    [board, todayDateKey]
+  );
+  const jobsDueToday = useMemo(
+    () =>
+      jobs
+        .filter((job) => job.shipByDate && isoDate(job.shipByDate) === todayDateKey && !userFinishedJobIds.has(job.id))
+        .sort((left, right) => left.estPressTime - right.estPressTime),
+    [jobs, todayDateKey, userFinishedJobIds]
+  );
+  const finishedTodayJobs = useMemo(
+    () => allUserFinishedJobs.filter((job) => sameDay(job.finishMeta?.finishedAt, todayDateKey)),
+    [allUserFinishedJobs, todayDateKey]
+  );
+  const shipGroupsToday = useMemo(
+    () => shipmentGroups.filter((group) => group.shipDate === todayDateKey),
+    [shipmentGroups, todayDateKey]
+  );
+  const shipmentEmailSentToday = useMemo(
+    () => shipmentEmailLogs.some((log) => log.shipDate === todayDateKey),
+    [shipmentEmailLogs, todayDateKey]
+  );
+  const todayDashboardStats = useMemo(
+    () => [
+      { label: "Due today", value: jobsDueToday.length },
+      { label: "Scheduled today", value: todayScheduledItems.filter((item) => item.assignment.kind === "press").length },
+      { label: "Finished today", value: finishedTodayJobs.length },
+      { label: "Open requests", value: openRequests.length },
+      { label: "Pull paper", value: openPullPaperRequests.length },
+      { label: "Supplies", value: openSuppliesRequests.length },
+    ],
+    [finishedTodayJobs.length, jobsDueToday.length, openPullPaperRequests.length, openRequests.length, openSuppliesRequests.length, todayScheduledItems]
+  );
+  const activityActors = useMemo(
+    () => ["All", ...Array.from(new Set(activityLog.map((entry) => safeText(entry.actor)).filter(Boolean))).sort()],
+    [activityLog]
+  );
+  const activityScopes = useMemo(
+    () => ["All", ...Array.from(new Set(activityLog.map((entry) => safeText(entry.scope)).filter(Boolean))).sort()],
+    [activityLog]
+  );
+  const filteredActivityLog = useMemo(
+    () =>
+      activityLog
+        .filter((entry) => activityFilters.actor === "All" || safeText(entry.actor) === activityFilters.actor)
+        .filter((entry) => activityFilters.scope === "All" || safeText(entry.scope) === activityFilters.scope)
+        .filter((entry) => !activityFilters.date || sameDay(entry.createdAt, activityFilters.date))
+        .sort((left, right) => dateSortValue(right.createdAt) - dateSortValue(left.createdAt)),
+    [activityFilters.actor, activityFilters.date, activityFilters.scope, activityLog]
   );
 
   const summary = useMemo(() => {
@@ -1537,6 +1769,7 @@ function SchedulerApp() {
     );
     const firstDate = parsed.find((job) => job.shipByDate)?.shipByDate;
     if (firstDate) setWeekStart(startOfWeek(firstDate));
+    recordActivity("Imported TXT schedule", "Scheduler", `${parsed.length} jobs were loaded into the scheduler.`);
   }
 
   function handleUpload(event) {
@@ -1565,34 +1798,36 @@ function SchedulerApp() {
 
   function addAssignment(jobId, dayKey, press) {
     if (!userCanMoveJobs) return;
-    setAssignments((current) => {
-      const exists = current.some(
-        (assignment) =>
-          assignment.jobId === jobId &&
-          assignment.dayKey === dayKey &&
-          assignment.press === press &&
-          assignment.kind === "press" &&
-          assignment.status !== "finished"
-      );
-      let next = current;
-      if (!exists) {
-        next = [
-          ...next,
-          {
-            id: makeId("asg"),
-            jobId,
-            dayKey,
-            press,
-            kind: "press",
-            status: "scheduled",
-            createdAt: new Date().toISOString(),
-            finishedAt: null,
-            finishedBy: "",
-          },
-        ];
-      }
-      return next;
-    });
+    const exists = assignments.some(
+      (assignment) =>
+        assignment.jobId === jobId &&
+        assignment.dayKey === dayKey &&
+        assignment.press === press &&
+        assignment.kind === "press" &&
+        assignment.status !== "finished"
+    );
+    if (exists) return;
+    const job = jobMap.get(jobId);
+    setAssignments((current) => [
+      ...current,
+      {
+        id: makeId("asg"),
+        jobId,
+        dayKey,
+        press,
+        kind: "press",
+        status: "scheduled",
+        createdAt: new Date().toISOString(),
+        finishedAt: null,
+        finishedBy: "",
+      },
+    ]);
+    recordActivity(
+      "Scheduled job",
+      "Scheduler",
+      `${job ? `${job.customerName} ${job.number}` : "A job"} was placed on Press ${press} for ${dayKey}.`,
+      { jobId, dayKey, press }
+    );
   }
 
   function addManualScheduleEntry(event) {
@@ -1618,92 +1853,126 @@ function SchedulerApp() {
       },
       ...current,
     ]);
+    recordActivity(
+      "Added manual block",
+      "Scheduler",
+      `${title} was added to Press ${press} on ${dayKey}.`,
+      { title, dayKey, press }
+    );
     setManualScheduleForm((current) => ({ ...current, title: "" }));
   }
 
   function moveAssignment(assignmentId, dayKey, press) {
     if (!userCanMoveJobs) return;
-    setAssignments((current) => {
-      const assignmentToMove = current.find((assignment) => assignment.id === assignmentId);
-      if (!assignmentToMove) return current;
-      if (assignmentToMove.kind === "press" && assignmentToMove.status === "finished") return current;
+    const assignmentToMove = assignments.find((assignment) => assignment.id === assignmentId);
+    if (!assignmentToMove) return;
+    if (assignmentToMove.kind === "press" && assignmentToMove.status === "finished") return;
+    const duplicate = assignments.some(
+      (assignment) =>
+        assignment.id !== assignmentId &&
+        assignment.dayKey === dayKey &&
+        assignment.press === press &&
+        (
+          (assignmentToMove.kind === "manual" &&
+            assignment.kind === "manual" &&
+            comparableUsername(assignment.manualTitle) === comparableUsername(assignmentToMove.manualTitle)) ||
+          (assignmentToMove.kind === "press" &&
+            assignment.jobId === assignmentToMove.jobId &&
+            assignment.kind === "press" &&
+            assignment.status !== "finished")
+        )
+    );
+    if (duplicate) return;
 
-      const duplicate = current.some(
-        (assignment) =>
-          assignment.id !== assignmentId &&
-          assignment.dayKey === dayKey &&
-          assignment.press === press &&
-          (
-            (assignmentToMove.kind === "manual" &&
-              assignment.kind === "manual" &&
-              comparableUsername(assignment.manualTitle) === comparableUsername(assignmentToMove.manualTitle)) ||
-            (assignmentToMove.kind === "press" &&
-              assignment.jobId === assignmentToMove.jobId &&
-              assignment.kind === "press" &&
-              assignment.status !== "finished")
-          )
-      );
-      if (duplicate) return current;
-
-      return current.map((assignment) => {
-        if (assignment.id === assignmentId) {
-          return {
-            ...assignment,
-            dayKey,
-            press,
-          };
-        }
-        return assignment;
-      });
-    });
+    setAssignments((current) =>
+      current.map((assignment) =>
+        assignment.id === assignmentId
+          ? {
+              ...assignment,
+              dayKey,
+              press,
+            }
+          : assignment
+      )
+    );
+    const job = assignmentToMove.jobId ? jobMap.get(assignmentToMove.jobId) : null;
+    const title = assignmentToMove.kind === "manual" ? assignmentToMove.manualTitle : `${job?.customerName || ""} ${job?.number || ""}`.trim();
+    recordActivity(
+      "Moved schedule item",
+      "Scheduler",
+      `${title || "Schedule item"} moved to Press ${press} on ${dayKey}.`,
+      {
+        assignmentId,
+        fromDay: assignmentToMove.dayKey,
+        fromPress: assignmentToMove.press,
+        toDay: dayKey,
+        toPress: press,
+      }
+    );
   }
 
   function duplicateAssignmentToNextDay(assignmentId) {
     if (!userCanMoveJobs) return;
-    setAssignments((current) => {
-      const assignmentToCopy = current.find((assignment) => assignment.id === assignmentId);
-      if (!assignmentToCopy) return current;
-      if (assignmentToCopy.kind === "press" && assignmentToCopy.status === "finished") return current;
+    const assignmentToCopy = assignments.find((assignment) => assignment.id === assignmentId);
+    if (!assignmentToCopy) return;
+    if (assignmentToCopy.kind === "press" && assignmentToCopy.status === "finished") return;
 
-      const currentIndex = weekColumns.findIndex((day) => day.key === assignmentToCopy.dayKey);
-      if (currentIndex < 0 || currentIndex >= weekColumns.length - 1) return current;
+    const currentIndex = weekColumns.findIndex((day) => day.key === assignmentToCopy.dayKey);
+    if (currentIndex < 0 || currentIndex >= weekColumns.length - 1) return;
 
-      const nextDayKey = weekColumns[currentIndex + 1].key;
-      const exists = current.some(
-        (assignment) =>
-          assignment.id !== assignmentId &&
-          assignment.dayKey === nextDayKey &&
-          assignment.press === assignmentToCopy.press &&
-          (
-            (assignmentToCopy.kind === "manual" &&
-              assignment.kind === "manual" &&
-              comparableUsername(assignment.manualTitle) === comparableUsername(assignmentToCopy.manualTitle)) ||
-            (assignmentToCopy.kind === "press" &&
-              assignment.jobId === assignmentToCopy.jobId &&
-              assignment.kind === "press" &&
-              assignment.status !== "finished")
-          )
-      );
-      if (exists) return current;
+    const nextDayKey = weekColumns[currentIndex + 1].key;
+    const exists = assignments.some(
+      (assignment) =>
+        assignment.id !== assignmentId &&
+        assignment.dayKey === nextDayKey &&
+        assignment.press === assignmentToCopy.press &&
+        (
+          (assignmentToCopy.kind === "manual" &&
+            assignment.kind === "manual" &&
+            comparableUsername(assignment.manualTitle) === comparableUsername(assignmentToCopy.manualTitle)) ||
+          (assignmentToCopy.kind === "press" &&
+            assignment.jobId === assignmentToCopy.jobId &&
+            assignment.kind === "press" &&
+            assignment.status !== "finished")
+        )
+    );
+    if (exists) return;
 
-      return [
-        ...current,
-        {
-          ...assignmentToCopy,
-          id: makeId("asg"),
-          dayKey: nextDayKey,
-          createdAt: new Date().toISOString(),
-          finishedAt: null,
-          finishedBy: "",
-          status: "scheduled",
-        },
-      ];
-    });
+    setAssignments((current) => [
+      ...current,
+      {
+        ...assignmentToCopy,
+        id: makeId("asg"),
+        dayKey: nextDayKey,
+        createdAt: new Date().toISOString(),
+        finishedAt: null,
+        finishedBy: "",
+        status: "scheduled",
+      },
+    ]);
+    const job = assignmentToCopy.jobId ? jobMap.get(assignmentToCopy.jobId) : null;
+    const title = assignmentToCopy.kind === "manual" ? assignmentToCopy.manualTitle : `${job?.customerName || ""} ${job?.number || ""}`.trim();
+    recordActivity(
+      "Duplicated schedule item",
+      "Scheduler",
+      `${title || "Schedule item"} was copied to ${nextDayKey} on Press ${assignmentToCopy.press}.`,
+      { assignmentId, nextDayKey, press: assignmentToCopy.press }
+    );
   }
 
   function removeAssignment(assignmentId) {
     if (!userCanMoveJobs) return;
+    const assignment = assignments.find((item) => item.id === assignmentId);
+    if (!assignment) return;
     setAssignments((current) => current.filter((assignment) => assignment.id !== assignmentId));
+    const job = assignment.jobId ? jobMap.get(assignment.jobId) : null;
+    const title = assignment.kind === "manual" ? assignment.manualTitle : `${job?.customerName || ""} ${job?.number || ""}`.trim();
+    recordActivity(
+      "Removed schedule item",
+      "Scheduler",
+      `${title || "Schedule item"} was removed from Press ${assignment.press} on ${assignment.dayKey}.`,
+      { assignmentId, dayKey: assignment.dayKey, press: assignment.press }
+    );
   }
 
   function finishJob(jobId) {
@@ -1749,46 +2018,57 @@ function SchedulerApp() {
 
       return next;
     });
+    if (job) {
+      recordActivity("Marked job done", "Scheduler", `${job.customerName} ${job.number} was marked done.`, {
+        jobId,
+        shipDate: defaultShipDate,
+      });
+    }
   }
 
   function autoPlace() {
     if (!userCanMoveJobs) return;
-    setAssignments((current) => {
-      let next = [...current];
-      jobs.forEach((job) => {
-        if (!job.shipByDate) return;
-        const dayKey = isoDate(job.shipByDate);
-        if (!weekKeys.has(dayKey)) return;
-        const press = PRESS_ORDER.includes(job.press) ? job.press : "Rewind";
-        const exists = next.some(
-          (assignment) =>
-            assignment.jobId === job.id &&
-            assignment.dayKey === dayKey &&
-            assignment.press === press &&
-            assignment.kind === "press" &&
-            assignment.status !== "finished"
-        );
-        if (!exists) {
-          next.push({
-            id: makeId("asg"),
-            jobId: job.id,
-            dayKey,
-            press,
-            kind: "press",
-            status: "scheduled",
-            createdAt: new Date().toISOString(),
-            finishedAt: null,
-            finishedBy: "",
-          });
-        }
-      });
-      return next;
+    const nextAssignments = [...assignments];
+    let addedCount = 0;
+    jobs.forEach((job) => {
+      if (!job.shipByDate) return;
+      const dayKey = isoDate(job.shipByDate);
+      if (!weekKeys.has(dayKey)) return;
+      const press = PRESS_ORDER.includes(job.press) ? job.press : "Rewind";
+      const exists = nextAssignments.some(
+        (assignment) =>
+          assignment.jobId === job.id &&
+          assignment.dayKey === dayKey &&
+          assignment.press === press &&
+          assignment.kind === "press" &&
+          assignment.status !== "finished"
+      );
+      if (!exists) {
+        addedCount += 1;
+        nextAssignments.push({
+          id: makeId("asg"),
+          jobId: job.id,
+          dayKey,
+          press,
+          kind: "press",
+          status: "scheduled",
+          createdAt: new Date().toISOString(),
+          finishedAt: null,
+          finishedBy: "",
+        });
+      }
     });
+    setAssignments(nextAssignments);
+    if (addedCount) {
+      recordActivity("Auto-placed jobs", "Scheduler", `${addedCount} jobs were auto-placed for the visible week.`);
+    }
   }
 
   function clearBoard() {
     if (!userCanMoveJobs) return;
+    if (!assignments.length) return;
     setAssignments([]);
+    recordActivity("Cleared schedule board", "Scheduler", `${assignments.length} scheduled items were cleared from the board.`);
   }
 
   function exportSchedule() {
@@ -1863,12 +2143,15 @@ function SchedulerApp() {
     const nextAttachments = await buildAttachments(event.target.files, currentUser.username);
     if (nextAttachments.length) {
       setRequestDraftAttachments((current) => [...current, ...nextAttachments]);
+      recordActivity("Added request draft files", "Requests", `${nextAttachments.length} file(s) added to a new request draft.`);
     }
     event.target.value = "";
   }
 
   function removeDraftAttachment(attachmentId) {
-    setRequestDraftAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
+    const attachment = requestDraftAttachments.find((item) => item.id === attachmentId);
+    setRequestDraftAttachments((current) => current.filter((item) => item.id !== attachmentId));
+    deleteStoredAttachments(attachment ? [attachment] : []);
   }
 
   async function handleSuppliesDraftAttachmentChange(event) {
@@ -1876,12 +2159,15 @@ function SchedulerApp() {
     const nextAttachments = await buildAttachments(event.target.files, currentUser.username);
     if (nextAttachments.length) {
       setSuppliesDraftAttachments((current) => [...current, ...nextAttachments]);
+      recordActivity("Added supplies draft files", "Supplies", `${nextAttachments.length} file(s) added to a supplies request draft.`);
     }
     event.target.value = "";
   }
 
   function removeSuppliesDraftAttachment(attachmentId) {
-    setSuppliesDraftAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
+    const attachment = suppliesDraftAttachments.find((item) => item.id === attachmentId);
+    setSuppliesDraftAttachments((current) => current.filter((item) => item.id !== attachmentId));
+    deleteStoredAttachments(attachment ? [attachment] : []);
   }
 
   async function handleShipmentDraftAttachmentChange(event) {
@@ -1889,12 +2175,33 @@ function SchedulerApp() {
     const nextAttachments = await buildAttachments(event.target.files, currentUser.username);
     if (nextAttachments.length) {
       setShipmentDraftAttachments((current) => [...current, ...nextAttachments]);
+      recordActivity("Added shipment draft files", "Shipping", `${nextAttachments.length} file(s) added to a shipment draft.`);
     }
     event.target.value = "";
   }
 
   function removeShipmentDraftAttachment(attachmentId) {
-    setShipmentDraftAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
+    const attachment = shipmentDraftAttachments.find((item) => item.id === attachmentId);
+    setShipmentDraftAttachments((current) => current.filter((item) => item.id !== attachmentId));
+    deleteStoredAttachments(attachment ? [attachment] : []);
+  }
+
+  function clearRequestDraft() {
+    deleteStoredAttachments(requestDraftAttachments);
+    setRequestForm(EMPTY_REQUEST_FORM);
+    setRequestDraftAttachments([]);
+  }
+
+  function clearSuppliesDraft() {
+    deleteStoredAttachments(suppliesDraftAttachments);
+    setSuppliesForm(EMPTY_SUPPLIES_FORM);
+    setSuppliesDraftAttachments([]);
+  }
+
+  function clearShipmentDraft() {
+    deleteStoredAttachments(shipmentDraftAttachments);
+    setShipmentForm({ ...EMPTY_SHIPMENT_FORM, shipDate: selectedShipDate });
+    setShipmentDraftAttachments([]);
   }
 
   function submitRequest(event) {
@@ -1917,6 +2224,7 @@ function SchedulerApp() {
       },
       ...current,
     ]);
+    recordActivity("Created request", "Requests", `${requestForm.customer} ${requestForm.jobNumber} was added to open requests.`);
     setRequestForm(EMPTY_REQUEST_FORM);
     setRequestDraftAttachments([]);
     setActiveTab("Open Requests");
@@ -1940,6 +2248,7 @@ function SchedulerApp() {
       },
       ...current,
     ]);
+    recordActivity("Created pull paper request", "Pull Paper", `${pullPaperForm.target}: ${pullPaperForm.details.trim().slice(0, 80)}`);
     setPullPaperForm(EMPTY_PULL_PAPER_FORM);
   }
 
@@ -1961,6 +2270,7 @@ function SchedulerApp() {
       },
       ...current,
     ]);
+    recordActivity("Created supplies request", "Supplies", suppliesForm.details.trim().slice(0, 100));
     setSuppliesForm(EMPTY_SUPPLIES_FORM);
     setSuppliesDraftAttachments([]);
   }
@@ -1968,6 +2278,7 @@ function SchedulerApp() {
   function markPullPaperRequestDone(requestId) {
     if (!currentUser || !userCanEdit) return;
     const completedAt = new Date().toISOString();
+    const request = pullPaperRequests.find((item) => item.id === requestId);
     setPullPaperRequests((current) =>
       current.map((request) =>
         request.id === requestId
@@ -1980,16 +2291,24 @@ function SchedulerApp() {
           : request
       )
     );
+    if (request) {
+      recordActivity("Completed pull paper request", "Pull Paper", `${request.target}: ${safeText(request.details).slice(0, 80)}`);
+    }
   }
 
   function deletePullPaperRequest(requestId) {
     if (!userCanEdit) return;
+    const request = pullPaperRequests.find((item) => item.id === requestId);
     setPullPaperRequests((current) => current.filter((request) => request.id !== requestId));
+    if (request) {
+      recordActivity("Deleted pull paper request", "Pull Paper", `${request.target}: ${safeText(request.details).slice(0, 80)}`);
+    }
   }
 
   function markSuppliesRequestDone(requestId) {
     if (!currentUser || !userCanEdit) return;
     const completedAt = new Date().toISOString();
+    const request = suppliesRequests.find((item) => item.id === requestId);
     setSuppliesRequests((current) =>
       current.map((request) =>
         request.id === requestId
@@ -2002,11 +2321,21 @@ function SchedulerApp() {
           : request
       )
     );
+    if (request) {
+      recordActivity("Completed supplies request", "Supplies", safeText(request.details).slice(0, 100));
+    }
   }
 
   function deleteSuppliesRequest(requestId) {
     if (!userCanEdit) return;
+    const request = suppliesRequests.find((item) => item.id === requestId);
     setSuppliesRequests((current) => current.filter((request) => request.id !== requestId));
+    if (request?.attachments?.length) {
+      deleteStoredAttachments(request.attachments);
+    }
+    if (request) {
+      recordActivity("Deleted supplies request", "Supplies", safeText(request.details).slice(0, 100));
+    }
   }
 
   async function addSuppliesRequestAttachments(requestId, fileList) {
@@ -2023,10 +2352,13 @@ function SchedulerApp() {
           : request
       )
     );
+    recordActivity("Added supplies request files", "Supplies", `${attachments.length} file(s) attached to a supplies request.`);
   }
 
   function removeSuppliesRequestAttachment(requestId, attachmentId) {
     if (!userCanEdit) return;
+    const request = suppliesRequests.find((item) => item.id === requestId);
+    const attachment = request?.attachments?.find((item) => item.id === attachmentId);
     setSuppliesRequests((current) =>
       current.map((request) =>
         request.id === requestId
@@ -2037,11 +2369,13 @@ function SchedulerApp() {
           : request
       )
     );
+    deleteStoredAttachments(attachment ? [attachment] : []);
   }
 
   function markRequestDone(requestId) {
     if (!currentUser || !userCanEdit) return;
     const completedAt = new Date().toISOString();
+    const request = requests.find((item) => item.id === requestId);
     setRequests((current) =>
       current.map((request) =>
         request.id === requestId
@@ -2054,11 +2388,21 @@ function SchedulerApp() {
           : request
       )
     );
+    if (request) {
+      recordActivity("Completed request", "Requests", `${request.customer} ${request.jobNumber} was marked done.`);
+    }
   }
 
   function deleteRequest(requestId) {
     if (!userCanEdit) return;
+    const request = requests.find((item) => item.id === requestId);
     setRequests((current) => current.filter((request) => request.id !== requestId));
+    if (request?.attachments?.length) {
+      deleteStoredAttachments(request.attachments);
+    }
+    if (request) {
+      recordActivity("Deleted request", "Requests", `${request.customer} ${request.jobNumber} was deleted.`);
+    }
   }
 
   async function addRequestAttachments(requestId, fileList) {
@@ -2075,10 +2419,13 @@ function SchedulerApp() {
           : request
       )
     );
+    recordActivity("Added request files", "Requests", `${attachments.length} file(s) attached to an open request.`);
   }
 
   function removeRequestAttachment(requestId, attachmentId) {
     if (!userCanEdit) return;
+    const request = requests.find((item) => item.id === requestId);
+    const attachment = request?.attachments?.find((item) => item.id === attachmentId);
     setRequests((current) =>
       current.map((request) =>
         request.id === requestId
@@ -2089,6 +2436,7 @@ function SchedulerApp() {
           : request
       )
     );
+    deleteStoredAttachments(attachment ? [attachment] : []);
   }
 
   function toggleShipmentJob(jobId) {
@@ -2119,6 +2467,10 @@ function SchedulerApp() {
       })
     );
     setSelectedShipDate(shipDateDraft);
+    recordActivity("Assigned ship date", "Shipping", `${selectedShipQueueJobs.length} finished jobs were moved to ship on ${shipDateDraft}.`, {
+      shipDate: shipDateDraft,
+      jobCount: selectedShipQueueJobs.length,
+    });
     setSelectedShipQueueJobs([]);
   }
 
@@ -2126,16 +2478,16 @@ function SchedulerApp() {
     if (!userCanEdit) return;
     const method = safeText(newShipmentMethod);
     if (!method) return;
-    setShipmentMethods((current) => {
-      if (current.some((item) => comparableUsername(item) === comparableUsername(method))) return current;
-      return [...current, method];
-    });
+    if (shipmentMethods.some((item) => comparableUsername(item) === comparableUsername(method))) return;
+    setShipmentMethods((current) => [...current, method]);
     setShipmentForm((current) => ({ ...current, method }));
     setNewShipmentMethod("");
+    recordActivity("Added shipment method", "Shipping", `${method} is now available as a shipment method.`);
   }
 
   function removeShipmentMethod(methodToRemove) {
     if (!userCanEdit) return;
+    if (shipmentMethods.length <= 1) return;
     setShipmentMethods((current) => {
       const next = current.filter((method) => method !== methodToRemove);
       return next.length ? next : current;
@@ -2143,8 +2495,9 @@ function SchedulerApp() {
     setShipmentForm((current) => {
       if (current.method !== methodToRemove) return current;
       const fallback = shipmentMethods.find((method) => method !== methodToRemove) || current.method;
-      return { ...current, method: fallback };
-    });
+        return { ...current, method: fallback };
+      });
+    recordActivity("Removed shipment method", "Shipping", `${methodToRemove} was removed from shipment methods.`);
   }
 
   function createShipmentGroup(event) {
@@ -2181,11 +2534,28 @@ function SchedulerApp() {
     setSelectedShipmentJobs([]);
     setShipmentForm({ ...EMPTY_SHIPMENT_FORM, shipDate: selectedShipDate });
     setShipmentDraftAttachments([]);
+    recordActivity(
+      "Created shipment group",
+      "Shipping",
+      `${shipmentForm.label || `${shipmentForm.method} shipment`} was created with ${jobItems.length} jobs for ${shipmentForm.shipDate}.`,
+      {
+        method: shipmentForm.method,
+        shipDate: shipmentForm.shipDate,
+        jobCount: jobItems.length,
+      }
+    );
   }
 
   function deleteShipmentGroup(groupId) {
     if (!userCanEdit) return;
+    const group = shipmentGroups.find((item) => item.id === groupId);
     setShipmentGroups((current) => current.filter((group) => group.id !== groupId));
+    if (group?.attachments?.length) {
+      deleteStoredAttachments(group.attachments);
+    }
+    if (group) {
+      recordActivity("Deleted shipment group", "Shipping", `${group.label} on ${group.shipDate} was deleted.`);
+    }
   }
 
   async function addShipmentGroupAttachments(groupId, fileList) {
@@ -2200,12 +2570,15 @@ function SchedulerApp() {
               attachments: [...(group.attachments || []), ...attachments],
             }
           : group
-      )
+        )
     );
+    recordActivity("Added shipment files", "Shipping", `${attachments.length} file(s) were added to a shipment group.`);
   }
 
   function removeShipmentGroupAttachment(groupId, attachmentId) {
     if (!userCanEdit) return;
+    const group = shipmentGroups.find((item) => item.id === groupId);
+    const attachment = group?.attachments?.find((item) => item.id === attachmentId);
     setShipmentGroups((current) =>
       current.map((group) =>
         group.id === groupId
@@ -2216,12 +2589,18 @@ function SchedulerApp() {
           : group
       )
     );
+    deleteStoredAttachments(attachment ? [attachment] : []);
+    if (attachment) {
+      recordActivity("Removed shipment file", "Shipping", `${attachment.name} was removed from a shipment group.`);
+    }
   }
 
   function updateJobRecommendedPress(jobId, press) {
     if (!userCanEdit) return;
     const nextPress = normalizePressValue(press);
     if (!PRESS_ORDER.includes(nextPress)) return;
+    const job = jobMap.get(jobId);
+    if (job?.press === nextPress) return;
     setJobs((current) =>
       current.map((job) =>
         job.id === jobId
@@ -2232,6 +2611,14 @@ function SchedulerApp() {
           : job
       )
     );
+    if (job) {
+      recordActivity(
+        "Updated recommended press",
+        "Scheduler",
+        `${job.customerName} ${job.number} changed from Press ${job.press || "-"} to Press ${nextPress}.`,
+        { jobId, press: nextPress }
+      );
+    }
   }
 
   function addNote(event) {
@@ -2275,6 +2662,7 @@ function SchedulerApp() {
 
   function toggleUserTab(userId, tab) {
     if (!userCanManageUsers) return;
+    const user = users.find((item) => item.id === userId);
     setUsers((current) =>
       current.map((user) => {
         if (user.id !== userId) return user;
@@ -2284,22 +2672,26 @@ function SchedulerApp() {
         return { ...user, tabs: normalizeUserTabs(nextTabs, user.role, user.isAdmin, user.canManageUsers) };
       })
     );
+    if (user) {
+      recordActivity("Changed tab visibility", "Users", `${tab} visibility was updated for ${user.username}.`, {
+        userId,
+        tab,
+      });
+    }
   }
 
   function updateUserAccess(userId, updates) {
     if (!userCanManageUsers) return;
-    setUsers((current) => {
-      const target = current.find((user) => user.id === userId);
-      if (!target) return current;
-
-      if (Object.prototype.hasOwnProperty.call(updates, "canManageUsers")) {
-        const managers = current.filter((user) => user.canManageUsers);
-        if (target.canManageUsers && !updates.canManageUsers && managers.length <= 1) {
-          window.alert("Keep at least one user with admin access.");
-          return current;
-        }
+    const target = users.find((user) => user.id === userId);
+    if (!target) return;
+    if (Object.prototype.hasOwnProperty.call(updates, "canManageUsers")) {
+      const managers = users.filter((user) => user.canManageUsers);
+      if (target.canManageUsers && !updates.canManageUsers && managers.length <= 1) {
+        window.alert("Keep at least one user with admin access.");
+        return;
       }
-
+    }
+    setUsers((current) => {
       return current.map((user) => {
         if (user.id !== userId) return user;
         const nextCanManageUsers = Object.prototype.hasOwnProperty.call(updates, "canManageUsers")
@@ -2323,6 +2715,10 @@ function SchedulerApp() {
           ),
         };
       });
+    });
+    recordActivity("Updated user access", "Users", `Access settings were updated for ${target.username}.`, {
+      userId,
+      updates,
     });
   }
 
@@ -2354,6 +2750,12 @@ function SchedulerApp() {
       },
       ...current,
     ]);
+    recordActivity(
+      "Logged shipment email",
+      "Shipping",
+      `Shipment email for ${selectedShipDate} was marked sent to ${safeText(shipmentEmailForm.recipients) || "the saved group"}.`,
+      { shipDate: selectedShipDate, recipients: safeText(shipmentEmailForm.recipients) }
+    );
   }
 
   function applyShipmentEmailGroup(groupId) {
@@ -2380,14 +2782,19 @@ function SchedulerApp() {
 
     setShipmentEmailForm((current) => ({ ...current, recipients }));
     setShipmentEmailGroupForm(EMPTY_EMAIL_GROUP_FORM);
+    recordActivity("Saved email group", "Shipping", `${name} was saved as a shipment email group.`);
   }
 
   function removeShipmentEmailGroup(groupId) {
     if (!userCanEdit) return;
+    const group = shipmentEmailGroups.find((item) => item.id === groupId);
     setShipmentEmailGroups((current) => current.filter((group) => group.id !== groupId));
     setShipmentEmailForm((current) =>
       current.groupId === groupId ? { groupId: "", recipients: "" } : current
     );
+    if (group) {
+      recordActivity("Removed email group", "Shipping", `${group.name} was removed from shipment email groups.`);
+    }
   }
 
   function loadDemo() {
@@ -2473,6 +2880,14 @@ function SchedulerApp() {
     setRegisterError("");
     setRegisterSuccess("Registration request sent. A manager will need to approve it.");
     setAuthView("login");
+    setActivityLog((current) =>
+      appendActivityEntry(current, {
+        actor: username,
+        action: "Requested account access",
+        scope: "Users",
+        description: `${username} submitted a registration request.`,
+      })
+    );
   }
 
   function handleLogout() {
@@ -2509,16 +2924,21 @@ function SchedulerApp() {
       },
     ]);
     setUserForm({ ...EMPTY_USER_FORM, tabs: [...EMPTY_USER_FORM.tabs] });
+    recordActivity("Created user", "Users", `${username} was added as a new user.`);
   }
 
   function updateUserPassword(userId) {
     if (!userCanManageUsers) return;
     const nextPassword = safeText(userPasswordDrafts[userId]);
     if (!nextPassword) return;
+    const user = users.find((item) => item.id === userId);
     setUsers((current) =>
       current.map((user) => (user.id === userId ? { ...user, password: nextPassword } : user))
     );
     setUserPasswordDrafts((current) => ({ ...current, [userId]: "" }));
+    if (user) {
+      recordActivity("Reset user password", "Users", `Password was updated for ${user.username}.`);
+    }
   }
 
   function approveRegistrationRequest(requestId) {
@@ -2550,11 +2970,16 @@ function SchedulerApp() {
       },
     ]);
     setRegistrationRequests((current) => current.filter((item) => item.id !== requestId));
+    recordActivity("Approved registration", "Users", `${request.username} was approved and added as a user.`);
   }
 
   function denyRegistrationRequest(requestId) {
     if (!userCanManageUsers) return;
+    const request = registrationRequests.find((item) => item.id === requestId);
     setRegistrationRequests((current) => current.filter((item) => item.id !== requestId));
+    if (request) {
+      recordActivity("Denied registration", "Users", `${request.username} was denied account access.`);
+    }
   }
 
   if (!isReady) {
@@ -2615,29 +3040,31 @@ function SchedulerApp() {
               </p>
             </div>
             <div className="flex flex-col gap-3 xl:items-end">
-              <div className="flex flex-wrap gap-2">
-                {tabs.map((tab) => (
-                  <button
-                    key={tab}
-                    onClick={() => setActiveTab(tab)}
-                    className={`rounded-2xl px-4 py-2 text-sm font-medium transition ${
-                      activeTab === tab
-                        ? "bg-emerald-900 text-stone-50 shadow-sm"
-                        : "border border-stone-300 bg-stone-50 text-stone-700 hover:bg-stone-100"
-                    }`}
-                  >
-                    <span>{tab}</span>
-                    {tabBadges[tab] > 0 && (
-                      <span
-                        className={`ml-2 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                          activeTab === tab ? "bg-white/15 text-stone-50" : "bg-stone-200 text-stone-800"
-                        }`}
-                      >
-                        {tabBadges[tab]}
-                      </span>
-                    )}
-                  </button>
-                ))}
+              <div className="w-full overflow-x-auto pb-1 xl:max-w-[72vw]">
+                <div className="flex min-w-max gap-2">
+                  {tabs.map((tab) => (
+                    <button
+                      key={tab}
+                      onClick={() => setActiveTab(tab)}
+                      className={`rounded-2xl px-4 py-2 text-sm font-medium transition ${
+                        activeTab === tab
+                          ? "bg-emerald-900 text-stone-50 shadow-sm"
+                          : "border border-stone-300 bg-stone-50 text-stone-700 hover:bg-stone-100"
+                      }`}
+                    >
+                      <span>{tab}</span>
+                      {tabBadges[tab] > 0 && (
+                        <span
+                          className={`ml-2 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                            activeTab === tab ? "bg-white/15 text-stone-50" : "bg-stone-200 text-stone-800"
+                          }`}
+                        >
+                          {tabBadges[tab]}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div className="flex items-center gap-2 text-sm">
                 <span className={`rounded-full px-3 py-2 ${syncTone(syncStatus)}`}>
@@ -2664,191 +3091,413 @@ function SchedulerApp() {
           ))}
         </div>
 
-        {activeTab === "Scheduler" && (
+        {activeTab === "Today" && (
           <div className="space-y-4">
-            <div className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
-              <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
-                <div className="mb-4">
-                  <div className="text-sm font-semibold">Import and controls</div>
-                  <div className="text-xs text-stone-600">Imported done tickets stay informational only until a logged-in user marks them finished.</div>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+              {todayDashboardStats.map((item) => (
+                <div key={item.label} className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
+                  <div className="text-xs uppercase tracking-[0.16em] text-stone-600">{item.label}</div>
+                  <div className="mt-2 text-2xl font-semibold tracking-tight">{item.value}</div>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+              <div className="space-y-4">
+                <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
+                  <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <div className="text-sm font-semibold">Today&apos;s board</div>
+                      <div className="text-xs text-stone-600">
+                        Everything scheduled for {todayDateKey}, including manual blocks and multi-day work.
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setWeekStart(startOfWeek(new Date(`${todayDateKey}T12:00:00`)));
+                        setActiveTab("Scheduler");
+                      }}
+                      className="rounded-2xl border border-stone-300 bg-white px-4 py-2 text-sm text-stone-800"
+                    >
+                      Open scheduler
+                    </button>
+                  </div>
+                  <div className="space-y-3">
+                    {todayScheduledItems.map((item) => (
+                      <div key={item.assignment.id} className="rounded-2xl border border-stone-300 bg-white p-3">
+                        <div className="mb-2 flex flex-wrap items-center gap-2">
+                          <span className="rounded-full bg-stone-200 px-2 py-1 text-[11px] font-medium text-stone-800">
+                            Press {item.press}
+                          </span>
+                          <span
+                            className={`rounded-full px-2 py-1 text-[11px] font-medium ${
+                              item.assignment.status === "finished" ? statusTone("done") : statusTone(item.assignment.status)
+                            }`}
+                          >
+                            {item.assignment.kind === "manual"
+                              ? "manual block"
+                              : item.assignment.status === "finished"
+                                ? "done"
+                                : item.assignment.status}
+                          </span>
+                        </div>
+                        <CompactScheduleCard
+                          job={item.job}
+                          assignment={item.assignment}
+                          finishMeta={item.job ? finishedMetaByJobId.get(item.job.id) : null}
+                          density="standard"
+                          selected={item.job ? selectedJobId === item.job.id : false}
+                          onSelect={item.job ? () => selectJob(item.job.id) : undefined}
+                          draggable={false}
+                        />
+                      </div>
+                    ))}
+                    {!todayScheduledItems.length && (
+                      <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
+                        Nothing is on today&apos;s board yet.
+                      </div>
+                    )}
+                  </div>
                 </div>
 
-                <div className="grid gap-3">
-                  <label className="rounded-2xl border border-dashed border-stone-300 bg-white p-4 text-sm text-stone-700 hover:border-emerald-800">
-                    <div className="font-medium text-stone-900">Upload Label Traxx TXT</div>
-                    <input type="file" accept=".txt,.tsv,text/plain" onChange={handleUpload} className="mt-3 block w-full text-xs" />
-                  </label>
-
-                  <div className="rounded-2xl border border-stone-300 bg-white p-3">
-                    <div className="mb-2 flex items-center justify-between">
-                      <div className="text-sm font-medium">Paste export text</div>
-                      <button onClick={() => importText(pasteText)} className="rounded-xl bg-emerald-900 px-3 py-2 text-xs font-medium text-white">
-                        Import
-                      </button>
+                <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
+                  <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <div className="text-sm font-semibold">Jobs due today</div>
+                      <div className="text-xs text-stone-600">Open work due today that has not been marked finished yet.</div>
                     </div>
-                    <textarea
-                      value={pasteText}
-                      onChange={(event) => setPasteText(event.target.value)}
-                      placeholder="Paste the full TXT export here..."
-                      className="h-32 w-full rounded-2xl border border-stone-300 bg-stone-50 p-3 text-xs outline-none placeholder:text-stone-400 focus:border-emerald-800"
-                    />
+                    <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{jobsDueToday.length}</div>
                   </div>
-
-                  <div className="rounded-2xl bg-stone-200/70 px-4 py-3 text-sm text-stone-800">
-                    Finishing jobs and completing requests will be recorded under <span className="font-semibold">{currentUser.username}</span>.
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <button onClick={loadDemo} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
-                      Load demo
-                    </button>
-                    <button onClick={autoPlace} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
-                      Auto-place
-                    </button>
-                    <button onClick={exportSchedule} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
-                      Export CSV
-                    </button>
-                    <button onClick={clearBoard} className="rounded-2xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                      Clear
-                    </button>
-                  </div>
-
-                  {canAccessTab(currentUser, "New Request") && (
-                    <button
-                      onClick={() => setActiveTab("New Request")}
-                      className="rounded-2xl bg-emerald-900 px-3 py-2 text-sm font-medium text-white"
-                    >
-                      Create a request
-                    </button>
-                  )}
-
-                  <div className="rounded-2xl border border-stone-300 bg-white p-4">
-                    <div className="mb-3">
-                      <div className="text-sm font-medium text-stone-900">Manual schedule block</div>
-                      <div className="text-xs text-stone-600">Reserve a press/day for something like Maintenance, Changeover, or Wash-up.</div>
-                    </div>
-                    <form onSubmit={addManualScheduleEntry} className="grid gap-3">
-                      <Field
-                        label="Title"
-                        value={manualScheduleForm.title}
-                        onChange={(value) => setManualScheduleForm((current) => ({ ...current, title: value }))}
-                        placeholder="Maintenance"
-                      />
-                      <div>
-                        <div className="mb-2 text-sm font-medium text-stone-800">Press</div>
-                        <select
-                          value={manualScheduleForm.press}
-                          onChange={(event) => setManualScheduleForm((current) => ({ ...current, press: event.target.value }))}
-                          className="w-full rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm outline-none focus:border-emerald-800"
-                        >
-                          {PRESS_ORDER.map((press) => (
-                            <option key={press} value={press}>
-                              Press {press}
-                            </option>
-                          ))}
-                        </select>
+                  <div className="space-y-3">
+                    {jobsDueToday.map((job) => (
+                      <div key={job.id} className="rounded-2xl border border-stone-300 bg-white p-3">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold text-stone-900">
+                              {job.customerName} {job.number}
+                            </div>
+                            <div className="mt-1 text-xs text-stone-700">{job.generalDescr}</div>
+                            <div className="mt-2 text-[11px] text-stone-600">
+                              Press {job.press || "-"} · EST {job.estPressTime.toFixed(2)} hrs
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => {
+                              setActiveTab("Scheduler");
+                              selectJob(job.id, true);
+                            }}
+                            className="rounded-2xl border border-stone-300 bg-stone-50 px-3 py-2 text-sm text-stone-800"
+                          >
+                            Open
+                          </button>
+                        </div>
                       </div>
-                      <div>
-                        <div className="mb-2 text-sm font-medium text-stone-800">Day</div>
-                        <select
-                          value={manualScheduleForm.dayKey}
-                          onChange={(event) => setManualScheduleForm((current) => ({ ...current, dayKey: event.target.value }))}
-                          className="w-full rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm outline-none focus:border-emerald-800"
-                        >
-                          {weekColumns.map((day) => (
-                            <option key={day.key} value={day.key}>
-                              {day.label} - {formatShortDate(day.date)}
-                            </option>
-                          ))}
-                        </select>
+                    ))}
+                    {!jobsDueToday.length && (
+                      <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
+                        No open jobs are due today.
                       </div>
-                      <button
-                        type="submit"
-                        disabled={!userCanMoveJobs}
-                        className="rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm text-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        Add block
-                      </button>
-                    </form>
+                    )}
                   </div>
                 </div>
               </div>
 
-              <div className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
-                <div className="mb-3 flex items-center justify-between">
-                  <div>
-                    <div className="text-sm font-semibold">Press queue</div>
-                    <div className="text-xs text-stone-600">Search by ticket, then filter the queue by status, press, or category. Jobs stay here even after they are scheduled so you can place them on multiple days.</div>
+              <div className="space-y-4">
+                <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
+                  <div className="mb-4">
+                    <div className="text-sm font-semibold">Queue snapshot</div>
+                    <div className="text-xs text-stone-600">Quick links into the work that still needs attention.</div>
                   </div>
-                  <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{unscheduledJobs.length}</div>
+                  <div className="grid gap-3">
+                    {[
+                      canAccessTab(currentUser, "Open Requests")
+                        ? { tab: "Open Requests", label: "Open requests", value: openRequests.length }
+                        : null,
+                      canAccessTab(currentUser, "Pull Paper Request")
+                        ? { tab: "Pull Paper Request", label: "Pull paper", value: openPullPaperRequests.length }
+                        : null,
+                      canAccessTab(currentUser, "Supplies Request")
+                        ? { tab: "Supplies Request", label: "Supplies", value: openSuppliesRequests.length }
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .map((item) => (
+                        <button
+                          key={item.tab}
+                          onClick={() => setActiveTab(item.tab)}
+                          className="flex items-center justify-between rounded-2xl border border-stone-300 bg-white px-4 py-3 text-left"
+                        >
+                          <span className="text-sm font-medium text-stone-800">{item.label}</span>
+                          <span className="rounded-full bg-stone-200 px-2 py-1 text-xs text-stone-800">{item.value}</span>
+                        </button>
+                      ))}
+                    <button
+                      onClick={() => setActiveTab("Scheduler")}
+                      className="flex items-center justify-between rounded-2xl border border-stone-300 bg-white px-4 py-3 text-left"
+                    >
+                      <span className="text-sm font-medium text-stone-800">Press queue</span>
+                      <span className="rounded-full bg-stone-200 px-2 py-1 text-xs text-stone-800">{unscheduledJobs.length}</span>
+                    </button>
+                  </div>
                 </div>
 
-                <input
-                  type="text"
-                  value={unscheduledSearch}
-                  onChange={(event) => setUnscheduledSearch(event.target.value)}
-                  placeholder="Search ticket, customer, or description"
-                  className="mb-3 w-full rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
-                />
-
-                <div className="mb-3 grid gap-2 md:grid-cols-3">
-                  <select
-                    value={queueStatusFilter}
-                    onChange={(event) => setQueueStatusFilter(event.target.value)}
-                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
-                  >
-                    <option>All</option>
-                    <option>Open</option>
-                    <option>Done</option>
-                  </select>
-                  <select
-                    value={queuePressFilter}
-                    onChange={(event) => setQueuePressFilter(event.target.value)}
-                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
-                  >
-                    {queuePressOptions.map((press) => (
-                      <option key={press}>{press}</option>
-                    ))}
-                  </select>
-                  <select
-                    value={queueCategoryFilter}
-                    onChange={(event) => setQueueCategoryFilter(event.target.value)}
-                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
-                  >
-                    {queueCategoryOptions.map((category) => (
-                      <option key={category}>{category}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="max-h-[480px] space-y-3 overflow-y-auto pr-1">
-                  {unscheduledJobs.map((job) => (
-                    <JobCard
-                      key={job.id}
-                      job={job}
-                      state={deriveVisibleJobState(job.id, activePressJobIds, userFinishedJobIds)}
-                      selected={selectedJobId === job.id}
-                      onClick={() => selectJob(job.id)}
-                      onDoubleClick={() => selectJob(job.id, true)}
-                      onFinish={userCanEdit ? () => finishJob(job.id) : undefined}
-                      weekColumns={weekColumns}
-                      canMove={userCanMoveJobs}
-                      pressOptions={PRESS_ORDER}
-                      onUpdatePress={userCanMoveJobs ? (press) => updateJobRecommendedPress(job.id, press) : undefined}
-                      onQuickAssign={(dayKey) => addAssignment(job.id, dayKey, PRESS_ORDER.includes(job.press) ? job.press : "Rewind")}
-                    />
-                  ))}
-                  {!unscheduledJobs.length && (
-                    <div className="rounded-2xl border border-dashed border-stone-300 bg-white/70 p-4 text-sm text-stone-600">
-                      No open queue jobs match your search.
+                <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
+                  <div className="mb-4">
+                    <div className="text-sm font-semibold">Shipping today</div>
+                    <div className="text-xs text-stone-600">See whether today&apos;s finished work has been grouped and emailed.</div>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <StatRow label="Finished today" value={finishedTodayJobs.length} />
+                    <StatRow label="Ship groups" value={shipGroupsToday.length} />
+                  </div>
+                  <div className="mt-3 rounded-2xl bg-white p-4 text-sm text-stone-800">
+                    <div className="font-medium">
+                      {shipmentEmailSentToday ? "Daily shipment email already logged" : "Daily shipment email still needs to be logged"}
                     </div>
+                    <div className="mt-1 text-xs text-stone-600">
+                      {shipmentEmailSentToday
+                        ? `The ${todayDateKey} shipment summary has already been marked sent.`
+                        : `Nothing has been marked emailed for ${todayDateKey} yet.`}
+                    </div>
+                  </div>
+                  {canAccessTab(currentUser, "Daily Shipment") && (
+                    <button
+                      onClick={() => {
+                        setSelectedShipDate(todayDateKey);
+                        setActiveTab("Daily Shipment");
+                      }}
+                      className="mt-3 rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
+                    >
+                      Open daily shipment
+                    </button>
+                  )}
+                </div>
+
+                <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
+                  <div className="mb-4 flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-semibold">My checklist</div>
+                      <div className="text-xs text-stone-600">Private notes tied only to {currentUser.username}.</div>
+                    </div>
+                    <span className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">
+                      {userNotes.filter((note) => !note.completed).length} open
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {userNotes.slice(0, 4).map((note) => (
+                      <div key={note.id} className="rounded-2xl border border-stone-300 bg-white px-4 py-3">
+                        <div className={`text-sm ${note.completed ? "text-stone-500 line-through" : "text-stone-800"}`}>
+                          {note.text}
+                        </div>
+                      </div>
+                    ))}
+                    {!userNotes.length && (
+                      <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
+                        No checklist items yet.
+                      </div>
+                    )}
+                  </div>
+                  {canAccessTab(currentUser, "Notes") && (
+                    <button
+                      onClick={() => setActiveTab("Notes")}
+                      className="mt-3 rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
+                    >
+                      Open notes
+                    </button>
                   )}
                 </div>
               </div>
             </div>
+          </div>
+        )}
+
+        {activeTab === "Scheduler" && (
+          <div className="space-y-4">
+            {!boardFocusMode && (
+              <div className="grid gap-4 2xl:grid-cols-[320px_minmax(0,1fr)]">
+                <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
+                  <div className="mb-4">
+                    <div className="text-sm font-semibold">Import and controls</div>
+                    <div className="text-xs text-stone-600">Imported done tickets stay informational only until a logged-in user marks them finished.</div>
+                  </div>
+
+                  <div className="grid gap-3">
+                    <label className="rounded-2xl border border-dashed border-stone-300 bg-white p-4 text-sm text-stone-700 hover:border-emerald-800">
+                      <div className="font-medium text-stone-900">Upload Label Traxx TXT</div>
+                      <input type="file" accept=".txt,.tsv,text/plain" onChange={handleUpload} className="mt-3 block w-full text-xs" />
+                    </label>
+
+                    <div className="rounded-2xl border border-stone-300 bg-white p-3">
+                      <div className="mb-2 flex items-center justify-between">
+                        <div className="text-sm font-medium">Paste export text</div>
+                        <button onClick={() => importText(pasteText)} className="rounded-xl bg-emerald-900 px-3 py-2 text-xs font-medium text-white">
+                          Import
+                        </button>
+                      </div>
+                      <textarea
+                        value={pasteText}
+                        onChange={(event) => setPasteText(event.target.value)}
+                        placeholder="Paste the full TXT export here..."
+                        className="h-32 w-full rounded-2xl border border-stone-300 bg-stone-50 p-3 text-xs outline-none placeholder:text-stone-400 focus:border-emerald-800"
+                      />
+                    </div>
+
+                    <div className="rounded-2xl bg-stone-200/70 px-4 py-3 text-sm text-stone-800">
+                      Finishing jobs and completing requests will be recorded under <span className="font-semibold">{currentUser.username}</span>.
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <button onClick={loadDemo} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
+                        Load demo
+                      </button>
+                      <button onClick={autoPlace} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
+                        Auto-place
+                      </button>
+                      <button onClick={exportSchedule} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
+                        Export CSV
+                      </button>
+                      <button onClick={clearBoard} className="rounded-2xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                        Clear
+                      </button>
+                    </div>
+
+                    {canAccessTab(currentUser, "New Request") && (
+                      <button
+                        onClick={() => setActiveTab("New Request")}
+                        className="rounded-2xl bg-emerald-900 px-3 py-2 text-sm font-medium text-white"
+                      >
+                        Create a request
+                      </button>
+                    )}
+
+                    <div className="rounded-2xl border border-stone-300 bg-white p-4">
+                      <div className="mb-3">
+                        <div className="text-sm font-medium text-stone-900">Manual schedule block</div>
+                        <div className="text-xs text-stone-600">Reserve a press/day for something like Maintenance, Changeover, or Wash-up.</div>
+                      </div>
+                      <form onSubmit={addManualScheduleEntry} className="grid gap-3">
+                        <Field
+                          label="Title"
+                          value={manualScheduleForm.title}
+                          onChange={(value) => setManualScheduleForm((current) => ({ ...current, title: value }))}
+                          placeholder="Maintenance"
+                        />
+                        <div>
+                          <div className="mb-2 text-sm font-medium text-stone-800">Press</div>
+                          <select
+                            value={manualScheduleForm.press}
+                            onChange={(event) => setManualScheduleForm((current) => ({ ...current, press: event.target.value }))}
+                            className="w-full rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                          >
+                            {PRESS_ORDER.map((press) => (
+                              <option key={press} value={press}>
+                                Press {press}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <div className="mb-2 text-sm font-medium text-stone-800">Day</div>
+                          <select
+                            value={manualScheduleForm.dayKey}
+                            onChange={(event) => setManualScheduleForm((current) => ({ ...current, dayKey: event.target.value }))}
+                            className="w-full rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                          >
+                            {weekColumns.map((day) => (
+                              <option key={day.key} value={day.key}>
+                                {day.label} - {formatShortDate(day.date)}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={!userCanMoveJobs}
+                          className="rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm text-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          Add block
+                        </button>
+                      </form>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
+                  <div className="mb-3 flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-semibold">Press queue</div>
+                      <div className="text-xs text-stone-600">Search by ticket, then filter the queue by status, press, or category. Jobs stay here even after they are scheduled so you can place them on multiple days.</div>
+                    </div>
+                    <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{unscheduledJobs.length}</div>
+                  </div>
+
+                  <input
+                    type="text"
+                    value={unscheduledSearch}
+                    onChange={(event) => setUnscheduledSearch(event.target.value)}
+                    placeholder="Search ticket, customer, or description"
+                    className="mb-3 w-full rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                  />
+
+                  <div className="mb-3 grid gap-2 md:grid-cols-3">
+                    <select
+                      value={queueStatusFilter}
+                      onChange={(event) => setQueueStatusFilter(event.target.value)}
+                      className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                    >
+                      <option>All</option>
+                      <option>Open</option>
+                      <option>Done</option>
+                    </select>
+                    <select
+                      value={queuePressFilter}
+                      onChange={(event) => setQueuePressFilter(event.target.value)}
+                      className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                    >
+                      {queuePressOptions.map((press) => (
+                        <option key={press}>{press}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={queueCategoryFilter}
+                      onChange={(event) => setQueueCategoryFilter(event.target.value)}
+                      className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                    >
+                      {queueCategoryOptions.map((category) => (
+                        <option key={category}>{category}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="max-h-[65vh] space-y-3 overflow-y-auto pb-2 pr-1 2xl:max-h-[720px]">
+                    {unscheduledJobs.map((job) => (
+                      <JobCard
+                        key={job.id}
+                        job={job}
+                        state={deriveVisibleJobState(job.id, activePressJobIds, userFinishedJobIds)}
+                        selected={selectedJobId === job.id}
+                        onClick={() => selectJob(job.id)}
+                        onDoubleClick={() => selectJob(job.id, true)}
+                        onFinish={userCanEdit ? () => finishJob(job.id) : undefined}
+                        weekColumns={weekColumns}
+                        canMove={userCanMoveJobs}
+                        pressOptions={PRESS_ORDER}
+                        onUpdatePress={userCanMoveJobs ? (press) => updateJobRecommendedPress(job.id, press) : undefined}
+                        onQuickAssign={(dayKey) => addAssignment(job.id, dayKey, PRESS_ORDER.includes(job.press) ? job.press : "Rewind")}
+                      />
+                    ))}
+                    {!unscheduledJobs.length && (
+                      <div className="rounded-2xl border border-dashed border-stone-300 bg-white/70 p-4 text-sm text-stone-600">
+                        No open queue jobs match your search.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div className="rounded-3xl border border-stone-300 bg-stone-50 p-3 shadow-sm shadow-stone-300/30">
-              <div className="mb-3 flex flex-col gap-3 rounded-2xl border border-stone-300 bg-gradient-to-r from-stone-100 via-stone-50 to-stone-100 px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
+              <div className="mb-3 flex flex-col gap-3 rounded-2xl border border-stone-300 bg-gradient-to-r from-stone-100 via-stone-50 to-stone-100 px-4 py-3">
                 <div>
                   <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-600">Week view</div>
                   <div className="mt-1 text-base font-semibold">
@@ -2877,12 +3526,32 @@ function SchedulerApp() {
                       </option>
                     ))}
                   </select>
+                  <select
+                    value={scheduleCardDensity}
+                    onChange={(event) => setScheduleCardDensity(event.target.value)}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                  >
+                    {SCHEDULE_DENSITY_OPTIONS.map((option) => (
+                      <option key={option} value={option}>
+                        {SCHEDULE_DENSITY_LABELS[option]}
+                      </option>
+                    ))}
+                  </select>
+                  <label className="flex items-center gap-2 rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
+                    <input
+                      type="checkbox"
+                      checked={hideEmptyPresses}
+                      onChange={(event) => setHideEmptyPresses(event.target.checked)}
+                      className="h-4 w-4"
+                    />
+                    <span>Hide empty presses</span>
+                  </label>
                   <button
                     type="button"
-                    onClick={() => setCondensedSchedule((current) => !current)}
+                    onClick={() => setBoardFocusMode((current) => !current)}
                     className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800"
                   >
-                    {condensedSchedule ? "Expanded cards" : "Condensed cards"}
+                    {boardFocusMode ? "Show side panels" : "Focus board"}
                   </button>
                   <input
                     type="text"
@@ -2893,67 +3562,75 @@ function SchedulerApp() {
                   />
                 </div>
               </div>
-              <div className="grid grid-cols-5 gap-3">
-                {weekColumns.map((day) => (
-                  <div key={day.key} className="rounded-3xl bg-stone-200/60 p-3">
-                    <div className="mb-3 rounded-2xl border border-stone-300 bg-white px-3 py-3">
-                      <div className="text-xs uppercase tracking-[0.16em] text-stone-600">{day.label}</div>
-                      <div className="mt-1 text-lg font-semibold">{formatShortDate(day.date)}</div>
-                    </div>
-                    <div className="space-y-3">
-                      {visiblePresses.map((press) => {
-                        const laneJobs = board[day.key]?.[press] || [];
-                        const totalHours = laneJobs.reduce((sum, item) => sum + (item.job?.estPressTime || 0), 0);
-                        return (
-                          <div
-                            key={`${day.key}-${press}`}
-                            onDragOver={(event) => event.preventDefault()}
-                            onDrop={(event) => handleScheduleDrop(event, day.key, press)}
-                            className="rounded-2xl border border-stone-300 bg-white p-2"
-                          >
-                            <div className="mb-2 flex items-start justify-between gap-2">
-                              <div>
-                                <div className="text-sm font-semibold">Press {press}</div>
-                                <div className="text-[11px] text-stone-600">
-                                  {laneJobs.length} jobs - {totalHours.toFixed(2)} hrs
+              <div className="overflow-x-auto pb-2">
+                <div className="grid min-w-[1120px] grid-cols-5 gap-3">
+                  {schedulePressesByDay.map((day) => (
+                    <div key={day.key} className="rounded-3xl bg-stone-200/60 p-3">
+                      <div className="mb-3 rounded-2xl border border-stone-300 bg-white px-3 py-3">
+                        <div className="text-xs uppercase tracking-[0.16em] text-stone-600">{day.label}</div>
+                        <div className="mt-1 text-lg font-semibold">{formatShortDate(day.date)}</div>
+                      </div>
+                      <div className="space-y-3">
+                        {day.presses.map((press) => {
+                          const laneJobs = board[day.key]?.[press] || [];
+                          const totalHours = laneJobs.reduce((sum, item) => sum + (item.job?.estPressTime || 0), 0);
+                          return (
+                            <div
+                              key={`${day.key}-${press}`}
+                              onDragOver={(event) => event.preventDefault()}
+                              onDrop={(event) => handleScheduleDrop(event, day.key, press)}
+                              className="rounded-2xl border border-stone-300 bg-white p-2"
+                            >
+                              <div className="mb-2 flex items-start justify-between gap-2">
+                                <div>
+                                  <div className="text-sm font-semibold">Press {press}</div>
+                                  <div className="text-[11px] text-stone-600">
+                                    {laneJobs.length} jobs - {totalHours.toFixed(2)} hrs
+                                  </div>
                                 </div>
+                                <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">
+                                  drop
+                                </span>
                               </div>
-                              <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">
-                                drop
-                              </span>
+                              <div className="space-y-2">
+                                {laneJobs.map(({ assignment, job }) => (
+                                  <CompactScheduleCard
+                                    key={assignment.id}
+                                    job={job}
+                                    assignment={assignment}
+                                    finishMeta={job ? finishedMetaByJobId.get(job.id) : null}
+                                    density={scheduleCardDensity}
+                                    selected={job ? selectedJobId === job.id : false}
+                                    onSelect={job ? () => selectJob(job.id) : undefined}
+                                    onUnschedule={userCanMoveJobs ? () => removeAssignment(assignment.id) : undefined}
+                                    onFinish={job && userCanEdit ? () => finishJob(job.id) : undefined}
+                                    onDuplicate={userCanMoveJobs ? () => duplicateAssignmentToNextDay(assignment.id) : undefined}
+                                    draggable={userCanMoveJobs && assignment.status !== "finished"}
+                                  />
+                                ))}
+                                {!laneJobs.length && (
+                                  <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50 p-3 text-center text-[11px] text-stone-500">
+                                    Drop here
+                                  </div>
+                                )}
+                              </div>
                             </div>
-                            <div className="space-y-2">
-                              {laneJobs.map(({ assignment, job }) => (
-                                <CompactScheduleCard
-                                  key={assignment.id}
-                                  job={job}
-                                  assignment={assignment}
-                                  finishMeta={job ? finishedMetaByJobId.get(job.id) : null}
-                                  compact={condensedSchedule}
-                                  selected={job ? selectedJobId === job.id : false}
-                                  onSelect={job ? () => selectJob(job.id) : undefined}
-                                  onUnschedule={userCanMoveJobs ? () => removeAssignment(assignment.id) : undefined}
-                                  onFinish={job && userCanEdit ? () => finishJob(job.id) : undefined}
-                                  onDuplicate={userCanMoveJobs ? () => duplicateAssignmentToNextDay(assignment.id) : undefined}
-                                  draggable={userCanMoveJobs && assignment.status !== "finished"}
-                                />
-                              ))}
-                              {!laneJobs.length && (
-                                <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50 p-3 text-center text-[11px] text-stone-500">
-                                  Drop here
-                                </div>
-                              )}
-                            </div>
+                          );
+                        })}
+                        {!day.presses.length && (
+                          <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
+                            No presses are visible for this day with the current filters.
                           </div>
-                        );
-                      })}
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
             </div>
 
-            <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+            {!boardFocusMode && (
+              <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_360px]">
                 <div ref={jobDetailsRef} className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
                   <div className="mb-3 flex items-center justify-between">
                     <div>
@@ -3018,7 +3695,7 @@ function SchedulerApp() {
                       placeholder="Search job number, customer, or description"
                       className="w-full rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
                     />
-                    <div className="mt-3 max-h-[32vh] space-y-3 overflow-y-auto">
+                    <div className="mt-3 max-h-[36vh] space-y-3 overflow-y-auto">
                       {jobLocationResults.map(({ job, locations }) => (
                         <div key={job.id} className="rounded-2xl border border-stone-300 bg-white p-3">
                           <div className="flex items-start justify-between gap-3">
@@ -3038,7 +3715,7 @@ function SchedulerApp() {
                               <button
                                 key={location.id}
                                 onClick={() => {
-                                  setWeekStart(startOfWeek(new Date(location.dayKey)));
+                                  setWeekStart(startOfWeek(new Date(`${location.dayKey}T12:00:00`)));
                                   selectJob(job.id, true);
                                 }}
                                 className="flex w-full items-center justify-between rounded-2xl bg-stone-100 px-3 py-2 text-left text-xs text-stone-800"
@@ -3069,7 +3746,7 @@ function SchedulerApp() {
                       <div className="text-sm font-semibold">Ship ready today</div>
                       <div className="text-xs text-stone-600">These are only the jobs marked finished today by a logged-in user.</div>
                     </div>
-                    <div className="max-h-[56vh] space-y-3 overflow-y-auto">
+                    <div className="max-h-[40vh] space-y-3 overflow-y-auto">
                       {doneJobs
                         .filter((job) => sameDay(job.finishMeta?.finishedAt, todayKey()))
                         .map((job) => (
@@ -3091,7 +3768,8 @@ function SchedulerApp() {
                     </div>
                   </div>
                 </div>
-            </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -3229,10 +3907,7 @@ function SchedulerApp() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => {
-                      setRequestForm(EMPTY_REQUEST_FORM);
-                      setRequestDraftAttachments([]);
-                    }}
+                    onClick={clearRequestDraft}
                     className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
                   >
                     Reset
@@ -3476,10 +4151,7 @@ function SchedulerApp() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => {
-                      setSuppliesForm(EMPTY_SUPPLIES_FORM);
-                      setSuppliesDraftAttachments([]);
-                    }}
+                    onClick={clearSuppliesDraft}
                     className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
                   >
                     Reset
@@ -3814,9 +4486,18 @@ function SchedulerApp() {
                       </label>
                     </div>
                     <AttachmentList attachments={shipmentDraftAttachments} onRemove={removeShipmentDraftAttachment} />
-                    <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
-                      Create shipment group
-                    </button>
+                    <div className="flex flex-wrap gap-2">
+                      <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
+                        Create shipment group
+                      </button>
+                      <button
+                        type="button"
+                        onClick={clearShipmentDraft}
+                        className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
+                      >
+                        Reset draft
+                      </button>
+                    </div>
                   </form>
                 </div>
 
@@ -4104,6 +4785,104 @@ function SchedulerApp() {
               {!shipmentEmailHistory.length && (
                 <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-5 text-sm text-stone-600">
                   No shipment emails have been logged yet.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "Activity Log" && (
+          <div className="space-y-4">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+              <div className="mb-4 flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+                <div>
+                  <div className="text-sm font-semibold">Activity log</div>
+                  <div className="text-xs text-stone-600">Track schedule moves, shipment updates, request changes, and user-permission changes.</div>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                  <select
+                    value={activityFilters.actor}
+                    onChange={(event) => setActivityFilters((current) => ({ ...current, actor: event.target.value }))}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                  >
+                    {activityActors.map((actor) => (
+                      <option key={actor} value={actor}>
+                        {actor === "All" ? "All people" : actor}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={activityFilters.scope}
+                    onChange={(event) => setActivityFilters((current) => ({ ...current, scope: event.target.value }))}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                  >
+                    {activityScopes.map((scope) => (
+                      <option key={scope} value={scope}>
+                        {scope === "All" ? "All areas" : scope}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="date"
+                    value={activityFilters.date}
+                    onChange={(event) => setActivityFilters((current) => ({ ...current, date: event.target.value }))}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                  />
+                  <button
+                    onClick={() => setActivityFilters(EMPTY_ACTIVITY_FILTERS)}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800"
+                  >
+                    Clear filters
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-3">
+                <StatRow label="Entries shown" value={filteredActivityLog.length} />
+                <StatRow label="People" value={Math.max(activityActors.length - 1, 0)} />
+                <StatRow label="Areas" value={Math.max(activityScopes.length - 1, 0)} />
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              {filteredActivityLog.map((entry) => {
+                const detailEntries = Object.entries(entry.details || {}).filter(([, value]) =>
+                  value !== null && value !== undefined && String(value).trim() !== ""
+                );
+                return (
+                  <div key={entry.id} className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="text-sm font-semibold text-stone-900">{entry.action}</div>
+                          <span className="rounded-full bg-stone-200 px-2 py-1 text-[11px] font-medium text-stone-800">
+                            {entry.scope}
+                          </span>
+                          <span className="rounded-full bg-white px-2 py-1 text-[11px] text-stone-700">
+                            {entry.actor}
+                          </span>
+                        </div>
+                        <div className="mt-2 text-sm text-stone-800">{entry.description}</div>
+                        {!!detailEntries.length && (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {detailEntries.slice(0, 6).map(([key, value]) => (
+                              <span key={key} className="rounded-full border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-700">
+                                {key}: {String(value)}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <div className="rounded-2xl bg-white px-3 py-2 text-xs text-stone-600">
+                        {formatDateTime(entry.createdAt)}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              {!filteredActivityLog.length && (
+                <div className="rounded-3xl border border-dashed border-stone-300 bg-white/60 p-6 text-sm text-stone-600">
+                  No activity matched those filters yet.
                 </div>
               )}
             </div>
@@ -4493,31 +5272,40 @@ function AttachmentList({ attachments, onRemove = null }) {
 
   return (
     <div className="space-y-2">
-      {attachments.map((attachment) => (
-        <div key={attachment.id} className="flex flex-col gap-3 rounded-2xl border border-stone-300 bg-white p-3 md:flex-row md:items-center md:justify-between">
-          <div className="min-w-0">
-            <a
-              href={attachment.dataUrl}
-              download={attachment.name}
-              className="block truncate text-sm font-semibold text-stone-900 underline-offset-2 hover:underline"
-            >
-              {attachment.name}
-            </a>
-            <div className="mt-1 text-xs text-stone-600">
-              {formatFileSize(attachment.size)} • uploaded {formatDateTime(attachment.uploadedAt)}
-              {attachment.uploadedBy ? ` by ${attachment.uploadedBy}` : ""}
+      {attachments.map((attachment) => {
+        const href = getAttachmentHref(attachment);
+        return (
+          <div key={attachment.id} className="flex flex-col gap-3 rounded-2xl border border-stone-300 bg-white p-3 md:flex-row md:items-center md:justify-between">
+            <div className="min-w-0">
+              {href ? (
+                <a
+                  href={href}
+                  download={attachment.publicUrl ? undefined : attachment.name}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="block truncate text-sm font-semibold text-stone-900 underline-offset-2 hover:underline"
+                >
+                  {attachment.name}
+                </a>
+              ) : (
+                <div className="block truncate text-sm font-semibold text-stone-900">{attachment.name}</div>
+              )}
+              <div className="mt-1 text-xs text-stone-600">
+                {formatFileSize(attachment.size)} • uploaded {formatDateTime(attachment.uploadedAt)}
+                {attachment.uploadedBy ? ` by ${attachment.uploadedBy}` : ""}
+              </div>
             </div>
+            {onRemove && (
+              <button
+                onClick={() => onRemove(attachment.id)}
+                className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700"
+              >
+                Remove
+              </button>
+            )}
           </div>
-          {onRemove && (
-            <button
-              onClick={() => onRemove(attachment.id)}
-              className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700"
-            >
-              Remove
-            </button>
-          )}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -4845,7 +5633,7 @@ function CompactScheduleCard({
   job,
   assignment,
   finishMeta,
-  compact = false,
+  density = "compact",
   selected = false,
   onSelect,
   onUnschedule,
@@ -4857,6 +5645,9 @@ function CompactScheduleCard({
   const state = isManual ? "note" : assignment.status === "finished" ? "done" : assignment.status;
   const title = isManual ? assignment.manualTitle || "Manual block" : `${job.customerName} ${job.number}`;
   const subtitle = isManual ? "Manual schedule block" : job.generalDescr;
+  const showSubtitle = density !== "compact";
+  const showStats = density === "detailed" && !isManual;
+  const showFinishedStamp = density === "detailed" && !isManual;
   const isCardDraggable = draggable && !!job;
   const suppressClickUntilRef = useRef(0);
   const handleSelect = () => {
@@ -4895,26 +5686,26 @@ function CompactScheduleCard({
           <div className="truncate text-xs font-semibold text-stone-900">
             {title}
           </div>
-          {!compact && <div className="mt-1 line-clamp-2 text-[11px] text-stone-700">{subtitle}</div>}
+          {showSubtitle && <div className="mt-1 line-clamp-2 text-[11px] text-stone-700">{subtitle}</div>}
         </div>
         <div className="flex items-start gap-2">
           <span className={`rounded-full px-2 py-1 text-[10px] font-medium ${statusTone(state)}`}>{state}</span>
           {isCardDraggable && <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">drag</span>}
         </div>
       </div>
-      {!compact && !isManual && (
+      {showStats && (
         <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-stone-700">
           <InfoPill label="Est" value={`${job.estPressTime.toFixed(2)}h`} />
           <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
         </div>
       )}
-      {finishMeta?.finishedAt && !compact && !isManual && (
+      {finishMeta?.finishedAt && showFinishedStamp && (
         <div className="mt-2 text-[11px] text-stone-600">
           {formatDateTime(finishMeta.finishedAt)} {finishMeta.finishedBy ? `- ${finishMeta.finishedBy}` : ""}
         </div>
       )}
       {(onUnschedule || onFinish || onDuplicate) && (
-        <div className={`${compact ? "mt-1" : "mt-2"} flex flex-wrap gap-2`}>
+        <div className={`${density === "compact" ? "mt-1" : "mt-2"} flex flex-wrap gap-2`}>
           {onUnschedule && (
             <button onClick={onUnschedule} className="rounded-xl border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800">
               Remove
