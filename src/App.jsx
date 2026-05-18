@@ -1324,6 +1324,7 @@ function SchedulerApp() {
           finishedBy: assignment.finishedBy || "",
           dayKey: assignment.finishedAt ? isoDate(new Date(assignment.finishedAt)) : assignment.dayKey,
           shipDate: assignment.shipDate || (assignment.finishedAt ? isoDate(new Date(assignment.finishedAt)) : assignment.dayKey),
+          excludeFromShipping: !!assignment.excludeFromShipping,
         });
       }
     });
@@ -1515,6 +1516,7 @@ function SchedulerApp() {
 
   const unassignedFinishedJobs = useMemo(() => {
     return allUserFinishedJobs
+      .filter((job) => !job.finishMeta?.excludeFromShipping)
       .filter((job) => !assignedShipmentJobIds.has(job.id))
       .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
   }, [allUserFinishedJobs, assignedShipmentJobIds]);
@@ -2474,6 +2476,33 @@ function SchedulerApp() {
     setSelectedShipQueueJobs([]);
   }
 
+  function dismissFinishedJobFromShippingQueue(jobId) {
+    if (!userCanEdit) return;
+    const job = jobMap.get(jobId);
+    setAssignments((current) =>
+      current.map((assignment) => {
+        if (assignment.jobId !== jobId || assignment.kind !== "press" || assignment.status !== "finished") {
+          return assignment;
+        }
+        return {
+          ...assignment,
+          excludeFromShipping: true,
+        };
+      })
+    );
+    if (selectedShipQueueJobs.includes(jobId)) {
+      setSelectedShipQueueJobs((current) => current.filter((value) => value !== jobId));
+    }
+    if (job) {
+      recordActivity(
+        "Removed finished job from ship queue",
+        "Shipping",
+        `${job.customerName} ${job.number} was removed from the assign ship date queue.`,
+        { jobId }
+      );
+    }
+  }
+
   function addShipmentMethod() {
     if (!userCanEdit) return;
     const method = safeText(newShipmentMethod);
@@ -2756,6 +2785,20 @@ function SchedulerApp() {
       `Shipment email for ${selectedShipDate} was marked sent to ${safeText(shipmentEmailForm.recipients) || "the saved group"}.`,
       { shipDate: selectedShipDate, recipients: safeText(shipmentEmailForm.recipients) }
     );
+  }
+
+  function deleteShipmentEmailLog(logId) {
+    if (!userCanEdit) return;
+    const log = shipmentEmailLogs.find((item) => item.id === logId);
+    setShipmentEmailLogs((current) => current.filter((entry) => entry.id !== logId));
+    if (log) {
+      recordActivity(
+        "Deleted shipment email log",
+        "Shipping",
+        `Shipment email history for ${log.shipDate} was deleted.`,
+        { logId, shipDate: log.shipDate }
+      );
+    }
   }
 
   function applyShipmentEmailGroup(groupId) {
@@ -4288,34 +4331,45 @@ function SchedulerApp() {
                 <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{unassignedFinishedJobs.length}</div>
               </div>
 
-              <div className="max-h-[320px] space-y-3 overflow-y-auto pr-1">
-                {unassignedFinishedJobs.map((job) => (
-                  <label key={job.id} className="flex gap-3 rounded-2xl border border-stone-300 bg-white p-3">
-                    <input
-                      type="checkbox"
-                      checked={selectedShipQueueJobs.includes(job.id)}
-                      onChange={() => toggleShipQueueJob(job.id)}
-                      className="mt-1 h-4 w-4"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div>
-                          <div className="text-sm font-semibold">
-                            {job.customerName} {job.number}
+                <div className="max-h-[320px] space-y-3 overflow-y-auto pr-1">
+                  {unassignedFinishedJobs.map((job) => (
+                    <div key={job.id} className="rounded-2xl border border-stone-300 bg-white p-3">
+                      <div className="flex gap-3">
+                        <input
+                          type="checkbox"
+                          checked={selectedShipQueueJobs.includes(job.id)}
+                          onChange={() => toggleShipQueueJob(job.id)}
+                          className="mt-1 h-4 w-4"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div>
+                              <div className="text-sm font-semibold">
+                                {job.customerName} {job.number}
+                              </div>
+                              <div className="mt-1 text-xs text-stone-700">{job.generalDescr}</div>
+                            </div>
+                            <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone("done")}`}>done</span>
                           </div>
-                          <div className="mt-1 text-xs text-stone-700">{job.generalDescr}</div>
+                          <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-stone-700 md:grid-cols-4">
+                            <InfoPill label="Press" value={job.press || "-"} />
+                            <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
+                            <InfoPill label="Finished" value={formatDateTime(job.finishMeta?.finishedAt)} />
+                            <InfoPill label="Ship date" value={effectiveFinishedShipDate(job.finishMeta) || "-"} />
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => dismissFinishedJobFromShippingQueue(job.id)}
+                              className="rounded-xl border border-rose-200 px-3 py-2 text-xs text-rose-700"
+                            >
+                              Remove from queue
+                            </button>
+                          </div>
                         </div>
-                        <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone("done")}`}>done</span>
-                      </div>
-                      <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-stone-700 md:grid-cols-4">
-                        <InfoPill label="Press" value={job.press || "-"} />
-                        <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
-                        <InfoPill label="Finished" value={formatDateTime(job.finishMeta?.finishedAt)} />
-                        <InfoPill label="Ship date" value={effectiveFinishedShipDate(job.finishMeta) || "-"} />
                       </div>
                     </div>
-                  </label>
-                ))}
+                  ))}
                 {!unassignedFinishedJobs.length && (
                   <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
                     All finished jobs are already grouped into shipments.
@@ -4770,15 +4824,23 @@ function SchedulerApp() {
                         <pre className="mt-1 whitespace-pre-wrap text-xs text-stone-700">{log.body}</pre>
                       </div>
                     </div>
-                    <button
-                      onClick={() => {
-                        setSelectedShipDate(log.shipDate);
-                        setActiveTab("Daily Shipment");
-                      }}
-                      className="rounded-2xl border border-stone-300 bg-stone-50 px-3 py-2 text-sm text-stone-800"
-                    >
-                      Open date
-                    </button>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => {
+                          setSelectedShipDate(log.shipDate);
+                          setActiveTab("Daily Shipment");
+                        }}
+                        className="rounded-2xl border border-stone-300 bg-stone-50 px-3 py-2 text-sm text-stone-800"
+                      >
+                        Open date
+                      </button>
+                      <button
+                        onClick={() => deleteShipmentEmailLog(log.id)}
+                        className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700"
+                      >
+                        Delete
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
