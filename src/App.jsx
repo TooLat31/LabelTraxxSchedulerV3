@@ -4612,9 +4612,14 @@ function JobCard({
   selected = false,
 }) {
   const isDraggable = state !== "finished" && canMove;
+  const suppressClickUntilRef = useRef(0);
+  const handleCardClick = () => {
+    if (Date.now() < suppressClickUntilRef.current) return;
+    onClick?.();
+  };
   const startQueueDrag = (event) => {
     if (!isDraggable) return;
-    event.stopPropagation();
+    suppressClickUntilRef.current = Date.now() + 250;
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData(
       "application/json",
@@ -4625,17 +4630,22 @@ function JobCard({
 
   return (
     <div
-      onClick={() => onClick?.()}
+      draggable={isDraggable}
+      onDragStart={startQueueDrag}
+      onDragEnd={() => {
+        suppressClickUntilRef.current = Date.now() + 150;
+      }}
       onDoubleClick={() => onDoubleClick?.()}
-      className={`rounded-2xl border p-3 shadow-sm transition-colors ${selected ? "border-sky-300 bg-sky-50 shadow-sky-100/70 ring-1 ring-sky-200" : "border-stone-300 bg-white shadow-stone-300/20"} cursor-pointer`}
+      className={`rounded-2xl border p-3 shadow-sm transition-colors ${selected ? "border-sky-300 bg-sky-50 shadow-sky-100/70 ring-1 ring-sky-200" : "border-stone-300 bg-white shadow-stone-300/20"} ${isDraggable ? "cursor-grab" : ""}`}
     >
       <div className="mb-2 flex items-start justify-between gap-2">
         <div
+          onClick={handleCardClick}
           onDoubleClick={onDoubleClick}
           role="button"
           tabIndex={0}
           onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") onClick?.();
+            if (event.key === "Enter" || event.key === " ") handleCardClick();
           }}
           className="min-w-0 flex-1 cursor-pointer text-left"
         >
@@ -4649,12 +4659,7 @@ function JobCard({
             {job.priority || "-"}
           </span>
           {isDraggable && (
-            <span
-              draggable
-              onDragStart={startQueueDrag}
-              onClick={(event) => event.stopPropagation()}
-              className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700 cursor-grab"
-            >
+            <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">
               drag
             </span>
           )}
@@ -4853,9 +4858,14 @@ function CompactScheduleCard({
   const title = isManual ? assignment.manualTitle || "Manual block" : `${job.customerName} ${job.number}`;
   const subtitle = isManual ? "Manual schedule block" : job.generalDescr;
   const isCardDraggable = draggable && !!job;
+  const suppressClickUntilRef = useRef(0);
+  const handleSelect = () => {
+    if (Date.now() < suppressClickUntilRef.current) return;
+    onSelect?.();
+  };
   const startScheduledDrag = (event) => {
     if (!isCardDraggable) return;
-    event.stopPropagation();
+    suppressClickUntilRef.current = Date.now() + 250;
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData(
       "application/json",
@@ -4865,15 +4875,20 @@ function CompactScheduleCard({
 
   return (
     <div
-      className={`rounded-2xl border p-2 transition-colors ${selected ? "border-sky-300 bg-sky-50 ring-1 ring-sky-200" : "border-stone-300 bg-stone-100"}`}
+      draggable={isCardDraggable}
+      onDragStart={startScheduledDrag}
+      onDragEnd={() => {
+        suppressClickUntilRef.current = Date.now() + 150;
+      }}
+      className={`rounded-2xl border p-2 transition-colors ${selected ? "border-sky-300 bg-sky-50 ring-1 ring-sky-200" : "border-stone-300 bg-stone-100"} ${isCardDraggable ? "cursor-grab" : ""}`}
     >
       <div className="flex items-start justify-between gap-2">
         <div
-          onClick={onSelect}
+          onClick={handleSelect}
           role="button"
           tabIndex={0}
           onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") onSelect?.();
+            if (event.key === "Enter" || event.key === " ") handleSelect();
           }}
           className={`min-w-0 flex-1 ${onSelect ? "cursor-pointer" : ""}`}
         >
@@ -4884,16 +4899,7 @@ function CompactScheduleCard({
         </div>
         <div className="flex items-start gap-2">
           <span className={`rounded-full px-2 py-1 text-[10px] font-medium ${statusTone(state)}`}>{state}</span>
-          {isCardDraggable && (
-            <span
-              draggable
-              onDragStart={startScheduledDrag}
-              onClick={(event) => event.stopPropagation()}
-              className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700 cursor-grab"
-            >
-              drag
-            </span>
-          )}
+          {isCardDraggable && <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">drag</span>}
         </div>
       </div>
       {!compact && !isManual && (
