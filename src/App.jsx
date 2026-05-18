@@ -1591,12 +1591,11 @@ function SchedulerApp() {
     () => (schedulePressFilter === "All" ? PRESS_ORDER : PRESS_ORDER.filter((press) => press === schedulePressFilter)),
     [schedulePressFilter]
   );
-  const schedulePressesByDay = useMemo(
+  const visibleScheduleRows = useMemo(
     () =>
-      weekColumns.map((day) => ({
-        ...day,
-        presses: visiblePresses.filter((press) => !hideEmptyPresses || (board[day.key]?.[press] || []).length),
-      })),
+      visiblePresses.filter(
+        (press) => !hideEmptyPresses || weekColumns.some((day) => (board[day.key]?.[press] || []).length)
+      ),
     [board, hideEmptyPresses, visiblePresses, weekColumns]
   );
   const todayScheduledItems = useMemo(
@@ -3606,68 +3605,78 @@ function SchedulerApp() {
                 </div>
               </div>
               <div className="overflow-x-auto pb-2">
-                <div className="grid min-w-[1120px] grid-cols-5 gap-3">
-                  {schedulePressesByDay.map((day) => (
-                    <div key={day.key} className="rounded-3xl bg-stone-200/60 p-3">
-                      <div className="mb-3 rounded-2xl border border-stone-300 bg-white px-3 py-3">
-                        <div className="text-xs uppercase tracking-[0.16em] text-stone-600">{day.label}</div>
-                        <div className="mt-1 text-lg font-semibold">{formatShortDate(day.date)}</div>
-                      </div>
-                      <div className="space-y-3">
-                        {day.presses.map((press) => {
-                          const laneJobs = board[day.key]?.[press] || [];
-                          const totalHours = laneJobs.reduce((sum, item) => sum + (item.job?.estPressTime || 0), 0);
-                          return (
-                            <div
-                              key={`${day.key}-${press}`}
-                              onDragOver={(event) => event.preventDefault()}
-                              onDrop={(event) => handleScheduleDrop(event, day.key, press)}
-                              className="rounded-2xl border border-stone-300 bg-white p-2"
-                            >
-                              <div className="mb-2 flex items-start justify-between gap-2">
-                                <div>
-                                  <div className="text-sm font-semibold">Press {press}</div>
-                                  <div className="text-[11px] text-stone-600">
-                                    {laneJobs.length} jobs - {totalHours.toFixed(2)} hrs
-                                  </div>
-                                </div>
-                                <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">
-                                  drop
-                                </span>
-                              </div>
-                              <div className="space-y-2">
-                                {laneJobs.map(({ assignment, job }) => (
-                                  <CompactScheduleCard
-                                    key={assignment.id}
-                                    job={job}
-                                    assignment={assignment}
-                                    finishMeta={job ? finishedMetaByJobId.get(job.id) : null}
-                                    density={scheduleCardDensity}
-                                    selected={job ? selectedJobId === job.id : false}
-                                    onSelect={job ? () => selectJob(job.id) : undefined}
-                                    onUnschedule={userCanMoveJobs ? () => removeAssignment(assignment.id) : undefined}
-                                    onFinish={job && userCanEdit ? () => finishJob(job.id) : undefined}
-                                    onDuplicate={userCanMoveJobs ? () => duplicateAssignmentToNextDay(assignment.id) : undefined}
-                                    draggable={userCanMoveJobs && assignment.status !== "finished"}
-                                  />
-                                ))}
-                                {!laneJobs.length && (
-                                  <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50 p-3 text-center text-[11px] text-stone-500">
-                                    Drop here
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })}
-                        {!day.presses.length && (
-                          <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
-                            No presses are visible for this day with the current filters.
-                          </div>
-                        )}
-                      </div>
+                <div
+                  className="grid min-w-[1280px] gap-3"
+                  style={{ gridTemplateColumns: "160px repeat(5, minmax(0, 1fr))" }}
+                >
+                  <div className="rounded-2xl border border-stone-300 bg-stone-100 px-4 py-3">
+                    <div className="text-xs uppercase tracking-[0.16em] text-stone-600">Press</div>
+                    <div className="mt-1 text-sm font-semibold text-stone-900">Week lanes</div>
+                  </div>
+                  {weekColumns.map((day) => (
+                    <div key={day.key} className="rounded-2xl border border-stone-300 bg-white px-3 py-3">
+                      <div className="text-xs uppercase tracking-[0.16em] text-stone-600">{day.label}</div>
+                      <div className="mt-1 text-lg font-semibold">{formatShortDate(day.date)}</div>
                     </div>
                   ))}
+
+                  {visibleScheduleRows.map((press) => (
+                    <React.Fragment key={press}>
+                      <div className="rounded-2xl border border-stone-300 bg-stone-100 px-4 py-3">
+                        <div className="text-sm font-semibold text-stone-900">Press {press}</div>
+                        <div className="mt-1 text-[11px] text-stone-600">Aligned across the week</div>
+                      </div>
+                      {weekColumns.map((day) => {
+                        const laneJobs = board[day.key]?.[press] || [];
+                        const totalHours = laneJobs.reduce((sum, item) => sum + (item.job?.estPressTime || 0), 0);
+                        return (
+                          <div
+                            key={`${press}-${day.key}`}
+                            onDragOver={(event) => event.preventDefault()}
+                            onDrop={(event) => handleScheduleDrop(event, day.key, press)}
+                            className="rounded-2xl border border-stone-300 bg-white p-2"
+                          >
+                            <div className="mb-2 flex items-start justify-between gap-2">
+                              <div className="text-[11px] text-stone-600">
+                                {laneJobs.length} jobs - {totalHours.toFixed(2)} hrs
+                              </div>
+                              <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">
+                                drop
+                              </span>
+                            </div>
+                            <div className="space-y-2">
+                              {laneJobs.map(({ assignment, job }) => (
+                                <CompactScheduleCard
+                                  key={assignment.id}
+                                  job={job}
+                                  assignment={assignment}
+                                  finishMeta={job ? finishedMetaByJobId.get(job.id) : null}
+                                  density={scheduleCardDensity}
+                                  selected={job ? selectedJobId === job.id : false}
+                                  onSelect={job ? () => selectJob(job.id) : undefined}
+                                  onUnschedule={userCanMoveJobs ? () => removeAssignment(assignment.id) : undefined}
+                                  onFinish={job && userCanEdit ? () => finishJob(job.id) : undefined}
+                                  onDuplicate={userCanMoveJobs ? () => duplicateAssignmentToNextDay(assignment.id) : undefined}
+                                  draggable={userCanMoveJobs && assignment.status !== "finished"}
+                                />
+                              ))}
+                              {!laneJobs.length && (
+                                <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50 p-3 text-center text-[11px] text-stone-500">
+                                  Drop here
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </React.Fragment>
+                  ))}
+
+                  {!visibleScheduleRows.length && (
+                    <div className="col-span-6 rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
+                      No presses are visible for this week with the current filters.
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
