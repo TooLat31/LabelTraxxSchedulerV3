@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { isSupabaseConfigured, supabase } from "./lib/supabase";
 
 const PRESS_ORDER = ["5.1", "6.1", "1.1", "2.1", "8", "9", "Rewind"];
@@ -6,6 +6,7 @@ const STORAGE_KEY = "labeltraxx-scheduler-v4";
 const SESSION_STORAGE_KEY = "labeltraxx-scheduler-session-v1";
 const SHARED_STATE_ROW_ID = "labeltraxx-shared-state";
 const LOGIN_SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
+const SHARED_SAVE_DEBOUNCE_MS = 700;
 const BASE_TABS = ["Scheduler", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails"];
 const ACCESS_MODE_OPTIONS = ["edit", "view"];
 const ATTACHMENT_ACCEPT =
@@ -308,6 +309,10 @@ function normalizeJobs(jobs) {
         dueOnSiteDate: job.dueOnSiteDate ? new Date(job.dueOnSiteDate) : null,
       }))
     : [];
+}
+
+function buildJobSearchText(job) {
+  return `${safeText(job.number)} ${safeText(job.customerName)} ${safeText(job.generalDescr)} ${safeText(job.notes)}`.toLowerCase();
 }
 
 function normalizeRequests(requests) {
@@ -780,6 +785,9 @@ function SchedulerApp() {
   const jobDetailsRef = useRef(null);
   const lastSharedSnapshotRef = useRef("");
   const saveTimerRef = useRef(null);
+  const deferredSearch = useDeferredValue(search);
+  const deferredUnscheduledSearch = useDeferredValue(unscheduledSearch);
+  const deferredLocationSearch = useDeferredValue(locationSearch);
 
   useEffect(() => {
     let isCancelled = false;
@@ -904,21 +912,31 @@ function SchedulerApp() {
       users,
       weekStart,
     });
-    const digest = JSON.stringify(sharedSnapshot);
-
-    localStorage.setItem(STORAGE_KEY, digest);
-
-    if (digest === lastSharedSnapshotRef.current) return;
-    lastSharedSnapshotRef.current = digest;
-
-    if (!isSupabaseConfigured || !supabase) {
-      setSyncStatus("Local only");
-      return;
+    window.clearTimeout(saveTimerRef.current);
+    if (isSupabaseConfigured && supabase) {
+      setSyncStatus("Saving...");
     }
 
-    setSyncStatus("Saving...");
-    window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(async () => {
+      const digest = JSON.stringify(sharedSnapshot);
+      localStorage.setItem(STORAGE_KEY, digest);
+
+      if (digest === lastSharedSnapshotRef.current) {
+        if (!isSupabaseConfigured || !supabase) {
+          setSyncStatus("Local only");
+        } else {
+          setSyncStatus("Live sync");
+        }
+        return;
+      }
+
+      lastSharedSnapshotRef.current = digest;
+
+      if (!isSupabaseConfigured || !supabase) {
+        setSyncStatus("Local only");
+        return;
+      }
+
       const { error } = await supabase.from("app_state").upsert({
         id: SHARED_STATE_ROW_ID,
         payload: sharedSnapshot,
@@ -933,7 +951,7 @@ function SchedulerApp() {
 
       setSyncStatus("Live sync");
       setLastSyncAt(new Date().toISOString());
-    }, 300);
+    }, SHARED_SAVE_DEBOUNCE_MS);
 
     return () => {
       window.clearTimeout(saveTimerRef.current);
@@ -1078,6 +1096,35 @@ function SchedulerApp() {
   const weekColumns = useMemo(() => buildWeekColumns(weekStart), [weekStart]);
   const weekKeys = useMemo(() => new Set(weekColumns.map((column) => column.key)), [weekColumns]);
   const jobMap = useMemo(() => new Map(jobs.map((job) => [job.id, job])), [jobs]);
+  const jobSearchTextById = useMemo(() => {
+    const map = new Map();
+    jobs.forEach((job) => {
+      map.set(job.id, buildJobSearchText(job));
+    });
+    return map;
+  }, [jobs]);
+  const pressAssignmentsByJobId = useMemo(() => {
+    const map = new Map();
+    assignments.forEach((assignment) => {
+      if (assignment.kind !== "press" || !assignment.jobId) return;
+      const current = map.get(assignment.jobId);
+      if (current) {
+        current.push(assignment);
+      } else {
+        map.set(assignment.jobId, [assignment]);
+      }
+    });
+    map.forEach((items) => {
+      items.sort((left, right) => {
+        if (left.dayKey !== right.dayKey) return left.dayKey.localeCompare(right.dayKey);
+        return left.press.localeCompare(right.press);
+      });
+    });
+    return map;
+  }, [assignments]);
+  const normalizedSearch = deferredSearch.trim().toLowerCase();
+  const normalizedUnscheduledSearch = deferredUnscheduledSearch.trim().toLowerCase();
+  const normalizedLocationSearch = deferredLocationSearch.trim().toLowerCase();
 
   useEffect(() => {
     if (!weekColumns.length) return;
@@ -1090,11 +1137,11 @@ function SchedulerApp() {
 
   const filteredJobs = useMemo(() => {
     return jobs.filter((job) => {
-      const haystack = `${job.number} ${job.customerName} ${job.generalDescr} ${job.notes}`.toLowerCase();
-      const matchesSearch = !search.trim() || haystack.includes(search.toLowerCase());
+      const haystack = jobSearchTextById.get(job.id) || "";
+      const matchesSearch = !normalizedSearch || haystack.includes(normalizedSearch);
       return matchesSearch;
     });
-  }, [jobs, search]);
+  }, [jobSearchTextById, jobs, normalizedSearch]);
 
   const filteredJobIds = useMemo(() => new Set(filteredJobs.map((job) => job.id)), [filteredJobs]);
 
@@ -1163,8 +1210,8 @@ function SchedulerApp() {
         return safeText(job.priority) === queueCategoryFilter;
       })
       .filter((job) => {
-        const haystack = `${job.number} ${job.customerName} ${job.generalDescr}`.toLowerCase();
-        return !unscheduledSearch.trim() || haystack.includes(unscheduledSearch.toLowerCase());
+        const haystack = jobSearchTextById.get(job.id) || "";
+        return !normalizedUnscheduledSearch || haystack.includes(normalizedUnscheduledSearch);
       })
       .sort((left, right) => {
         const leftDate = left.shipByDate ? left.shipByDate.getTime() : Number.MAX_SAFE_INTEGER;
@@ -1172,7 +1219,7 @@ function SchedulerApp() {
         if (leftDate !== rightDate) return leftDate - rightDate;
         return right.estPressTime - left.estPressTime;
       });
-  }, [filteredJobs, queueCategoryFilter, queuePressFilter, queueStatusFilter, unscheduledSearch, userFinishedJobIds]);
+  }, [filteredJobs, jobSearchTextById, normalizedUnscheduledSearch, queueCategoryFilter, queuePressFilter, queueStatusFilter, userFinishedJobIds]);
 
   const allUserFinishedJobs = useMemo(() => {
     return jobs
@@ -1292,13 +1339,21 @@ function SchedulerApp() {
     [currentUser?.username, notes]
   );
 
+  const shipmentItemsByGroupId = useMemo(() => {
+    const map = new Map();
+    shipmentGroups.forEach((group) => {
+      map.set(group.id, getShipmentItems(group, jobMap, finishedMetaByJobId));
+    });
+    return map;
+  }, [finishedMetaByJobId, jobMap, shipmentGroups]);
+
   const assignedShipmentJobIds = useMemo(() => {
     const ids = new Set();
     shipmentGroups.forEach((group) => {
-      getShipmentItems(group, jobMap, finishedMetaByJobId).forEach((item) => ids.add(item.id));
+      (shipmentItemsByGroupId.get(group.id) || []).forEach((item) => ids.add(item.id));
     });
     return ids;
-  }, [finishedMetaByJobId, jobMap, shipmentGroups]);
+  }, [shipmentGroups, shipmentItemsByGroupId]);
 
   const unassignedFinishedJobs = useMemo(() => {
     return allUserFinishedJobs
@@ -1330,7 +1385,7 @@ function SchedulerApp() {
         jobCount: 0,
         totalCost: 0,
       };
-      const items = getShipmentItems(group, jobMap, finishedMetaByJobId);
+      const items = shipmentItemsByGroupId.get(group.id) || [];
       grouped.set(group.shipDate, {
         shipDate: group.shipDate,
         groupCount: existing.groupCount + 1,
@@ -1339,30 +1394,27 @@ function SchedulerApp() {
       });
     });
     return Array.from(grouped.values()).sort((left, right) => right.shipDate.localeCompare(left.shipDate));
-  }, [finishedMetaByJobId, jobMap, shipmentGroups, shipmentHistoryFilterDate]);
+  }, [shipmentGroups, shipmentHistoryFilterDate, shipmentItemsByGroupId]);
 
-  const selectedJob = selectedJobId ? jobs.find((job) => job.id === selectedJobId) : null;
+  const selectedJob = useMemo(
+    () => (selectedJobId ? jobMap.get(selectedJobId) || null : null),
+    [jobMap, selectedJobId]
+  );
   const selectedJobFinishMeta = selectedJob ? finishedMetaByJobId.get(selectedJob.id) : null;
 
   const jobLocationResults = useMemo(() => {
-    const query = locationSearch.trim().toLowerCase();
-    if (!query) return [];
+    if (!normalizedLocationSearch) return [];
     return jobs
       .filter((job) => {
-        const haystack = `${job.number} ${job.customerName} ${job.generalDescr} ${job.notes}`.toLowerCase();
-        return haystack.includes(query);
+        const haystack = jobSearchTextById.get(job.id) || "";
+        return haystack.includes(normalizedLocationSearch);
       })
       .slice(0, 20)
       .map((job) => {
-        const locations = assignments
-          .filter((assignment) => assignment.kind === "press" && assignment.jobId === job.id)
-          .sort((left, right) => {
-            if (left.dayKey !== right.dayKey) return left.dayKey.localeCompare(right.dayKey);
-            return left.press.localeCompare(right.press);
-          });
+        const locations = pressAssignmentsByJobId.get(job.id) || [];
         return { job, locations };
       });
-  }, [assignments, jobs, locationSearch]);
+  }, [jobSearchTextById, jobs, normalizedLocationSearch, pressAssignmentsByJobId]);
 
   const queuePressOptions = useMemo(
     () => ["All", ...Array.from(new Set(jobs.map((job) => safeText(job.press)).filter(Boolean))).sort()],
@@ -1397,6 +1449,47 @@ function SchedulerApp() {
         .sort((left, right) => dateSortValue(right.createdAt) - dateSortValue(left.createdAt)),
     [selectedShipDate, shipmentEmailLogs]
   );
+
+  const shipmentEmailDraft = useMemo(() => {
+    const groups = shipmentGroupsForDay;
+    const totalCost = groups.reduce((sum, group) => sum + parseCurrency(group.totalCost), 0);
+    const totalBill = groups.reduce((sum, group) => sum + parseCurrency(group.billAmount), 0);
+    const methods = Array.from(new Set(groups.map((group) => group.method).filter(Boolean)));
+    const lines = [`Daily shipment summary for ${selectedShipDate}`, ""];
+    let jobCount = 0;
+
+    groups.forEach((group) => {
+      const items = shipmentItemsByGroupId.get(group.id) || [];
+      jobCount += items.length;
+      lines.push(`${group.label} | ${group.method}`);
+      lines.push(`Skids / cartons: ${group.packageCount || 0} ${group.packageType || "Skids"}`);
+      lines.push(`Our cost: ${formatCurrency(group.totalCost)}`);
+      lines.push(`Bill: ${formatCurrency(group.billAmount)}`);
+      items.forEach((item) => {
+        lines.push(`- ${item.customerName} ${item.number}: ${item.generalDescr}`);
+      });
+      if (group.notes) lines.push(`Notes: ${group.notes}`);
+      lines.push("");
+    });
+
+    if (!groups.length) {
+      lines.push("No shipment groups have been created for this date yet.");
+      lines.push("");
+    }
+
+    lines.push(`Total cost: ${formatCurrency(totalCost)}`);
+    lines.push(`Total bill: ${formatCurrency(totalBill)}`);
+
+    return {
+      subject: `Daily shipments for ${selectedShipDate}`,
+      body: lines.join("\n"),
+      groupCount: groups.length,
+      jobCount,
+      totalCost,
+      totalBill,
+      methods,
+    };
+  }, [selectedShipDate, shipmentGroupsForDay, shipmentItemsByGroupId]);
 
   const shipmentEmailHistory = useMemo(
     () =>
@@ -2233,70 +2326,29 @@ function SchedulerApp() {
     });
   }
 
-  function buildShipmentEmailDraft() {
-    const groups = shipmentGroupsForDay;
-    const totalCost = groups.reduce((sum, group) => sum + parseCurrency(group.totalCost), 0);
-    const totalBill = groups.reduce((sum, group) => sum + parseCurrency(group.billAmount), 0);
-    const methods = Array.from(new Set(groups.map((group) => group.method).filter(Boolean)));
-    const lines = [`Daily shipment summary for ${selectedShipDate}`, ""];
-
-    groups.forEach((group) => {
-      const items = getShipmentItems(group, jobMap, finishedMetaByJobId);
-      lines.push(`${group.label} | ${group.method}`);
-      lines.push(`Skids / cartons: ${group.packageCount || 0} ${group.packageType || "Skids"}`);
-      lines.push(`Our cost: ${formatCurrency(group.totalCost)}`);
-      lines.push(`Bill: ${formatCurrency(group.billAmount)}`);
-      items.forEach((item) => {
-        lines.push(`- ${item.customerName} ${item.number}: ${item.generalDescr}`);
-      });
-      if (group.notes) lines.push(`Notes: ${group.notes}`);
-      lines.push("");
-    });
-
-    if (!groups.length) {
-      lines.push("No shipment groups have been created for this date yet.");
-      lines.push("");
-    }
-
-    lines.push(`Total cost: ${formatCurrency(totalCost)}`);
-    lines.push(`Total bill: ${formatCurrency(totalBill)}`);
-
-    return {
-      subject: `Daily shipments for ${selectedShipDate}`,
-      body: lines.join("\n"),
-      groupCount: groups.length,
-      jobCount: groups.reduce((sum, group) => sum + getShipmentItems(group, jobMap, finishedMetaByJobId).length, 0),
-      totalCost,
-      totalBill,
-      methods,
-    };
-  }
-
   function openShipmentEmailDraft() {
     if (!userCanEdit) return;
     const recipients = safeText(shipmentEmailForm.recipients);
-    const draft = buildShipmentEmailDraft();
     const params = new URLSearchParams({
-      subject: draft.subject,
-      body: draft.body,
+      subject: shipmentEmailDraft.subject,
+      body: shipmentEmailDraft.body,
     });
     window.location.href = `mailto:${encodeURIComponent(recipients)}?${params.toString()}`;
   }
 
   function logShipmentEmail() {
     if (!currentUser || !selectedShipDate || !userCanEdit) return;
-    const draft = buildShipmentEmailDraft();
     setShipmentEmailLogs((current) => [
       {
         id: makeId("email"),
         shipDate: selectedShipDate,
         recipients: safeText(shipmentEmailForm.recipients),
-        subject: draft.subject,
-        body: draft.body,
-        jobCount: draft.jobCount,
-        totalCost: draft.totalCost,
-        totalBill: draft.totalBill,
-        methods: draft.methods,
+        subject: shipmentEmailDraft.subject,
+        body: shipmentEmailDraft.body,
+        jobCount: shipmentEmailDraft.jobCount,
+        totalCost: shipmentEmailDraft.totalCost,
+        totalBill: shipmentEmailDraft.totalBill,
+        methods: shipmentEmailDraft.methods,
         createdAt: new Date().toISOString(),
         createdBy: currentUser.username,
       },
@@ -3828,8 +3880,8 @@ function SchedulerApp() {
                       </div>
                     </div>
                     <div className="rounded-2xl bg-stone-100 p-4 text-sm text-stone-800">
-                      <div className="font-semibold">{buildShipmentEmailDraft().subject}</div>
-                      <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap text-xs text-stone-700">{buildShipmentEmailDraft().body}</pre>
+                      <div className="font-semibold">{shipmentEmailDraft.subject}</div>
+                      <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap text-xs text-stone-700">{shipmentEmailDraft.body}</pre>
                     </div>
                     <div className="flex flex-wrap gap-2">
                       <button
@@ -3908,7 +3960,7 @@ function SchedulerApp() {
               </div>
               <div className="space-y-3">
                 {shipmentGroupsForDay.map((group) => {
-                  const items = getShipmentItems(group, jobMap, finishedMetaByJobId);
+                  const items = shipmentItemsByGroupId.get(group.id) || [];
                   return (
                     <div key={group.id} className="rounded-2xl border border-stone-300 bg-white p-4">
                       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
@@ -4560,22 +4612,22 @@ function JobCard({
   selected = false,
 }) {
   const isDraggable = state !== "finished" && canMove;
+  const startQueueDrag = (event) => {
+    if (!isDraggable) return;
+    event.stopPropagation();
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(
+      "application/json",
+      makeDragPayload({ type: "queue", jobId: job.id })
+    );
+    event.dataTransfer.setData("text/plain", job.id);
+  };
 
   return (
     <div
-      draggable={isDraggable}
-      onDragStart={(event) => {
-        if (!isDraggable) return;
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData(
-          "application/json",
-          makeDragPayload({ type: "queue", jobId: job.id })
-        );
-        event.dataTransfer.setData("text/plain", job.id);
-      }}
       onClick={() => onClick?.()}
       onDoubleClick={() => onDoubleClick?.()}
-      className={`rounded-2xl border p-3 shadow-sm ${selected ? "border-sky-300 bg-sky-50 shadow-sky-100/70" : "border-stone-300 bg-white shadow-stone-300/20"} ${isDraggable ? "cursor-grab" : ""}`}
+      className={`rounded-2xl border p-3 shadow-sm transition-colors ${selected ? "border-sky-300 bg-sky-50 shadow-sky-100/70 ring-1 ring-sky-200" : "border-stone-300 bg-white shadow-stone-300/20"} cursor-pointer`}
     >
       <div className="mb-2 flex items-start justify-between gap-2">
         <div
@@ -4597,7 +4649,12 @@ function JobCard({
             {job.priority || "-"}
           </span>
           {isDraggable && (
-            <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">
+            <span
+              draggable
+              onDragStart={startQueueDrag}
+              onClick={(event) => event.stopPropagation()}
+              className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700 cursor-grab"
+            >
               drag
             </span>
           )}
@@ -4796,19 +4853,19 @@ function CompactScheduleCard({
   const title = isManual ? assignment.manualTitle || "Manual block" : `${job.customerName} ${job.number}`;
   const subtitle = isManual ? "Manual schedule block" : job.generalDescr;
   const isCardDraggable = draggable && !!job;
+  const startScheduledDrag = (event) => {
+    if (!isCardDraggable) return;
+    event.stopPropagation();
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(
+      "application/json",
+      makeDragPayload({ type: "scheduled", assignmentId: assignment.id, jobId: job.id })
+    );
+  };
 
   return (
     <div
-      draggable={isCardDraggable}
-      onDragStart={(event) => {
-        if (!isCardDraggable) return;
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData(
-          "application/json",
-          makeDragPayload({ type: "scheduled", assignmentId: assignment.id, jobId: job.id })
-        );
-      }}
-      className={`rounded-2xl border p-2 ${selected ? "border-sky-300 bg-sky-50" : "border-stone-300 bg-stone-100"} ${isCardDraggable ? "cursor-grab" : ""}`}
+      className={`rounded-2xl border p-2 transition-colors ${selected ? "border-sky-300 bg-sky-50 ring-1 ring-sky-200" : "border-stone-300 bg-stone-100"}`}
     >
       <div className="flex items-start justify-between gap-2">
         <div
@@ -4825,9 +4882,20 @@ function CompactScheduleCard({
           </div>
           {!compact && <div className="mt-1 line-clamp-2 text-[11px] text-stone-700">{subtitle}</div>}
         </div>
-        <span className={`rounded-full px-2 py-1 text-[10px] font-medium ${statusTone(state)}`}>{state}</span>
+        <div className="flex items-start gap-2">
+          <span className={`rounded-full px-2 py-1 text-[10px] font-medium ${statusTone(state)}`}>{state}</span>
+          {isCardDraggable && (
+            <span
+              draggable
+              onDragStart={startScheduledDrag}
+              onClick={(event) => event.stopPropagation()}
+              className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700 cursor-grab"
+            >
+              drag
+            </span>
+          )}
+        </div>
       </div>
-      {isCardDraggable && !compact && <div className="mt-1 text-[10px] text-stone-600">Drag to move</div>}
       {!compact && !isManual && (
         <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-stone-700">
           <InfoPill label="Est" value={`${job.estPressTime.toFixed(2)}h`} />
