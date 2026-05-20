@@ -1378,7 +1378,11 @@ function SchedulerApp() {
   }, [jobs]);
 
   const userFinishedAssignments = useMemo(
-    () => assignments.filter((assignment) => assignment.kind === "press" && assignment.status === "finished"),
+    () =>
+      assignments.filter(
+        (assignment) =>
+          (assignment.kind === "press" || assignment.kind === "finish-only") && assignment.status === "finished"
+      ),
     [assignments]
   );
 
@@ -1566,6 +1570,7 @@ function SchedulerApp() {
         map[assignment.dayKey][assignment.press].push({ assignment, job: null });
         return;
       }
+      if (assignment.kind !== "press") return;
       if (!visibleSchedulerJobIds.has(assignment.jobId)) return;
       const job = jobMap.get(assignment.jobId);
       if (!job) return;
@@ -2386,7 +2391,7 @@ function SchedulerApp() {
             jobId,
             dayKey: fallbackDayKey,
             press: fallbackPress,
-            kind: "press",
+            kind: "finish-only",
             status: "finished",
             createdAt: finishedAt,
             finishedAt,
@@ -2410,22 +2415,34 @@ function SchedulerApp() {
     if (!currentUser || !userCanEdit) return;
     const job = jobMap.get(jobId);
     const finishedAssignments = assignments.filter(
-      (assignment) => assignment.jobId === jobId && assignment.kind === "press" && assignment.status === "finished"
+      (assignment) =>
+        assignment.jobId === jobId &&
+        (assignment.kind === "press" || assignment.kind === "finish-only") &&
+        assignment.status === "finished"
     );
     if (!finishedAssignments.length) return;
 
     setAssignments((current) =>
-      current.map((assignment) =>
-        assignment.jobId === jobId && assignment.kind === "press" && assignment.status === "finished"
-          ? {
-              ...assignment,
-              status: "scheduled",
-              finishedAt: null,
-              finishedBy: "",
-              excludeFromShipping: false,
-            }
-          : assignment
-      )
+      current
+        .filter(
+          (assignment) =>
+            !(
+              assignment.jobId === jobId &&
+              assignment.kind === "finish-only" &&
+              assignment.status === "finished"
+            )
+        )
+        .map((assignment) =>
+          assignment.jobId === jobId && assignment.kind === "press" && assignment.status === "finished"
+            ? {
+                ...assignment,
+                status: "scheduled",
+                finishedAt: null,
+                finishedBy: "",
+                excludeFromShipping: false,
+              }
+            : assignment
+        )
     );
     setSelectedShipmentJobs((current) => current.filter((value) => value !== jobId));
     setSelectedShipQueueJobs((current) => current.filter((value) => value !== jobId));
@@ -2960,7 +2977,11 @@ function SchedulerApp() {
     const targetIds = new Set(selectedShipQueueJobs);
     setAssignments((current) =>
       current.map((assignment) => {
-        if (!targetIds.has(assignment.jobId) || assignment.kind !== "press" || assignment.status !== "finished") {
+        if (
+          !targetIds.has(assignment.jobId) ||
+          (assignment.kind !== "press" && assignment.kind !== "finish-only") ||
+          assignment.status !== "finished"
+        ) {
           return assignment;
         }
         return {
@@ -2982,7 +3003,11 @@ function SchedulerApp() {
     const job = jobMap.get(jobId);
     setAssignments((current) =>
       current.map((assignment) => {
-        if (assignment.jobId !== jobId || assignment.kind !== "press" || assignment.status !== "finished") {
+        if (
+          assignment.jobId !== jobId ||
+          (assignment.kind !== "press" && assignment.kind !== "finish-only") ||
+          assignment.status !== "finished"
+        ) {
           return assignment;
         }
         return {
@@ -4075,26 +4100,38 @@ function SchedulerApp() {
                     </select>
                   </div>
 
-                  <div className="max-h-[65vh] space-y-3 overflow-y-auto pb-2 pr-1 2xl:max-h-[720px]">
-                    {unscheduledJobs.map((job) => (
-                      <JobCard
-                        key={job.id}
-                        job={job}
-                        state={deriveVisibleJobState(job.id, activePressJobIds, userFinishedJobIds)}
-                        selected={selectedJobId === job.id}
-                        onClick={() => selectJob(job.id)}
-                        onDoubleClick={() => selectJob(job.id, true)}
-                        onFinish={userCanEdit ? () => finishJob(job.id) : undefined}
-                        weekColumns={weekColumns}
-                        canMove={userCanMoveJobs}
-                        scheduledAssignments={activeScheduleLocationsByJobId.get(job.id) || []}
-                        pressOptions={PRESS_ORDER}
-                        onUpdatePress={userCanMoveJobs ? (press) => updateJobRecommendedPress(job.id, press) : undefined}
-                        onQuickAssign={(dayKey) => addAssignment(job.id, dayKey, PRESS_ORDER.includes(job.press) ? job.press : "Rewind")}
-                      />
-                    ))}
-                    {!unscheduledJobs.length && (
-                      <div className="rounded-2xl border border-dashed border-stone-300 bg-white/70 p-4 text-sm text-stone-600">
+                  <div className="max-h-[65vh] overflow-auto border border-stone-300 bg-white 2xl:max-h-[720px]">
+                    {unscheduledJobs.length ? (
+                      <table className="min-w-[1520px] border-collapse text-left text-[12px] text-stone-800">
+                        <thead className="sticky top-0 z-10 bg-stone-100">
+                          <tr className="border-b border-stone-300">
+                            {["Number", "Customer", "Priority", "PO No.", "Description", "Press", "Ship", "Quantity", "Status", "Stock", "Press Time", "Main", "Scheduled On", "Actions"].map((label) => (
+                              <th key={label} className="whitespace-nowrap border-r border-stone-200 px-3 py-2 font-semibold text-stone-700 last:border-r-0">
+                                {label}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {unscheduledJobs.map((job) => (
+                            <PressQueueRow
+                              key={job.id}
+                              job={job}
+                              state={deriveVisibleJobState(job.id, activePressJobIds, userFinishedJobIds)}
+                              selected={selectedJobId === job.id}
+                              onSelect={() => selectJob(job.id)}
+                              onOpenDetails={() => selectJob(job.id, true)}
+                              onFinish={userCanEdit ? () => finishJob(job.id) : undefined}
+                              canMove={userCanMoveJobs}
+                              scheduledAssignments={activeScheduleLocationsByJobId.get(job.id) || []}
+                              pressOptions={PRESS_ORDER}
+                              onUpdatePress={userCanMoveJobs ? (press) => updateJobRecommendedPress(job.id, press) : undefined}
+                            />
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <div className="p-4 text-sm text-stone-600">
                         No open queue jobs match your search.
                       </div>
                     )}
@@ -6381,6 +6418,113 @@ function PaperPullCard({ request, onDone, onDelete, readOnly = false }) {
         )}
       </div>
     </div>
+  );
+}
+
+function PressQueueRow({
+  job,
+  state,
+  selected = false,
+  onSelect,
+  onOpenDetails,
+  onFinish,
+  canMove = false,
+  scheduledAssignments = [],
+  pressOptions = [],
+  onUpdatePress,
+}) {
+  const suppressClickUntilRef = useRef(0);
+  const rowTone = selected
+    ? "bg-sky-100"
+    : job?.holdActive
+      ? "bg-rose-50"
+      : "bg-white even:bg-stone-50";
+  const scheduledText = scheduledAssignments.length
+    ? scheduledAssignments
+        .map((assignment) => `${formatShortDate(new Date(`${assignment.dayKey}T12:00:00`))} ${formatPressLabel(assignment.press)}`)
+        .join(", ")
+    : "-";
+
+  const startQueueDrag = (event) => {
+    if (!canMove) return;
+    suppressClickUntilRef.current = Date.now() + 250;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/json", makeDragPayload({ type: "queue", jobId: job.id }));
+    event.dataTransfer.setData("text/plain", job.id);
+  };
+
+  const handleSelect = () => {
+    if (Date.now() < suppressClickUntilRef.current) return;
+    onSelect?.();
+  };
+
+  return (
+    <tr
+      draggable={canMove}
+      onDragStart={startQueueDrag}
+      onDragEnd={() => {
+        suppressClickUntilRef.current = Date.now() + 150;
+      }}
+      onClick={handleSelect}
+      onDoubleClick={onOpenDetails}
+      className={`cursor-pointer border-b border-stone-200 align-top ${rowTone} ${canMove ? "hover:bg-sky-50" : ""}`}
+    >
+      <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2 font-medium">{job.number}</td>
+      <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2">{job.customerName}</td>
+      <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2">{job.priority || "-"}</td>
+      <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2">{job.custPoNum || "-"}</td>
+      <td className="max-w-[280px] truncate border-r border-stone-200 px-3 py-2" title={job.generalDescr}>
+        {job.generalDescr}
+      </td>
+      <td className="whitespace-nowrap border-r border-stone-200 px-2 py-2">
+        {onUpdatePress && pressOptions.length > 0 ? (
+          <select
+            value={PRESS_ORDER.includes(job.press) ? job.press : ""}
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) => {
+              event.stopPropagation();
+              onUpdatePress(event.target.value);
+            }}
+            className="w-[90px] border border-stone-300 bg-white px-2 py-1 text-[12px] outline-none focus:border-emerald-800"
+          >
+            {pressOptions.map((press) => (
+              <option key={press} value={press}>
+                {press}
+              </option>
+            ))}
+          </select>
+        ) : (
+          job.press || "-"
+        )}
+      </td>
+      <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2">{formatDate(job.shipByDate)}</td>
+      <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2">{job.ticQuantity ? job.ticQuantity.toLocaleString() : "-"}</td>
+      <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2">
+        <span className={selected ? "font-semibold text-sky-800" : ""}>{state}</span>
+      </td>
+      <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2">{job.stockDisplay || "-"}</td>
+      <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2">{job.estPressTime ? job.estPressTime.toFixed(2) : "-"}</td>
+      <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2">{job.mainTool || job.toolNo2 || "-"}</td>
+      <td className="max-w-[260px] truncate border-r border-stone-200 px-3 py-2" title={scheduledText}>
+        {scheduledText}
+      </td>
+      <td className="whitespace-nowrap px-3 py-2">
+        <div className="flex items-center gap-2">
+          {onFinish && (
+            <button
+              onClick={(event) => {
+                event.stopPropagation();
+                onFinish();
+              }}
+              className="bg-emerald-900 px-2 py-1 text-[11px] text-white"
+            >
+              Finish
+            </button>
+          )}
+          {canMove && <span className="border border-stone-300 bg-stone-100 px-2 py-1 text-[11px] text-stone-700">drag</span>}
+        </div>
+      </td>
+    </tr>
   );
 }
 
