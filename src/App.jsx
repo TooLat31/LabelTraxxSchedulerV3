@@ -17,10 +17,9 @@ const ATTACHMENT_ACCEPT =
 const PULL_PAPER_TARGETS = ["Press 5.1", "Press 6.1", "Press 2.1", "Press 1.1", "Digital"];
 const ROLE_OPTIONS = ["Management", "Warehouse/Shipper", "Operator"];
 const DEFAULT_SHIPMENT_METHODS = ["Skid", "FedEx", "UPS", "LTL", "Customer Pickup"];
-const SCHEDULE_DENSITY_OPTIONS = ["compact", "standard", "detailed"];
+const SCHEDULE_DENSITY_OPTIONS = ["compact", "detailed"];
 const SCHEDULE_DENSITY_LABELS = {
   compact: "Compact cards",
-  standard: "Standard cards",
   detailed: "Detailed cards",
 };
 
@@ -948,6 +947,7 @@ function SchedulerApp() {
   const [unscheduledSearch, setUnscheduledSearch] = useState("");
   const [queueStatusFilter, setQueueStatusFilter] = useState("All");
   const [queuePressFilter, setQueuePressFilter] = useState("All");
+  const [queueScheduleFilter, setQueueScheduleFilter] = useState("All");
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [activeTab, setActiveTab] = useState("Scheduler");
   const [requestForm, setRequestForm] = useState(EMPTY_REQUEST_FORM);
@@ -978,13 +978,14 @@ function SchedulerApp() {
   const [shipmentHistoryFilterDate, setShipmentHistoryFilterDate] = useState("");
   const [shipmentEmailHistoryFilterDate, setShipmentEmailHistoryFilterDate] = useState("");
   const [activityFilters, setActivityFilters] = useState(EMPTY_ACTIVITY_FILTERS);
-  const [queueCategoryFilter, setQueueCategoryFilter] = useState("All");
-  const [schedulePressFilter, setSchedulePressFilter] = useState("All");
+  const [queuePriorityFilters, setQueuePriorityFilters] = useState([]);
+  const [visiblePressFilters, setVisiblePressFilters] = useState([...PRESS_ORDER]);
   const [scheduleCardDensity, setScheduleCardDensity] = useState("compact");
   const [hideEmptyPresses, setHideEmptyPresses] = useState(false);
   const [boardFocusMode, setBoardFocusMode] = useState(false);
   const [manualScheduleForm, setManualScheduleForm] = useState(EMPTY_MANUAL_SCHEDULE_FORM);
   const [locationSearch, setLocationSearch] = useState("");
+  const [pickedUpItem, setPickedUpItem] = useState(null);
   const [syncStatus, setSyncStatus] = useState(isSupabaseConfigured ? "Connecting..." : "Local only");
   const [lastSyncAt, setLastSyncAt] = useState("");
   const jobDetailsRef = useRef(null);
@@ -1460,6 +1461,12 @@ function SchedulerApp() {
       .filter((job) => !isReleaseJob(job))
       .filter((job) => !userFinishedJobIds.has(job.id))
       .filter((job) => {
+        const isScheduled = activePressJobIds.has(job.id);
+        if (queueScheduleFilter === "Scheduled") return isScheduled;
+        if (queueScheduleFilter === "Not scheduled") return !isScheduled;
+        return true;
+      })
+      .filter((job) => {
         if (queueStatusFilter === "All") return true;
         if (queueStatusFilter === "Open") return job.normalizedStatus === "open";
         return job.normalizedStatus === "closed";
@@ -1469,8 +1476,8 @@ function SchedulerApp() {
         return safeText(job.press) === queuePressFilter;
       })
       .filter((job) => {
-        if (queueCategoryFilter === "All") return true;
-        return safeText(job.priority) === queueCategoryFilter;
+        if (!queuePriorityFilters.length) return true;
+        return queuePriorityFilters.includes(safeText(job.priority));
       })
       .filter((job) => {
         const haystack = jobSearchTextById.get(job.id) || "";
@@ -1482,7 +1489,7 @@ function SchedulerApp() {
         if (leftDate !== rightDate) return leftDate - rightDate;
         return right.estPressTime - left.estPressTime;
       });
-  }, [filteredJobs, jobSearchTextById, normalizedUnscheduledSearch, queueCategoryFilter, queuePressFilter, queueStatusFilter, userFinishedJobIds]);
+  }, [activePressJobIds, filteredJobs, jobSearchTextById, normalizedUnscheduledSearch, queuePressFilter, queuePriorityFilters, queueScheduleFilter, queueStatusFilter, userFinishedJobIds]);
 
   const allUserFinishedJobs = useMemo(() => {
     return jobs
@@ -1739,15 +1746,15 @@ function SchedulerApp() {
     [jobs]
   );
 
-  const queueCategoryOptions = useMemo(
-    () => ["All", ...Array.from(new Set(jobs.map((job) => safeText(job.priority)).filter(Boolean))).sort()],
+  const queuePriorityOptions = useMemo(
+    () => Array.from(new Set(jobs.map((job) => safeText(job.priority)).filter(Boolean))).sort(),
     [jobs]
   );
 
   const todayDateKey = todayKey();
   const visiblePresses = useMemo(
-    () => (schedulePressFilter === "All" ? PRESS_ORDER : PRESS_ORDER.filter((press) => press === schedulePressFilter)),
-    [schedulePressFilter]
+    () => PRESS_ORDER.filter((press) => visiblePressFilters.includes(press)),
+    [visiblePressFilters]
   );
   const visibleScheduleRows = useMemo(
     () =>
@@ -1999,14 +2006,19 @@ function SchedulerApp() {
     const payload = parseDragPayload(event.dataTransfer.getData("application/json"));
     if (payload?.type === "queue" && payload.jobId) {
       addAssignment(payload.jobId, dayKey, press);
+      setPickedUpItem(null);
       return;
     }
     if (payload?.type === "scheduled" && payload.assignmentId) {
       moveAssignment(payload.assignmentId, dayKey, press);
+      setPickedUpItem(null);
       return;
     }
     const fallbackJobId = event.dataTransfer.getData("text/plain");
-    if (fallbackJobId) addAssignment(fallbackJobId, dayKey, press);
+    if (fallbackJobId) {
+      addAssignment(fallbackJobId, dayKey, press);
+      setPickedUpItem(null);
+    }
   }
 
   function handleScheduleCardDrop(event, dayKey, press, targetAssignmentId) {
@@ -2016,15 +2028,71 @@ function SchedulerApp() {
     const payload = parseDragPayload(event.dataTransfer.getData("application/json"));
     if (payload?.type === "queue" && payload.jobId) {
       addAssignment(payload.jobId, dayKey, press, targetAssignmentId);
+      setPickedUpItem(null);
       return;
     }
     if (payload?.type === "scheduled" && payload.assignmentId) {
       if (payload.assignmentId === targetAssignmentId) return;
       moveAssignment(payload.assignmentId, dayKey, press, targetAssignmentId);
+      setPickedUpItem(null);
       return;
     }
     const fallbackJobId = event.dataTransfer.getData("text/plain");
-    if (fallbackJobId) addAssignment(fallbackJobId, dayKey, press, targetAssignmentId);
+    if (fallbackJobId) {
+      addAssignment(fallbackJobId, dayKey, press, targetAssignmentId);
+      setPickedUpItem(null);
+    }
+  }
+
+  function pickUpQueueJob(jobId) {
+    if (!userCanMoveJobs) return;
+    const job = jobMap.get(jobId);
+    if (!job) return;
+    setPickedUpItem({
+      type: "queue",
+      jobId,
+      label: `${job.customerName} ${job.number}`.trim(),
+    });
+  }
+
+  function pickUpScheduledAssignment(assignmentId) {
+    if (!userCanMoveJobs) return;
+    const assignment = assignments.find((item) => item.id === assignmentId);
+    if (!assignment) return;
+    const job = assignment.jobId ? jobMap.get(assignment.jobId) : null;
+    setPickedUpItem({
+      type: "scheduled",
+      assignmentId,
+      jobId: assignment.jobId,
+      label: assignment.kind === "manual" ? assignment.manualTitle : `${job?.customerName || ""} ${job?.number || ""}`.trim(),
+    });
+  }
+
+  function placePickedUpItem(dayKey, press) {
+    if (!userCanMoveJobs || !pickedUpItem) return;
+    if (pickedUpItem.type === "queue" && pickedUpItem.jobId) {
+      addAssignment(pickedUpItem.jobId, dayKey, press);
+      setPickedUpItem(null);
+      return;
+    }
+    if (pickedUpItem.type === "scheduled" && pickedUpItem.assignmentId) {
+      moveAssignment(pickedUpItem.assignmentId, dayKey, press);
+      setPickedUpItem(null);
+    }
+  }
+
+  function toggleQueuePriority(priority) {
+    const value = safeText(priority);
+    if (!value) return;
+    setQueuePriorityFilters((current) =>
+      current.includes(value) ? current.filter((item) => item !== value) : [...current, value]
+    );
+  }
+
+  function toggleVisiblePressFilter(press) {
+    setVisiblePressFilters((current) =>
+      current.includes(press) ? current.filter((item) => item !== press) : [...current, press]
+    );
   }
 
   function addAssignment(jobId, dayKey, press, beforeAssignmentId = "") {
@@ -3758,7 +3826,7 @@ function SchedulerApp() {
                           job={item.job}
                           assignment={item.assignment}
                           finishMeta={item.job ? finishedMetaByJobId.get(item.job.id) : null}
-                          density="standard"
+                          density="detailed"
                           selected={item.job ? selectedJobId === item.job.id : false}
                           onSelect={item.job ? () => selectJob(item.job.id) : undefined}
                           draggable={false}
@@ -4057,10 +4125,25 @@ function SchedulerApp() {
                   <div className="mb-3 flex items-center justify-between">
                     <div>
                       <div className="text-sm font-semibold">Press queue</div>
-                      <div className="text-xs text-stone-600">Search by ticket, then filter the queue by status, press, or category. Jobs stay here even after they are scheduled so you can place them on multiple days.</div>
+                      <div className="text-xs text-stone-600">Search by ticket, then filter the queue by status, press, schedule state, or priority. Jobs stay here even after they are scheduled so you can place them on multiple days.</div>
                     </div>
                     <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{unscheduledJobs.length}</div>
                   </div>
+
+                  {pickedUpItem && (
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900">
+                      <div>
+                        Picked up: <span className="font-semibold">{pickedUpItem.label || "Schedule item"}</span>. Scroll to any lane and click the lane body to place it.
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setPickedUpItem(null)}
+                        className="border border-sky-300 bg-white px-2 py-1 text-xs text-sky-900"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
 
                   <input
                     type="text"
@@ -4070,42 +4153,67 @@ function SchedulerApp() {
                     className="mb-3 w-full rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
                   />
 
-                  <div className="mb-3 grid gap-2 md:grid-cols-3">
-                    <select
-                      value={queueStatusFilter}
-                      onChange={(event) => setQueueStatusFilter(event.target.value)}
-                      className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
-                    >
-                      <option>All</option>
-                      <option>Open</option>
-                      <option>Done</option>
-                    </select>
-                    <select
-                      value={queuePressFilter}
-                      onChange={(event) => setQueuePressFilter(event.target.value)}
-                      className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
-                    >
-                      {queuePressOptions.map((press) => (
-                        <option key={press}>{press}</option>
+                  <div className="mb-3 grid gap-3">
+                    <div className="flex flex-wrap gap-2">
+                      {["All", "Scheduled", "Not scheduled"].map((option) => (
+                        <button
+                          key={option}
+                          type="button"
+                          onClick={() => setQueueScheduleFilter(option)}
+                          className={`border px-3 py-2 text-sm ${queueScheduleFilter === option ? "border-emerald-900 bg-emerald-900 text-white" : "border-stone-300 bg-white text-stone-800"}`}
+                        >
+                          {option}
+                        </button>
                       ))}
-                    </select>
-                    <select
-                      value={queueCategoryFilter}
-                      onChange={(event) => setQueueCategoryFilter(event.target.value)}
-                      className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
-                    >
-                      {queueCategoryOptions.map((category) => (
-                        <option key={category}>{category}</option>
-                      ))}
-                    </select>
+                    </div>
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <select
+                        value={queueStatusFilter}
+                        onChange={(event) => setQueueStatusFilter(event.target.value)}
+                        className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                      >
+                        <option>All</option>
+                        <option>Open</option>
+                        <option>Done</option>
+                      </select>
+                      <select
+                        value={queuePressFilter}
+                        onChange={(event) => setQueuePressFilter(event.target.value)}
+                        className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                      >
+                        {queuePressOptions.map((press) => (
+                          <option key={press}>{press}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="rounded-2xl border border-stone-300 bg-white p-3">
+                      <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Priority</div>
+                      <div className="flex flex-wrap gap-2">
+                        {queuePriorityOptions.map((priority) => {
+                          const active = queuePriorityFilters.includes(priority);
+                          return (
+                            <label key={priority} className={`flex items-center gap-2 border px-2 py-1 text-xs ${active ? "border-emerald-900 bg-emerald-50 text-emerald-900" : "border-stone-300 bg-stone-50 text-stone-800"}`}>
+                              <input
+                                type="checkbox"
+                                checked={active}
+                                onChange={() => toggleQueuePriority(priority)}
+                                className="h-3.5 w-3.5"
+                              />
+                              <span>{priority}</span>
+                            </label>
+                          );
+                        })}
+                        {!queuePriorityOptions.length && <div className="text-xs text-stone-500">No priorities loaded yet.</div>}
+                      </div>
+                    </div>
                   </div>
 
                   <div className="max-h-[65vh] overflow-auto border border-stone-300 bg-white 2xl:max-h-[720px]">
                     {unscheduledJobs.length ? (
-                      <table className="min-w-[1520px] border-collapse text-left text-[12px] text-stone-800">
+                      <table className="min-w-[1760px] border-collapse text-left text-[12px] text-stone-800">
                         <thead className="sticky top-0 z-10 bg-stone-100">
                           <tr className="border-b border-stone-300">
-                            {["Number", "Customer", "Priority", "PO No.", "Description", "Press", "Ship", "Quantity", "Status", "Stock", "Press Time", "Main", "Scheduled On", "Actions"].map((label) => (
+                            {["Number", "Customer", "Priority", "PO No.", "Description", "Press", "Ship", "Quantity", "Status", "Stock", "Press Time", "Main", "Scheduled On", "Mon-Fri", "Actions"].map((label) => (
                               <th key={label} className="whitespace-nowrap border-r border-stone-200 px-3 py-2 font-semibold text-stone-700 last:border-r-0">
                                 {label}
                               </th>
@@ -4126,6 +4234,9 @@ function SchedulerApp() {
                               scheduledAssignments={activeScheduleLocationsByJobId.get(job.id) || []}
                               pressOptions={PRESS_ORDER}
                               onUpdatePress={userCanMoveJobs ? (press) => updateJobRecommendedPress(job.id, press) : undefined}
+                              weekColumns={weekColumns}
+                              onQuickAssign={(dayKey) => addAssignment(job.id, dayKey, PRESS_ORDER.includes(job.press) ? job.press : "Rewind")}
+                              onPickUp={userCanMoveJobs ? () => pickUpQueueJob(job.id) : undefined}
                             />
                           ))}
                         </tbody>
@@ -4159,18 +4270,6 @@ function SchedulerApp() {
                     Next
                   </button>
                   <select
-                    value={schedulePressFilter}
-                    onChange={(event) => setSchedulePressFilter(event.target.value)}
-                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
-                  >
-                    <option value="All">All presses</option>
-                    {PRESS_ORDER.map((press) => (
-                      <option key={press} value={press}>
-                        {formatPressLabel(press)}
-                      </option>
-                    ))}
-                  </select>
-                  <select
                     value={scheduleCardDensity}
                     onChange={(event) => setScheduleCardDensity(event.target.value)}
                     className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
@@ -4190,6 +4289,22 @@ function SchedulerApp() {
                     />
                     <span>Hide empty presses</span>
                   </label>
+                  <div className="flex flex-wrap gap-2 rounded-2xl border border-stone-300 bg-white px-3 py-2">
+                    {PRESS_ORDER.map((press) => {
+                      const checked = visiblePressFilters.includes(press);
+                      return (
+                        <label key={press} className={`flex items-center gap-2 text-xs ${checked ? "text-emerald-900" : "text-stone-700"}`}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleVisiblePressFilter(press)}
+                            className="h-3.5 w-3.5"
+                          />
+                          <span>{formatPressLabel(press)}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
                   <button
                     type="button"
                     onClick={() => setBoardFocusMode((current) => !current)}
@@ -4240,7 +4355,8 @@ function SchedulerApp() {
                             key={`${press}-${day.key}`}
                             onDragOver={(event) => event.preventDefault()}
                             onDrop={(event) => handleScheduleDrop(event, day.key, press)}
-                            className="border-b border-r border-stone-300 bg-white p-0"
+                            onClick={() => placePickedUpItem(day.key, press)}
+                            className={`border-b border-r border-stone-300 bg-white p-0 ${pickedUpItem ? "cursor-copy" : ""} ${pickedUpItem ? "hover:bg-sky-50" : ""}`}
                           >
                             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 bg-stone-50 px-2 py-1">
                               <div className="text-[11px] text-stone-600">
@@ -4289,6 +4405,7 @@ function SchedulerApp() {
                                   onFinish={job && userCanEdit ? () => finishJob(job.id) : undefined}
                                   onUndoFinish={job && userCanEdit && assignment.status === "finished" ? () => undoFinishJob(job.id) : undefined}
                                   onDuplicate={userCanMoveJobs ? () => duplicateAssignmentToNextDay(assignment.id) : undefined}
+                                  onPickUp={userCanMoveJobs ? () => pickUpScheduledAssignment(assignment.id) : undefined}
                                   draggable={userCanMoveJobs}
                                 />
                               ))}
@@ -6432,6 +6549,9 @@ function PressQueueRow({
   scheduledAssignments = [],
   pressOptions = [],
   onUpdatePress,
+  weekColumns = [],
+  onQuickAssign,
+  onPickUp,
 }) {
   const suppressClickUntilRef = useRef(0);
   const rowTone = selected
@@ -6460,14 +6580,9 @@ function PressQueueRow({
 
   return (
     <tr
-      draggable={canMove}
-      onDragStart={startQueueDrag}
-      onDragEnd={() => {
-        suppressClickUntilRef.current = Date.now() + 150;
-      }}
       onClick={handleSelect}
       onDoubleClick={onOpenDetails}
-      className={`cursor-pointer border-b border-stone-200 align-top ${rowTone} ${canMove ? "hover:bg-sky-50" : ""}`}
+      className={`cursor-pointer border-b border-stone-200 align-top ${rowTone} hover:bg-sky-50`}
     >
       <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2 font-medium">{job.number}</td>
       <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2">{job.customerName}</td>
@@ -6508,6 +6623,23 @@ function PressQueueRow({
       <td className="max-w-[260px] truncate border-r border-stone-200 px-3 py-2" title={scheduledText}>
         {scheduledText}
       </td>
+      <td className="border-r border-stone-200 px-2 py-2">
+        <div className="flex flex-wrap gap-1">
+          {weekColumns.map((day) => (
+            <button
+              key={day.key}
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onQuickAssign?.(day.key);
+              }}
+              className="border border-stone-300 bg-white px-1.5 py-1 text-[10px] text-stone-800"
+            >
+              {day.label.slice(0, 3)}
+            </button>
+          ))}
+        </div>
+      </td>
       <td className="whitespace-nowrap px-3 py-2">
         <div className="flex items-center gap-2">
           {onFinish && (
@@ -6521,7 +6653,31 @@ function PressQueueRow({
               Finish
             </button>
           )}
-          {canMove && <span className="border border-stone-300 bg-stone-100 px-2 py-1 text-[11px] text-stone-700">drag</span>}
+          {canMove && (
+            <>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onPickUp?.();
+                }}
+                className="border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-700"
+              >
+                Pick up
+              </button>
+              <span
+                draggable
+                onDragStart={startQueueDrag}
+                onDragEnd={() => {
+                  suppressClickUntilRef.current = Date.now() + 150;
+                }}
+                onClick={(event) => event.stopPropagation()}
+                className="border border-stone-300 bg-stone-100 px-2 py-1 text-[11px] text-stone-700"
+              >
+                drag
+              </span>
+            </>
+          )}
         </div>
       </td>
     </tr>
@@ -6612,14 +6768,16 @@ function CompactScheduleCard({
   onUndoFinish,
   onDuplicate,
   draggable = false,
+  onPickUp,
 }) {
   const isManual = assignment.kind === "manual";
   const state = isManual ? "note" : assignment.status === "finished" ? "done" : assignment.status;
   const title = isManual ? assignment.manualTitle || "Manual block" : `${job.customerName} ${job.number}`;
   const subtitle = isManual ? "Manual schedule block" : job.generalDescr;
-  const showSubtitle = density !== "compact";
+  const isCompact = density === "compact";
+  const showSubtitle = density === "detailed";
   const showStateBadge = isManual || assignment.status === "finished";
-  const showStats = !isManual;
+  const showStats = !isManual && density === "detailed";
   const showFinishedStamp = density === "detailed" && !isManual;
   const isCardDraggable = draggable;
   const showReorderControls = canMoveUp || canMoveDown || onMoveUp || onMoveDown;
@@ -6710,6 +6868,11 @@ function CompactScheduleCard({
           {isCardDraggable && <span className="border border-stone-300 bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-700">drag</span>}
         </div>
       </div>
+      {!isManual && isCompact && (
+        <div className="mt-2 text-[11px] text-stone-700">
+          Ship {formatDate(job.shipByDate)}
+        </div>
+      )}
       {showStats && (
         <div className="mt-2 grid grid-cols-2 gap-1 text-[11px] text-stone-700 md:grid-cols-3">
           <InfoPill label="Est" value={`${job.estPressTime.toFixed(2)}h`} />
@@ -6733,6 +6896,11 @@ function CompactScheduleCard({
       )}
       {(onUnschedule || onFinish || onUndoFinish || onDuplicate) && (
         <div className={`${density === "compact" ? "mt-1" : "mt-2"} flex flex-wrap gap-2`}>
+          {onPickUp && (
+            <button onClick={onPickUp} className="border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800">
+              Pick up
+            </button>
+          )}
           {onUnschedule && (
             <button onClick={onUnschedule} className="border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800">
               Remove
