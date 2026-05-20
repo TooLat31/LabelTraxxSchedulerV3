@@ -408,12 +408,12 @@ function styleSectionLabelCell(cell) {
 }
 
 function styleHeaderCell(cell) {
-  cell.font = { name: "Calibri", size: 8, bold: true };
+  cell.font = { name: "Calibri", size: 12, bold: true };
   cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
 }
 
 function styleBodyCell(cell, isText = false, numFmt = "") {
-  cell.font = { name: "Calibri", size: 8 };
+  cell.font = { name: "Calibri", size: 11 };
   cell.alignment = {
     horizontal: isText ? "left" : "center",
     vertical: "middle",
@@ -540,12 +540,12 @@ export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lan
         cell.value = header;
         styleHeaderCell(cell);
       });
-      sheet.getRow(rowCursor + 1).height = 16;
+      sheet.getRow(rowCursor + 1).height = 22;
 
       for (let itemIndex = 0; itemIndex < section.rowCount; itemIndex += 1) {
         const dataRowIndex = rowCursor + 2 + itemIndex;
         const entry = rowsForDay[itemIndex];
-        sheet.getRow(dataRowIndex).height = 18;
+        sheet.getRow(dataRowIndex).height = 26;
         if (!entry) continue;
 
         if (section.type === "schedule" && entry.kind === "manual") {
