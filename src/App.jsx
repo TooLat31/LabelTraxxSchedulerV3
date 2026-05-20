@@ -1609,6 +1609,19 @@ function SchedulerApp() {
       .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
   }, [finishedMetaByJobId, jobs, userFinishedJobIds]);
 
+  const releaseJobsForSelectedShipDate = useMemo(() => {
+    return jobs
+      .filter((job) => isReleaseJob(job))
+      .filter((job) => !userFinishedJobIds.has(job.id))
+      .filter((job) => !selectedShipDate || (job.shipByDate && isoDate(job.shipByDate) === selectedShipDate))
+      .sort((left, right) => {
+        const leftDate = left.shipByDate ? left.shipByDate.getTime() : Number.MAX_SAFE_INTEGER;
+        const rightDate = right.shipByDate ? right.shipByDate.getTime() : Number.MAX_SAFE_INTEGER;
+        if (leftDate !== rightDate) return leftDate - rightDate;
+        return right.estPressTime - left.estPressTime;
+      });
+  }, [jobs, selectedShipDate, userFinishedJobIds]);
+
   const doneJobs = useMemo(
     () => allUserFinishedJobs.filter((job) => filteredJobIds.has(job.id)),
     [allUserFinishedJobs, filteredJobIds]
@@ -5152,6 +5165,64 @@ function SchedulerApp() {
                     className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
                   />
                 </div>
+              </div>
+            </div>
+
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
+              <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <div className="text-sm font-semibold">Release shipping queue</div>
+                  <div className="text-xs text-stone-600">
+                    Release tickets stay off the production press queue. Mark them finished here and they will move into the ship-date flow below.
+                  </div>
+                </div>
+                <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{releaseJobsForSelectedShipDate.length}</div>
+              </div>
+
+              <div className="space-y-3">
+                {releaseJobsForSelectedShipDate.map((job) => (
+                  <div key={job.id} className="rounded-2xl border border-stone-300 bg-white p-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold">
+                          {job.customerName} {job.number}
+                        </div>
+                        <div className="mt-1 text-xs text-stone-700">{job.generalDescr}</div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${priorityTone(job.priority)}`}>
+                          {job.priority || "-"}
+                        </span>
+                        {job.ticketStatus && (
+                          <span className="rounded-full bg-stone-200 px-2 py-1 text-[11px] font-medium text-stone-700">
+                            import: {job.ticketStatus}
+                          </span>
+                        )}
+                        {userCanEdit && (
+                          <button
+                            type="button"
+                            onClick={() => finishJob(job.id)}
+                            className="rounded-xl bg-emerald-900 px-3 py-2 text-xs font-medium text-white"
+                          >
+                            Finish
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-stone-700 md:grid-cols-5">
+                      <InfoPill label="Press" value={job.press || "-"} />
+                      <InfoPill label="Ship" value={formatDate(job.shipByDate)} />
+                      <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
+                      <InfoPill label="Stock" value={job.stockDisplay || "-"} />
+                      <InfoPill label="EST" value={`${job.estPressTime.toFixed(2)}h`} />
+                    </div>
+                  </div>
+                ))}
+                {!releaseJobsForSelectedShipDate.length && (
+                  <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
+                    No unfinished release jobs are loaded for {selectedShipDate}.
+                  </div>
+                )}
               </div>
             </div>
 
