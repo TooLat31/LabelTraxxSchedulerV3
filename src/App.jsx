@@ -1802,10 +1802,14 @@ function SchedulerApp() {
   }, [allUserFinishedJobs, assignedShipmentJobIds]);
 
   const dateDoneJobs = useMemo(() => {
-    return allUserFinishedJobs
-      .filter((job) => sameDay(job.finishMeta?.finishedAt, selectedShipDate))
-      .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
-  }, [allUserFinishedJobs, selectedShipDate]);
+    return jobs
+      .filter((job) => sameDay(job.dateDone, selectedShipDate))
+      .map((job) => ({
+        ...job,
+        finishMeta: finishedMetaByJobId.get(job.id) || null,
+      }))
+      .sort((left, right) => dateSortValue(right.dateDone || right.finishMeta?.finishedAt) - dateSortValue(left.dateDone || left.finishMeta?.finishedAt));
+  }, [finishedMetaByJobId, jobs, selectedShipDate]);
 
   const readyToShipJobs = useMemo(() => {
     return dateDoneJobs
@@ -5303,7 +5307,7 @@ function SchedulerApp() {
                 <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
                     <div className="text-sm font-semibold">Date done on {selectedShipDate}</div>
-                    <div className="text-xs text-stone-600">This queue shows every job finished on that date. Grouped or removed jobs stay visible so you can still track what was done.</div>
+                    <div className="text-xs text-stone-600">This queue follows the imported DateDone value from the TXT. Grouped or removed jobs stay visible so you can still track what was done.</div>
                   </div>
                   <div className="flex items-center gap-2">
                     <button
