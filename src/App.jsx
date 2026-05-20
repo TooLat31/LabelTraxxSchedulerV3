@@ -369,6 +369,97 @@ function getAttachmentHref(attachment) {
   return safeText(attachment.publicUrl) || safeText(attachment.dataUrl);
 }
 
+function sanitizeEmailHeader(value) {
+  return safeText(value).replace(/[\r\n]+/g, " ").trim();
+}
+
+function bytesToBase64(bytes) {
+  if (!bytes?.length) return "";
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const slice = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...slice);
+  }
+  return btoa(binary);
+}
+
+function utf8ToBase64(text) {
+  return bytesToBase64(new TextEncoder().encode(safeText(text)));
+}
+
+function wrapBase64(base64Text) {
+  return safeText(base64Text).match(/.{1,76}/g)?.join("\r\n") || "";
+}
+
+function dataUrlToEmailAttachment(attachment) {
+  const dataUrl = safeText(attachment.dataUrl);
+  const match = dataUrl.match(/^data:([^;,]+)?(?:;charset=[^;,]+)?;base64,(.*)$/i);
+  if (!match) return null;
+  return {
+    name: sanitizeAttachmentName(attachment.name),
+    type: safeText(match[1]) || safeText(attachment.type) || "application/octet-stream",
+    base64: safeText(match[2]).replace(/\s+/g, ""),
+  };
+}
+
+async function resolveEmailAttachment(attachment) {
+  const normalized = normalizeAttachment(attachment, 0);
+  if (!normalized.name) return null;
+  const inlineAttachment = dataUrlToEmailAttachment(normalized);
+  if (inlineAttachment) return inlineAttachment;
+  const href = getAttachmentHref(normalized);
+  if (!href) return null;
+  try {
+    const response = await fetch(href);
+    if (!response.ok) {
+      throw new Error(`Attachment request failed with ${response.status}`);
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return {
+      name: sanitizeAttachmentName(normalized.name),
+      type: safeText(normalized.type) || response.headers.get("content-type") || "application/octet-stream",
+      base64: bytesToBase64(bytes),
+    };
+  } catch (error) {
+    console.error("Failed to prepare shipment email attachment.", error);
+    return null;
+  }
+}
+
+function buildEmailDraftFile({ recipients, cc, subject, body, attachments }) {
+  const boundary = `----=_Part_${makeId("email-boundary")}`;
+  const lines = [
+    `To: ${sanitizeEmailHeader(recipients)}`,
+    cc ? `Cc: ${sanitizeEmailHeader(cc)}` : "",
+    `Subject: ${sanitizeEmailHeader(subject)}`,
+    "MIME-Version: 1.0",
+    "X-Unsent: 1",
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    "",
+    "This is a multi-part message in MIME format.",
+    `--${boundary}`,
+    'Content-Type: text/plain; charset="utf-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    wrapBase64(utf8ToBase64(body)),
+  ];
+
+  attachments.forEach((attachment) => {
+    lines.push(
+      `--${boundary}`,
+      `Content-Type: ${attachment.type}; name="${attachment.name}"`,
+      "Content-Transfer-Encoding: base64",
+      `Content-Disposition: attachment; filename="${attachment.name}"`,
+      "",
+      wrapBase64(attachment.base64)
+    );
+  });
+
+  lines.push(`--${boundary}--`, "");
+  return lines.join("\r\n");
+}
+
 function storageUploadsEnabled() {
   return !!(isSupabaseConfigured && supabase);
 }
@@ -942,7 +1033,6 @@ function SchedulerApp() {
   const [users, setUsers] = useState([buildDefaultAdmin()]);
   const [currentUsername, setCurrentUsername] = useState("");
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date()));
-  const [pasteText, setPasteText] = useState("");
   const [search, setSearch] = useState("");
   const [unscheduledSearch, setUnscheduledSearch] = useState("");
   const [queueStatusFilter, setQueueStatusFilter] = useState("All");
@@ -1890,6 +1980,18 @@ function SchedulerApp() {
     };
   }, [selectedShipDate, shipmentGroupsForDay, shipmentItemsByGroupId]);
 
+  const shipmentEmailAttachments = useMemo(() => {
+    const attachmentMap = new Map();
+    shipmentGroupsForDay.forEach((group) => {
+      normalizeAttachments(group.attachments).forEach((attachment) => {
+        if (!attachmentMap.has(attachment.id)) {
+          attachmentMap.set(attachment.id, attachment);
+        }
+      });
+    });
+    return Array.from(attachmentMap.values());
+  }, [shipmentGroupsForDay]);
+
   const shipmentEmailHistory = useMemo(
     () =>
       shipmentEmailLogs
@@ -2518,45 +2620,6 @@ function SchedulerApp() {
       recordActivity("Reopened finished job", "Scheduler", `${job.customerName} ${job.number} was marked back to scheduled.`, {
         jobId,
       });
-    }
-  }
-
-  function autoPlace() {
-    if (!userCanMoveJobs) return;
-    const nextAssignments = [...assignments];
-    let addedCount = 0;
-    jobs.forEach((job) => {
-      if (isReleaseJob(job)) return;
-      if (!job.shipByDate) return;
-      const dayKey = isoDate(job.shipByDate);
-      if (!weekKeys.has(dayKey)) return;
-      const press = PRESS_ORDER.includes(job.press) ? job.press : "Rewind";
-      const exists = nextAssignments.some(
-        (assignment) =>
-          assignment.jobId === job.id &&
-          assignment.dayKey === dayKey &&
-          assignment.press === press &&
-          assignment.kind === "press" &&
-          assignment.status !== "finished"
-      );
-      if (!exists) {
-        addedCount += 1;
-        nextAssignments.push({
-          id: makeId("asg"),
-          jobId: job.id,
-          dayKey,
-          press,
-          kind: "press",
-          status: "scheduled",
-          createdAt: new Date().toISOString(),
-          finishedAt: null,
-          finishedBy: "",
-        });
-      }
-    });
-    setAssignments(nextAssignments);
-    if (addedCount) {
-      recordActivity("Auto-placed jobs", "Scheduler", `${addedCount} jobs were auto-placed for the visible week.`);
     }
   }
 
@@ -3384,16 +3447,28 @@ function SchedulerApp() {
     });
   }
 
-  function openShipmentEmailDraft() {
+  async function openShipmentEmailDraft() {
     if (!userCanEdit) return;
     const recipients = safeText(shipmentEmailForm.recipients);
     const cc = safeText(shipmentEmailForm.cc);
-    const params = new URLSearchParams({
+    const attachmentParts = await Promise.all(
+      shipmentEmailAttachments.map((attachment) => resolveEmailAttachment(attachment))
+    );
+    const fileContent = buildEmailDraftFile({
+      recipients,
+      cc,
       subject: shipmentEmailDraft.subject,
       body: shipmentEmailDraft.body,
+      attachments: [
+        {
+          name: `daily-shipment-${selectedShipDate}.txt`,
+          type: "text/plain; charset=utf-8",
+          base64: utf8ToBase64(shipmentEmailDraft.body),
+        },
+        ...attachmentParts.filter(Boolean),
+      ],
     });
-    if (cc) params.set("cc", cc);
-    window.location.href = `mailto:${encodeURIComponent(recipients)}?${params.toString()}`;
+    downloadFile(`daily-shipment-${selectedShipDate}.eml`, fileContent, "message/rfc822;charset=utf-8");
   }
 
   function logShipmentEmail() {
@@ -3476,15 +3551,6 @@ function SchedulerApp() {
     if (group) {
       recordActivity("Removed email group", "Shipping", `${group.name} was removed from shipment email groups.`);
     }
-  }
-
-  function loadDemo() {
-    const sample = `Press\tNumber\tCustomerName\tGeneralDescr\tCustPONum\tPriority\tShip_by_Date\tEntryDate\tDue_on_Site_Date\tStockNum2\tStockNum1\tStatus\tMainTool\tToolNo2\tTicQuantity\tEstFootage\tEstPressTime\tNotes
-5.1\t10159\tData Graphics\t1.625" Cap One Circle 70072\t223000DG\tHigh\t04/28/26\t04/18/26\t04/29/26\t266\t\tOpen\t946\t\t3,612,279\t113,847\t9.76\tExample long notes
-8\t11180\tPremio Foods\t3.125"x4.1875" Premio\t4500081640\tDigital\t04/29/26\t04/16/26\t04/30/26\t266\t590\tDone\tD-904\t\t96,000\t13,328\t1.73\tImported done should not ship until you mark it finished.
-6.1\t11194\tPremio Foods\t3.25"x5" Premio Contract Release\t4500081729\tRelease\t04/28/26\t04/21/26\t04/29/26\t266\t590\tOpen\t668\t\t48,000\t13,020\t4.64\tContract PO 4600004905
-9\t11022\tData Graphics\t1.625" Cap One Circle 69797\t\tHigh\t04/29/26\t03/24/26\t05/04/26\t266\t\tOpen\t946\t\t2,686,950\t86,266\t7.91\tArt Due 4/23`;
-    importText(sample);
   }
 
   function switchAuthView(nextView) {
@@ -4021,32 +4087,11 @@ function SchedulerApp() {
                       </label>
                     )}
 
-                    <div className="rounded-2xl border border-stone-300 bg-white p-3">
-                      <div className="mb-2 flex items-center justify-between">
-                        <div className="text-sm font-medium">Paste export text</div>
-                        <button onClick={() => importText(pasteText)} className="rounded-xl bg-emerald-900 px-3 py-2 text-xs font-medium text-white">
-                          Import
-                        </button>
-                      </div>
-                      <textarea
-                        value={pasteText}
-                        onChange={(event) => setPasteText(event.target.value)}
-                        placeholder="Paste the full TXT export here..."
-                        className="h-32 w-full rounded-2xl border border-stone-300 bg-stone-50 p-3 text-xs outline-none placeholder:text-stone-400 focus:border-emerald-800"
-                      />
-                    </div>
-
                     <div className="rounded-2xl bg-stone-200/70 px-4 py-3 text-sm text-stone-800">
                       Finishing jobs and completing requests will be recorded under <span className="font-semibold">{currentUser.username}</span>.
                     </div>
 
                     <div className="grid grid-cols-2 gap-2">
-                      <button onClick={loadDemo} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
-                        Load demo
-                      </button>
-                      <button onClick={autoPlace} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
-                        Auto-place
-                      </button>
                       <button onClick={exportSchedule} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
                         Export CSV
                       </button>
@@ -5406,7 +5451,7 @@ function SchedulerApp() {
                 <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
                   <div className="mb-4">
                     <div className="text-sm font-semibold">Daily shipment email</div>
-                    <div className="text-xs text-stone-600">Draft the summary email for this ship date, then log it so everyone can see it was already sent.</div>
+                    <div className="text-xs text-stone-600">Download an Outlook-ready draft for this ship date with normal spacing and attached shipment files, then log it so everyone can see it was already sent.</div>
                   </div>
                   <div className="grid gap-3">
                     <Field
@@ -5478,6 +5523,9 @@ function SchedulerApp() {
                       <div className="font-semibold">{shipmentEmailDraft.subject}</div>
                       <div className="mt-2 text-xs text-stone-600">To: {shipmentEmailForm.recipients || "-"}</div>
                       <div className="mt-1 text-xs text-stone-600">CC: {shipmentEmailForm.cc || "-"}</div>
+                      <div className="mt-1 text-xs text-stone-600">
+                        Attachments: {shipmentEmailAttachments.length + 1} file{shipmentEmailAttachments.length === 0 ? "" : "s"} including the shipment summary text file
+                      </div>
                       <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap text-xs text-stone-700">{shipmentEmailDraft.body}</pre>
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -5487,7 +5535,7 @@ function SchedulerApp() {
                         onClick={openShipmentEmailDraft}
                         className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        Open email draft
+                        Download email draft
                       </button>
                       <button
                         type="button"

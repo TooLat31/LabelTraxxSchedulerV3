@@ -403,21 +403,23 @@ function manualRowStyle(title) {
 }
 
 function styleSectionLabelCell(cell) {
-  cell.font = { name: "Calibri", size: 16, bold: true };
-  cell.alignment = { horizontal: "center", vertical: "middle" };
+  cell.font = { name: "Calibri", size: 20, bold: true };
+  cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
 }
 
 function styleHeaderCell(cell) {
   cell.font = { name: "Calibri", size: 8, bold: true };
-  cell.alignment = { horizontal: "center", vertical: "middle" };
+  cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
 }
 
-function styleBodyCell(cell, isText = false) {
+function styleBodyCell(cell, isText = false, numFmt = "") {
   cell.font = { name: "Calibri", size: 8 };
   cell.alignment = {
     horizontal: isText ? "left" : "center",
     vertical: "middle",
+    wrapText: true,
   };
+  if (numFmt) cell.numFmt = numFmt;
 }
 
 export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lanesByDay, finishedRowsByDay }) {
@@ -468,7 +470,7 @@ export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lan
   const titleCell = sheet.getCell(1, 1);
   titleCell.value = "DG-Labels";
   titleCell.font = { name: "Calibri", size: 18 };
-  titleCell.alignment = { horizontal: "left", vertical: "middle" };
+  titleCell.alignment = { horizontal: "left", vertical: "middle", wrapText: true };
   applyBorder(titleCell, { bottom: { style: "thin", color: { argb: "FF000000" } } });
   sheet.getRow(1).height = 24;
 
@@ -480,15 +482,15 @@ export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lan
 
     const dayCell = sheet.getCell(2, startCol);
     dayCell.value = day.label;
-    dayCell.font = { name: "Calibri", size: 16 };
-    dayCell.alignment = { horizontal: "center", vertical: "middle" };
-    sheet.getRow(2).height = 24;
+    dayCell.font = { name: "Calibri", size: 30 };
+    dayCell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    sheet.getRow(2).height = 38;
 
     const dateCell = sheet.getCell(3, startCol);
     dateCell.value = day.date;
     dateCell.numFmt = "m/d/yy";
-    dateCell.font = { name: "Calibri", size: 14, bold: true };
-    dateCell.alignment = { horizontal: "center", vertical: "middle" };
+    dateCell.font = { name: "Calibri", size: 22, bold: true };
+    dateCell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
     dateCell.fill = {
       type: "pattern",
       pattern: "solid",
@@ -507,7 +509,7 @@ export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lan
       };
     }
   });
-  sheet.getRow(3).height = 20;
+  sheet.getRow(3).height = 30;
 
   let rowCursor = 4;
   rowPlan.forEach((section) => {
@@ -523,7 +525,7 @@ export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lan
       const labelCell = sheet.getCell(rowCursor, startCol);
       labelCell.value = section.label;
       styleSectionLabelCell(labelCell);
-      sheet.getRow(rowCursor).height = 22;
+      sheet.getRow(rowCursor).height = 30;
       for (let col = startCol; col <= endCol; col += 1) {
         const cell = sheet.getCell(rowCursor, col);
         cell.border = {
@@ -551,7 +553,7 @@ export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lan
           const cell = sheet.getCell(dataRowIndex, startCol);
           cell.value = safeText(entry.title);
           cell.font = { name: "Calibri", size: 16 };
-          cell.alignment = { horizontal: "center", vertical: "middle" };
+          cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
           const style = manualRowStyle(entry.title);
           for (let col = startCol; col <= endCol; col += 1) {
             const mergedCell = sheet.getCell(dataRowIndex, col);
@@ -568,7 +570,11 @@ export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lan
         values.forEach((value, valueIndex) => {
           const cell = sheet.getCell(dataRowIndex, startCol + valueIndex);
           cell.value = value;
-          styleBodyCell(cell, valueIndex === 0 || valueIndex === 4 || (section.type === "finished" && valueIndex === 4));
+          const shouldLeftAlign = valueIndex === 0 || valueIndex === 4 || (section.type === "finished" && valueIndex === 4);
+          const shouldCommaFormat =
+            (section.type === "schedule" && (valueIndex === 2 || valueIndex === 3) && typeof value === "number") ||
+            (section.type === "finished" && valueIndex === 2 && typeof value === "number");
+          styleBodyCell(cell, shouldLeftAlign, shouldCommaFormat ? "#,##0" : "");
         });
       }
     });
