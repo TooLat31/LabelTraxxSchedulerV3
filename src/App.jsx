@@ -1034,7 +1034,6 @@ function SchedulerApp() {
   const [currentUsername, setCurrentUsername] = useState("");
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date()));
   const [search, setSearch] = useState("");
-  const [releaseQueueSearch, setReleaseQueueSearch] = useState("");
   const [unscheduledSearch, setUnscheduledSearch] = useState("");
   const [queueStatusFilter, setQueueStatusFilter] = useState("All");
   const [queuePressFilter, setQueuePressFilter] = useState("All");
@@ -1083,7 +1082,6 @@ function SchedulerApp() {
   const lastSharedSnapshotRef = useRef("");
   const saveTimerRef = useRef(null);
   const deferredSearch = useDeferredValue(search);
-  const deferredReleaseQueueSearch = useDeferredValue(releaseQueueSearch);
   const deferredUnscheduledSearch = useDeferredValue(unscheduledSearch);
   const deferredLocationSearch = useDeferredValue(locationSearch);
 
@@ -1442,7 +1440,6 @@ function SchedulerApp() {
     return map;
   }, [assignments, jobMap]);
   const normalizedSearch = deferredSearch.trim().toLowerCase();
-  const normalizedReleaseQueueSearch = deferredReleaseQueueSearch.trim().toLowerCase();
   const normalizedUnscheduledSearch = deferredUnscheduledSearch.trim().toLowerCase();
   const normalizedLocationSearch = deferredLocationSearch.trim().toLowerCase();
 
@@ -1611,22 +1608,6 @@ function SchedulerApp() {
       }))
       .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
   }, [finishedMetaByJobId, jobs, userFinishedJobIds]);
-
-  const releaseQueueJobs = useMemo(() => {
-    return jobs
-      .filter((job) => isReleaseJob(job))
-      .filter((job) => !userFinishedJobIds.has(job.id))
-      .filter((job) => {
-        const haystack = `${safeText(job.number)} ${safeText(job.customerName)} ${safeText(job.generalDescr)}`.toLowerCase();
-        return !normalizedReleaseQueueSearch || haystack.includes(normalizedReleaseQueueSearch);
-      })
-      .sort((left, right) => {
-        const leftDate = left.shipByDate ? left.shipByDate.getTime() : Number.MAX_SAFE_INTEGER;
-        const rightDate = right.shipByDate ? right.shipByDate.getTime() : Number.MAX_SAFE_INTEGER;
-        if (leftDate !== rightDate) return leftDate - rightDate;
-        return right.estPressTime - left.estPressTime;
-      });
-  }, [jobs, normalizedReleaseQueueSearch, userFinishedJobIds]);
 
   const doneJobs = useMemo(
     () => allUserFinishedJobs.filter((job) => filteredJobIds.has(job.id)),
@@ -1815,7 +1796,7 @@ function SchedulerApp() {
 
   const readyToShipJobs = useMemo(() => {
     return unassignedFinishedJobs
-      .filter((job) => effectiveFinishedShipDate(job.finishMeta) === selectedShipDate)
+      .filter((job) => sameDay(job.finishMeta?.finishedAt, selectedShipDate))
       .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
   }, [selectedShipDate, unassignedFinishedJobs]);
 
@@ -5175,74 +5156,6 @@ function SchedulerApp() {
             </div>
 
             <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
-              <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <div className="text-sm font-semibold">Release shipping queue</div>
-                  <div className="text-xs text-stone-600">
-                    Release tickets stay off the production press queue. Search any unfinished release here, even if it is due later, then mark it finished so it moves into the ship-date flow below.
-                  </div>
-                </div>
-                <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{releaseQueueJobs.length}</div>
-              </div>
-
-              <div className="mb-4">
-                <input
-                  type="text"
-                  value={releaseQueueSearch}
-                  onChange={(event) => setReleaseQueueSearch(event.target.value)}
-                  placeholder="Search release job number or customer"
-                  className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
-                />
-              </div>
-
-              <div className="space-y-3">
-                {releaseQueueJobs.map((job) => (
-                  <div key={job.id} className="rounded-2xl border border-stone-300 bg-white p-3">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        <div className="text-sm font-semibold">
-                          {job.customerName} {job.number}
-                        </div>
-                        <div className="mt-1 text-xs text-stone-700">{job.generalDescr}</div>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${priorityTone(job.priority)}`}>
-                          {job.priority || "-"}
-                        </span>
-                        {job.ticketStatus && (
-                          <span className="rounded-full bg-stone-200 px-2 py-1 text-[11px] font-medium text-stone-700">
-                            import: {job.ticketStatus}
-                          </span>
-                        )}
-                        {userCanEdit && (
-                          <button
-                            type="button"
-                            onClick={() => finishJob(job.id)}
-                            className="rounded-xl bg-emerald-900 px-3 py-2 text-xs font-medium text-white"
-                          >
-                            Finish
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-stone-700 md:grid-cols-5">
-                      <InfoPill label="Press" value={job.press || "-"} />
-                      <InfoPill label="Ship" value={formatDate(job.shipByDate)} />
-                      <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
-                      <InfoPill label="Stock" value={job.stockDisplay || "-"} />
-                      <InfoPill label="EST" value={`${job.estPressTime.toFixed(2)}h`} />
-                    </div>
-                  </div>
-                ))}
-                {!releaseQueueJobs.length && (
-                  <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
-                    No unfinished release jobs match that search.
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
               <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
                 <div>
                   <div className="text-sm font-semibold">Assign ship date</div>
@@ -5342,8 +5255,8 @@ function SchedulerApp() {
               <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
                 <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
-                    <div className="text-sm font-semibold">Ready to ship on {selectedShipDate}</div>
-                    <div className="text-xs text-stone-600">Select one or more jobs, then create a shipment group.</div>
+                    <div className="text-sm font-semibold">Date done on {selectedShipDate}</div>
+                    <div className="text-xs text-stone-600">This queue shows jobs finished on that date. Select one or more jobs, then create a shipment group whenever you are ready.</div>
                   </div>
                   <div className="flex items-center gap-2">
                     <button
@@ -5381,7 +5294,7 @@ function SchedulerApp() {
                             </div>
                             <div className="mt-1 text-xs text-stone-700">{job.generalDescr}</div>
                           </div>
-                          <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone("ship")}`}>ship</span>
+                          <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone("done")}`}>done</span>
                         </div>
                         <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-stone-700 md:grid-cols-4">
                           <InfoPill label="Press" value={job.press || "-"} />
@@ -5394,7 +5307,7 @@ function SchedulerApp() {
                   ))}
                   {!readyToShipJobs.length && (
                     <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
-                      No user-finished jobs are waiting to ship on this date.
+                      No finished jobs match that done date.
                     </div>
                   )}
                 </div>
