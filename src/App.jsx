@@ -4103,8 +4103,8 @@ function SchedulerApp() {
               </div>
             )}
 
-            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-3 shadow-sm shadow-stone-300/30">
-              <div className="mb-3 flex flex-col gap-3 rounded-2xl border border-stone-300 bg-gradient-to-r from-stone-100 via-stone-50 to-stone-100 px-4 py-3">
+            <div className="rounded-2xl border border-stone-300 bg-white p-2 shadow-sm shadow-stone-300/20">
+              <div className="mb-3 flex flex-col gap-3 border border-stone-300 bg-stone-50 px-4 py-3">
                 <div>
                   <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-600">Week view</div>
                   <div className="mt-1 text-base font-semibold">
@@ -4171,25 +4171,27 @@ function SchedulerApp() {
               </div>
               <div className="overflow-x-auto pb-2">
                 <div
-                  className="grid min-w-[1280px] gap-3"
+                  className="grid min-w-[1240px] gap-0 border-l border-t border-stone-300"
                   style={{ gridTemplateColumns: "160px repeat(5, minmax(0, 1fr))" }}
                 >
-                  <div className="rounded-2xl border border-stone-300 bg-stone-100 px-4 py-3">
+                  <div className="border-b border-r border-stone-300 bg-stone-100 px-4 py-3">
                     <div className="text-xs uppercase tracking-[0.16em] text-stone-600">Press</div>
                     <div className="mt-1 text-sm font-semibold text-stone-900">Week lanes</div>
                   </div>
                   {weekColumns.map((day) => (
-                    <div key={day.key} className="rounded-2xl border border-stone-300 bg-white px-3 py-3">
-                      <div className="text-xs uppercase tracking-[0.16em] text-stone-600">{day.label}</div>
-                      <div className="mt-1 text-lg font-semibold">{formatShortDate(day.date)}</div>
+                    <div key={day.key} className="border-b border-r border-stone-300 bg-white">
+                      <div className="px-3 py-1.5 text-center text-xs uppercase tracking-[0.16em] text-stone-700">{day.label}</div>
+                      <div className="border-t border-stone-300 bg-sky-200 px-3 py-1 text-center text-base font-semibold text-stone-900">
+                        {formatDate(day.date)}
+                      </div>
                     </div>
                   ))}
 
                   {visibleScheduleRows.map((press) => (
                     <React.Fragment key={press}>
-                      <div className="rounded-2xl border border-stone-300 bg-stone-100 px-4 py-3">
-                        <div className="text-sm font-semibold text-stone-900">{formatPressLabel(press)}</div>
-                        <div className="mt-1 text-[11px] text-stone-600">Aligned across the week</div>
+                      <div className="border-b border-r border-stone-300 bg-white px-4 py-3">
+                        <div className="text-center text-xl font-semibold text-stone-900">{formatPressLabel(press).replace("Press ", "")}</div>
+                        <div className="mt-1 text-center text-[11px] text-stone-600">Aligned across the week</div>
                       </div>
                       {weekColumns.map((day) => {
                         const laneJobs = board[day.key]?.[press] || [];
@@ -4201,9 +4203,9 @@ function SchedulerApp() {
                             key={`${press}-${day.key}`}
                             onDragOver={(event) => event.preventDefault()}
                             onDrop={(event) => handleScheduleDrop(event, day.key, press)}
-                            className="rounded-2xl border border-stone-300 bg-white p-2"
+                            className="border-b border-r border-stone-300 bg-white p-0"
                           >
-                            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 bg-stone-50 px-2 py-1">
                               <div className="text-[11px] text-stone-600">
                                 {laneJobs.length} jobs - {totalHours.toFixed(2)} hrs
                               </div>
@@ -4215,7 +4217,7 @@ function SchedulerApp() {
                                   onBlur={(event) => commitPressOperator(day.key, press, operatorName, event.target.value)}
                                   placeholder="Operator"
                                   disabled={!userCanEdit}
-                                  className="min-w-[110px] rounded-xl border border-stone-300 bg-stone-50 px-3 py-1.5 text-[11px] text-stone-800 outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
+                                  className="min-w-[104px] border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800 outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
                                 />
                                 <input
                                   type="text"
@@ -4224,14 +4226,14 @@ function SchedulerApp() {
                                   onBlur={(event) => commitPressDuty(day.key, press, dutyName, event.target.value)}
                                   placeholder="Duty"
                                   disabled={!userCanEdit}
-                                  className="min-w-[110px] rounded-xl border border-stone-300 bg-stone-50 px-3 py-1.5 text-[11px] text-stone-800 outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
+                                  className="min-w-[104px] border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800 outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
                                 />
-                                <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">
+                                <span className="border border-stone-300 bg-white px-2 py-1 text-[10px] font-medium text-stone-700">
                                   drop
                                 </span>
                               </div>
                             </div>
-                            <div className="space-y-2">
+                            <div className="space-y-0">
                               {laneJobs.map(({ assignment, job }, index) => (
                                 <CompactScheduleCard
                                   key={assignment.id}
@@ -4254,7 +4256,7 @@ function SchedulerApp() {
                                 />
                               ))}
                               {!laneJobs.length && (
-                                <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50 p-3 text-center text-[11px] text-stone-500">
+                                <div className="min-h-16 border-dashed border-stone-200 p-3 text-center text-[11px] text-stone-500">
                                   Drop here
                                 </div>
                               )}
@@ -6481,7 +6483,7 @@ function CompactScheduleCard({
     ? "border-sky-300 bg-sky-50 ring-1 ring-sky-200"
     : job?.holdActive
       ? "border-rose-300 bg-rose-50"
-      : "border-stone-300 bg-stone-100";
+      : "border-stone-200 bg-white";
   const suppressClickUntilRef = useRef(0);
   const handleSelect = () => {
     if (Date.now() < suppressClickUntilRef.current) return;
@@ -6513,7 +6515,7 @@ function CompactScheduleCard({
           : undefined
       }
       onDrop={onDropBefore}
-      className={`rounded-2xl border p-2 transition-colors ${cardTone} ${isCardDraggable ? "cursor-grab" : ""}`}
+      className={`border-b p-2 transition-colors ${cardTone} ${isCardDraggable ? "cursor-grab" : ""}`}
     >
       <div className="flex items-start justify-between gap-2">
         <div
@@ -6540,7 +6542,7 @@ function CompactScheduleCard({
                   onMoveUp?.();
                 }}
                 disabled={!canMoveUp}
-                className={`rounded-full border px-2 py-1 text-[10px] font-medium ${canMoveUp ? "border-stone-300 bg-white text-stone-800" : "border-stone-200 bg-stone-200 text-stone-400"}`}
+                className={`border px-2 py-1 text-[10px] font-medium ${canMoveUp ? "border-stone-300 bg-white text-stone-800" : "border-stone-200 bg-stone-100 text-stone-400"}`}
                 aria-label="Move schedule item up">
                 &uarr;
               </button>
@@ -6551,21 +6553,21 @@ function CompactScheduleCard({
                   onMoveDown?.();
                 }}
                 disabled={!canMoveDown}
-                className={`rounded-full border px-2 py-1 text-[10px] font-medium ${canMoveDown ? "border-stone-300 bg-white text-stone-800" : "border-stone-200 bg-stone-200 text-stone-400"}`}
+                className={`border px-2 py-1 text-[10px] font-medium ${canMoveDown ? "border-stone-300 bg-white text-stone-800" : "border-stone-200 bg-stone-100 text-stone-400"}`}
                 aria-label="Move schedule item down">
                 &darr;
               </button>
             </div>
           )}
           {job?.holdActive && (
-            <span className="rounded-full bg-rose-700 px-2 py-1 text-[10px] font-medium text-white">hold</span>
+            <span className="bg-rose-700 px-2 py-1 text-[10px] font-medium text-white">hold</span>
           )}
-          {showStateBadge && <span className={`rounded-full px-2 py-1 text-[10px] font-medium ${statusTone(state)}`}>{state}</span>}
-          {isCardDraggable && <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">drag</span>}
+          {showStateBadge && <span className={`px-2 py-1 text-[10px] font-medium ${statusTone(state)}`}>{state}</span>}
+          {isCardDraggable && <span className="border border-stone-300 bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-700">drag</span>}
         </div>
       </div>
       {showStats && (
-        <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-stone-700 md:grid-cols-3">
+        <div className="mt-2 grid grid-cols-2 gap-1 text-[11px] text-stone-700 md:grid-cols-3">
           <InfoPill label="Est" value={`${job.estPressTime.toFixed(2)}h`} />
           <InfoPill label="Footage" value={job.estFootage.toLocaleString()} />
           <InfoPill label="Stock" value={job.stockDisplay || "-"} />
@@ -6575,7 +6577,7 @@ function CompactScheduleCard({
         </div>
       )}
       {job?.holdNote && (
-        <div className="mt-2 rounded-2xl border border-rose-200 bg-white/80 p-2 text-[11px] text-rose-900">
+        <div className="mt-2 border border-rose-200 bg-rose-50 p-2 text-[11px] text-rose-900">
           <div className="font-semibold uppercase tracking-[0.14em]">Hold note</div>
           <div className="mt-1 whitespace-pre-wrap">{job.holdNote}</div>
         </div>
@@ -6588,22 +6590,22 @@ function CompactScheduleCard({
       {(onUnschedule || onFinish || onUndoFinish || onDuplicate) && (
         <div className={`${density === "compact" ? "mt-1" : "mt-2"} flex flex-wrap gap-2`}>
           {onUnschedule && (
-            <button onClick={onUnschedule} className="rounded-xl border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800">
+            <button onClick={onUnschedule} className="border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800">
               Remove
             </button>
           )}
           {onDuplicate && (
-            <button onClick={onDuplicate} className="rounded-xl border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800">
+            <button onClick={onDuplicate} className="border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800">
               Duplicate
             </button>
           )}
           {onFinish && (
-            <button onClick={onFinish} className="rounded-xl bg-emerald-900 px-2 py-1 text-[11px] text-white">
+            <button onClick={onFinish} className="bg-emerald-900 px-2 py-1 text-[11px] text-white">
               Finish
             </button>
           )}
           {onUndoFinish && (
-            <button onClick={onUndoFinish} className="rounded-xl border border-emerald-300 bg-white px-2 py-1 text-[11px] text-emerald-950">
+            <button onClick={onUndoFinish} className="border border-emerald-300 bg-white px-2 py-1 text-[11px] text-emerald-950">
               Unmark done
             </button>
           )}
@@ -6615,7 +6617,7 @@ function CompactScheduleCard({
 
 function InfoPill({ label, value }) {
   return (
-    <div className="rounded-xl border border-stone-200 bg-white px-2 py-2">
+    <div className="border border-stone-200 bg-stone-50 px-2 py-2">
       <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-600">{label}</div>
       <div className="mt-1 font-medium text-stone-800">{value}</div>
     </div>

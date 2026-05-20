@@ -2,11 +2,13 @@ import * as XLSX from "xlsx";
 import ExcelJS from "exceljs";
 
 const DAY_BLOCK_WIDTH = 6;
-const DAY_BLOCK_STARTS = [6, 12, 18, 24, 30];
+const IMPORT_DAY_BLOCK_STARTS = [6, 12, 18, 24, 30];
+const EXPORT_DAY_BLOCK_STARTS = [1, 7, 13, 19, 25];
 const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
 const SCHEDULE_HEADERS = ["Customer & Job #", "EST Time", "Quantity", "Footage", "Stock", "Ship Date"];
 const FINISHED_HEADERS = ["Customer & Job #", "Total CRTN", "Quantity", "Skids", "Ship Via", "Cost"];
 const WORKBOOK_SHEET_PATTERN = /^\d{1,2}-\d{1,2}\s+\d{1,2}-\d{1,2}$/;
+const EXPORT_SECTION_GAP_ROWS = 1;
 
 const BASE_EXPORT_SECTIONS = [
   { press: "5.1", label: "Press 5", type: "schedule" },
@@ -177,7 +179,7 @@ function mapImportPressLabel(value) {
 function findSections(rows) {
   const sections = [];
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
-    const press = mapImportPressLabel(getCell(rows, rowIndex, DAY_BLOCK_STARTS[0]));
+    const press = mapImportPressLabel(getCell(rows, rowIndex, IMPORT_DAY_BLOCK_STARTS[0]));
     if (!press) continue;
     const previous = sections[sections.length - 1];
     if (previous) previous.endRow = rowIndex - 1;
@@ -263,7 +265,7 @@ export function importWeeklyScheduleWorkbook(arrayBuffer, existingJobs = []) {
     importedSheetCount += 1;
 
     const fallbackDates = inferDatesFromSheetName(sheetName);
-    const dayDescriptors = DAY_BLOCK_STARTS.map((startCol, index) => {
+    const dayDescriptors = IMPORT_DAY_BLOCK_STARTS.map((startCol, index) => {
       const date = parseSpreadsheetDate(getCell(rows, 2, startCol)) || fallbackDates[index] || null;
       if (date) {
         importedDayKeys.add(isoDate(date));
@@ -430,12 +432,6 @@ export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lan
   });
 
   sheet.columns = [
-    { width: 4 },
-    { width: 4 },
-    { width: 4 },
-    { width: 4 },
-    { width: 4 },
-    { width: 4 },
     { width: 14 },
     { width: 9 },
     { width: 10 },
@@ -468,15 +464,16 @@ export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lan
     { width: 8 },
   ];
 
-  sheet.mergeCells(1, 7, 1, 36);
-  const titleCell = sheet.getCell(1, 7);
-  titleCell.value = "Graphic Packaging Group Schedule";
+  sheet.mergeCells(1, 1, 1, 30);
+  const titleCell = sheet.getCell(1, 1);
+  titleCell.value = "DG-Labels";
   titleCell.font = { name: "Calibri", size: 18 };
   titleCell.alignment = { horizontal: "left", vertical: "middle" };
   applyBorder(titleCell, { bottom: { style: "thin", color: { argb: "FF000000" } } });
+  sheet.getRow(1).height = 24;
 
   weekColumns.forEach((day, index) => {
-    const startCol = DAY_BLOCK_STARTS[index] + 1;
+    const startCol = EXPORT_DAY_BLOCK_STARTS[index];
     const endCol = startCol + DAY_BLOCK_WIDTH - 1;
     sheet.mergeCells(2, startCol, 2, endCol);
     sheet.mergeCells(3, startCol, 3, endCol);
@@ -485,6 +482,7 @@ export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lan
     dayCell.value = day.label;
     dayCell.font = { name: "Calibri", size: 16 };
     dayCell.alignment = { horizontal: "center", vertical: "middle" };
+    sheet.getRow(2).height = 24;
 
     const dateCell = sheet.getCell(3, startCol);
     dateCell.value = day.date;
@@ -509,11 +507,12 @@ export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lan
       };
     }
   });
+  sheet.getRow(3).height = 20;
 
   let rowCursor = 4;
   rowPlan.forEach((section) => {
     weekColumns.forEach((day, index) => {
-      const startCol = DAY_BLOCK_STARTS[index] + 1;
+      const startCol = EXPORT_DAY_BLOCK_STARTS[index];
       const endCol = startCol + DAY_BLOCK_WIDTH - 1;
       const rowsForDay =
         section.type === "finished"
@@ -524,6 +523,7 @@ export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lan
       const labelCell = sheet.getCell(rowCursor, startCol);
       labelCell.value = section.label;
       styleSectionLabelCell(labelCell);
+      sheet.getRow(rowCursor).height = 22;
       for (let col = startCol; col <= endCol; col += 1) {
         const cell = sheet.getCell(rowCursor, col);
         cell.border = {
@@ -538,10 +538,12 @@ export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lan
         cell.value = header;
         styleHeaderCell(cell);
       });
+      sheet.getRow(rowCursor + 1).height = 16;
 
       for (let itemIndex = 0; itemIndex < section.rowCount; itemIndex += 1) {
         const dataRowIndex = rowCursor + 2 + itemIndex;
         const entry = rowsForDay[itemIndex];
+        sheet.getRow(dataRowIndex).height = 18;
         if (!entry) continue;
 
         if (section.type === "schedule" && entry.kind === "manual") {
@@ -571,7 +573,7 @@ export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lan
       }
     });
 
-    rowCursor += 2 + section.rowCount;
+    rowCursor += 2 + section.rowCount + EXPORT_SECTION_GAP_ROWS;
   });
 
   return workbook.xlsx.writeBuffer();
