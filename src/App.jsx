@@ -4264,10 +4264,10 @@ function SchedulerApp() {
 
                   <div className="max-h-[65vh] overflow-auto border border-stone-300 bg-white 2xl:max-h-[720px]">
                     {unscheduledJobs.length ? (
-                      <table className="min-w-[1760px] border-collapse text-left text-[12px] text-stone-800">
+                      <table className="min-w-[1860px] border-collapse text-left text-[12px] text-stone-800">
                         <thead className="sticky top-0 z-10 bg-stone-100">
                           <tr className="border-b border-stone-300">
-                            {["Number", "Customer", "Priority", "PO No.", "Description", "Press", "Ship", "Quantity", "Status", "Stock", "Press Time", "Main", "Scheduled On", "Mon-Fri", "Actions"].map((label) => (
+                            {["Number", "Customer", "Priority", "PO No.", "Description", "Press", "Ship", "Due on site", "Quantity", "Status", "Stock", "Press Time", "Main", "Scheduled On", "Mon-Fri", "Actions"].map((label) => (
                               <th key={label} className="whitespace-nowrap border-r border-stone-200 px-3 py-2 font-semibold text-stone-700 last:border-r-0">
                                 {label}
                               </th>
@@ -6725,6 +6725,7 @@ function PressQueueRow({
         )}
       </td>
       <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2">{formatDate(job.shipByDate)}</td>
+      <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2">{formatDate(job.dueOnSiteDate)}</td>
       <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2">{job.ticQuantity ? job.ticQuantity.toLocaleString() : "-"}</td>
       <td className="whitespace-nowrap border-r border-stone-200 px-3 py-2">
         <span className={selected ? "font-semibold text-sky-800" : ""}>{state}</span>
