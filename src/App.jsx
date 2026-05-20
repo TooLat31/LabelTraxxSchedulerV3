@@ -201,6 +201,11 @@ function todayKey() {
   return isoDate(new Date());
 }
 
+function localMiddayIso(date) {
+  if (!date) return null;
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 12, 0, 0, 0).toISOString();
+}
+
 function sameDay(dateValue, dayKey) {
   if (!dateValue || !dayKey) return false;
   return isoDate(new Date(dateValue)) === dayKey;
@@ -325,6 +330,7 @@ function normalizeJobs(jobs) {
         shipByDate: job.shipByDate ? new Date(job.shipByDate) : null,
         entryDate: job.entryDate ? new Date(job.entryDate) : null,
         dueOnSiteDate: job.dueOnSiteDate ? new Date(job.dueOnSiteDate) : null,
+        dateDone: job.dateDone ? new Date(job.dateDone) : null,
         holdActive: !!job.holdActive,
         holdNote: safeText(job.holdNote),
       }))
@@ -877,6 +883,7 @@ function parseLabelTraxxText(text) {
         estFootage: parseNumber(record.EstFootage),
         estPressTime: parseNumber(record.EstPressTime),
         notes: safeText(record.Notes),
+        dateDone: parseDate(record.DateDone),
         raw: record,
       };
     })
@@ -2034,6 +2041,7 @@ function SchedulerApp() {
   function importText(text) {
     const parsed = parseLabelTraxxText(text);
     if (!parsed.length) return;
+    const parsedById = new Map(parsed.map((job) => [job.id, job]));
     setJobs((current) => {
       const currentById = new Map(current.map((job) => [job.id, job]));
       return parsed.map((job) => {
@@ -2051,11 +2059,43 @@ function SchedulerApp() {
             };
       });
     });
-    setAssignments((current) =>
-      current.filter(
-        (assignment) => assignment.kind === "manual" || parsed.some((job) => job.id === assignment.jobId)
-      )
-    );
+    setAssignments((current) => {
+      const scopedAssignments = current.filter(
+        (assignment) => assignment.kind === "manual" || parsedById.has(assignment.jobId)
+      );
+      const nextAssignments = scopedAssignments.filter(
+        (assignment) => !(assignment.kind === "finish-only" && assignment.importedFinish)
+      );
+
+      parsed.forEach((job) => {
+        if (!job.dateDone) return;
+        const hasFinishedAssignment = nextAssignments.some(
+          (assignment) =>
+            assignment.jobId === job.id &&
+            (assignment.kind === "press" || assignment.kind === "finish-only") &&
+            assignment.status === "finished"
+        );
+        if (hasFinishedAssignment) return;
+        const doneDayKey = isoDate(job.dateDone);
+        const importedFinishedAt = localMiddayIso(job.dateDone);
+        nextAssignments.push({
+          id: makeId("asg"),
+          jobId: job.id,
+          dayKey: doneDayKey,
+          press: job.press && PRESS_ORDER.includes(job.press) ? job.press : "Rewind",
+          kind: "finish-only",
+          status: "finished",
+          createdAt: importedFinishedAt,
+          finishedAt: importedFinishedAt,
+          finishedBy: "Import",
+          shipDate: doneDayKey,
+          importedFinish: true,
+          excludeFromShipping: false,
+        });
+      });
+
+      return nextAssignments;
+    });
     setShipmentGroups((current) =>
       current.map((group) => {
         const nextJobMap = new Map(parsed.map((job) => [job.id, job]));
