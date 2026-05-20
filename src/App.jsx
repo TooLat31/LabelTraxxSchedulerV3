@@ -829,13 +829,18 @@ function parseLabelTraxxText(text) {
   const startIndex = lines.indexOf(headerLine);
   const headers = headerLine.split("\t");
   const headerCount = headers.length;
+  const notesIndex = headers.findIndex((header) => safeText(header).toLowerCase() === "notes");
+  const dateDoneIndex = headers.findIndex((header) => safeText(header).toLowerCase() === "datedone");
   const rows = [];
   let current = null;
 
   for (let index = startIndex + 1; index < lines.length; index += 1) {
     const line = lines[index];
     if (!line.trim()) {
-      if (current) current[headerCount - 1] = `${current[headerCount - 1] || ""}\n`;
+      if (current) {
+        const targetIndex = notesIndex >= 0 ? notesIndex : headerCount - 1;
+        current[targetIndex] = `${current[targetIndex] || ""}\n`;
+      }
       continue;
     }
 
@@ -850,7 +855,15 @@ function parseLabelTraxxText(text) {
     }
 
     if (current) {
-      current[headerCount - 1] = `${current[headerCount - 1] || ""}${current[headerCount - 1] ? "\n" : ""}${line}`;
+      const maybeDateDone = dateDoneIndex >= 0 ? safeText(parts[parts.length - 1]) : "";
+      if (dateDoneIndex >= 0 && notesIndex >= 0 && parts.length >= 2 && parseDate(maybeDateDone)) {
+        const noteText = safeText(parts.slice(0, -1).join("\t"));
+        current[notesIndex] = `${current[notesIndex] || ""}${current[notesIndex] ? "\n" : ""}${noteText}`;
+        current[dateDoneIndex] = maybeDateDone;
+        continue;
+      }
+      const targetIndex = notesIndex >= 0 ? notesIndex : headerCount - 1;
+      current[targetIndex] = `${current[targetIndex] || ""}${current[targetIndex] ? "\n" : ""}${line}`;
     }
   }
 
