@@ -1,5 +1,7 @@
 import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import * as XLSX from "xlsx";
 import { isSupabaseConfigured, supabase } from "./lib/supabase";
+import { exportWeeklyScheduleWorkbook, importWeeklyScheduleWorkbook } from "./lib/scheduleWorkbook";
 
 const PRESS_ORDER = ["5.1", "6.1", "1.1", "2.1", "8", "9", "Extra Duties", "Rewind"];
 const STORAGE_KEY = "labeltraxx-scheduler-v4";
@@ -1950,6 +1952,43 @@ function SchedulerApp() {
     reader.readAsText(file);
   }
 
+  async function handleScheduleWorkbookUpload(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !userCanManageUsers) return;
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const parsed = importWeeklyScheduleWorkbook(buffer, jobs);
+      if (!parsed.sheetCount) {
+        window.alert("No weekly schedule tabs were found in that workbook.");
+        return;
+      }
+
+      const importedDays = new Set(parsed.importedDayKeys);
+      setJobs(parsed.jobs);
+      setAssignments((current) => [
+        ...current.filter((assignment) => assignment.status === "finished" || !importedDays.has(assignment.dayKey)),
+        ...parsed.assignments,
+      ]);
+      if (parsed.weekStart) setWeekStart(parsed.weekStart);
+
+      recordActivity(
+        "Imported Excel schedule",
+        "Scheduler",
+        `${file.name} added ${parsed.assignments.length} schedule item(s) from ${parsed.sheetCount} weekly tab(s).`,
+        {
+          fileName: file.name,
+          sheetCount: parsed.sheetCount,
+          assignmentCount: parsed.assignments.length,
+        }
+      );
+    } catch (error) {
+      console.error("Failed to import Excel schedule.", error);
+      window.alert("That workbook could not be imported. Please check the weekly sheet layout and try again.");
+    }
+  }
+
   function handleScheduleDrop(event, dayKey, press) {
     event.preventDefault();
     if (!userCanMoveJobs) return;
@@ -2509,6 +2548,99 @@ function SchedulerApp() {
 
     const csv = rows.map((row) => row.map(csvEscape).join(",")).join("\n");
     downloadFile(`schedule-${isoDate(weekStart)}.csv`, csv, "text/csv;charset=utf-8");
+  }
+
+  function exportScheduleWorkbook() {
+    if (!userCanManageUsers) return;
+
+    const lanesByDay = {};
+    const finishedRowsByDay = {};
+    const sectionMetaByDayPress = {};
+
+    weekColumns.forEach((day) => {
+      lanesByDay[day.key] = {};
+      PRESS_ORDER.forEach((press) => {
+        sectionMetaByDayPress[`${day.key}::${press}`] = {
+          operator: getPressOperator(day.key, press),
+          duty: getPressDuty(day.key, press),
+        };
+        lanesByDay[day.key][press] = (board[day.key]?.[press] || [])
+          .filter(({ assignment }) => assignment.status !== "finished")
+          .map(({ assignment, job }) =>
+            assignment.kind === "manual"
+              ? {
+                  kind: "manual",
+                  title: assignment.manualTitle,
+                }
+              : {
+                  kind: "job",
+                  label: `${job.customerName} ${job.number}`.trim(),
+                  estTime: job.estPressTime || "",
+                  quantity: job.ticQuantity || "",
+                  footage: job.estFootage || "",
+                  stock: job.stockDisplay || "",
+                  shipDate: job.shipByDate ? formatDate(job.shipByDate) : "",
+                }
+          );
+      });
+
+      const groupRows = [];
+      const shippedJobIds = new Set();
+      shipmentGroups
+        .filter((group) => group.shipDate === day.key)
+        .forEach((group) => {
+          const packageType = safeText(group.packageType).toLowerCase();
+          const items = shipmentItemsByGroupId.get(group.id) || [];
+          items.forEach((item) => {
+            shippedJobIds.add(item.id);
+            const liveJob = jobMap.get(item.id);
+            groupRows.push({
+              label: `${item.customerName} ${item.number}`.trim(),
+              totalCartons: packageType.includes("carton") ? group.packageCount || "" : "",
+              quantity: liveJob?.ticQuantity || "",
+              skids: packageType.includes("skid") ? group.packageCount || "" : "",
+              method: group.method,
+              cost: group.totalCost ? formatCurrency(parseCurrency(group.totalCost)) : "",
+            });
+          });
+        });
+
+      allUserFinishedJobs
+        .filter((job) => effectiveFinishedShipDate(job.finishMeta) === day.key)
+        .forEach((job) => {
+          if (shippedJobIds.has(job.id)) return;
+          groupRows.push({
+            label: `${job.customerName} ${job.number}`.trim(),
+            totalCartons: "",
+            quantity: job.ticQuantity || "",
+            skids: "",
+            method: "",
+            cost: "",
+          });
+        });
+
+      finishedRowsByDay[day.key] = groupRows;
+    });
+
+    const workbook = exportWeeklyScheduleWorkbook({
+      weekStart,
+      weekColumns,
+      lanesByDay,
+      sectionMetaByDayPress,
+      finishedRowsByDay,
+    });
+    const output = XLSX.write(workbook, {
+      bookType: "xlsx",
+      type: "array",
+      cellDates: true,
+    });
+
+    downloadFile(
+      `schedule-${isoDate(weekStart)}.xlsx`,
+      output,
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    recordActivity("Exported Excel schedule", "Scheduler", `The week of ${isoDate(weekStart)} was exported to Excel.`);
   }
 
   async function handleDraftAttachmentChange(event) {
@@ -3795,6 +3927,19 @@ function SchedulerApp() {
                       <input type="file" accept=".txt,.tsv,text/plain" onChange={handleUpload} className="mt-3 block w-full text-xs" />
                     </label>
 
+                    {userCanManageUsers && (
+                      <label className="rounded-2xl border border-dashed border-stone-300 bg-white p-4 text-sm text-stone-700 hover:border-emerald-800">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="font-medium text-stone-900">Upload weekly schedule Excel</div>
+                            <div className="mt-1 text-xs text-stone-600">Management only. Reads weekly tabs like `5-4 5-8` and ignores raw upload tabs like `5-18`.</div>
+                          </div>
+                          <span className="rounded-full bg-stone-200 px-2 py-1 text-[11px] text-stone-700">Admin</span>
+                        </div>
+                        <input type="file" accept=".xls,.xlsx,.xlsm" onChange={handleScheduleWorkbookUpload} className="mt-3 block w-full text-xs" />
+                      </label>
+                    )}
+
                     <div className="rounded-2xl border border-stone-300 bg-white p-3">
                       <div className="mb-2 flex items-center justify-between">
                         <div className="text-sm font-medium">Paste export text</div>
@@ -3827,6 +3972,11 @@ function SchedulerApp() {
                       <button onClick={clearBoard} className="rounded-2xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
                         Clear
                       </button>
+                      {userCanManageUsers && (
+                        <button onClick={exportScheduleWorkbook} className="col-span-2 rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
+                          Export Excel
+                        </button>
+                      )}
                     </div>
 
                     {canAccessTab(currentUser, "New Request") && (
