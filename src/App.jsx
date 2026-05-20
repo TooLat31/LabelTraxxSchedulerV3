@@ -1034,6 +1034,7 @@ function SchedulerApp() {
   const [currentUsername, setCurrentUsername] = useState("");
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date()));
   const [search, setSearch] = useState("");
+  const [releaseQueueSearch, setReleaseQueueSearch] = useState("");
   const [unscheduledSearch, setUnscheduledSearch] = useState("");
   const [queueStatusFilter, setQueueStatusFilter] = useState("All");
   const [queuePressFilter, setQueuePressFilter] = useState("All");
@@ -1082,6 +1083,7 @@ function SchedulerApp() {
   const lastSharedSnapshotRef = useRef("");
   const saveTimerRef = useRef(null);
   const deferredSearch = useDeferredValue(search);
+  const deferredReleaseQueueSearch = useDeferredValue(releaseQueueSearch);
   const deferredUnscheduledSearch = useDeferredValue(unscheduledSearch);
   const deferredLocationSearch = useDeferredValue(locationSearch);
 
@@ -1440,6 +1442,7 @@ function SchedulerApp() {
     return map;
   }, [assignments, jobMap]);
   const normalizedSearch = deferredSearch.trim().toLowerCase();
+  const normalizedReleaseQueueSearch = deferredReleaseQueueSearch.trim().toLowerCase();
   const normalizedUnscheduledSearch = deferredUnscheduledSearch.trim().toLowerCase();
   const normalizedLocationSearch = deferredLocationSearch.trim().toLowerCase();
 
@@ -1609,18 +1612,21 @@ function SchedulerApp() {
       .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
   }, [finishedMetaByJobId, jobs, userFinishedJobIds]);
 
-  const releaseJobsForSelectedShipDate = useMemo(() => {
+  const releaseQueueJobs = useMemo(() => {
     return jobs
       .filter((job) => isReleaseJob(job))
       .filter((job) => !userFinishedJobIds.has(job.id))
-      .filter((job) => !selectedShipDate || (job.shipByDate && isoDate(job.shipByDate) === selectedShipDate))
+      .filter((job) => {
+        const haystack = `${safeText(job.number)} ${safeText(job.customerName)} ${safeText(job.generalDescr)}`.toLowerCase();
+        return !normalizedReleaseQueueSearch || haystack.includes(normalizedReleaseQueueSearch);
+      })
       .sort((left, right) => {
         const leftDate = left.shipByDate ? left.shipByDate.getTime() : Number.MAX_SAFE_INTEGER;
         const rightDate = right.shipByDate ? right.shipByDate.getTime() : Number.MAX_SAFE_INTEGER;
         if (leftDate !== rightDate) return leftDate - rightDate;
         return right.estPressTime - left.estPressTime;
       });
-  }, [jobs, selectedShipDate, userFinishedJobIds]);
+  }, [jobs, normalizedReleaseQueueSearch, userFinishedJobIds]);
 
   const doneJobs = useMemo(
     () => allUserFinishedJobs.filter((job) => filteredJobIds.has(job.id)),
@@ -5173,14 +5179,24 @@ function SchedulerApp() {
                 <div>
                   <div className="text-sm font-semibold">Release shipping queue</div>
                   <div className="text-xs text-stone-600">
-                    Release tickets stay off the production press queue. Mark them finished here and they will move into the ship-date flow below.
+                    Release tickets stay off the production press queue. Search any unfinished release here, even if it is due later, then mark it finished so it moves into the ship-date flow below.
                   </div>
                 </div>
-                <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{releaseJobsForSelectedShipDate.length}</div>
+                <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{releaseQueueJobs.length}</div>
+              </div>
+
+              <div className="mb-4">
+                <input
+                  type="text"
+                  value={releaseQueueSearch}
+                  onChange={(event) => setReleaseQueueSearch(event.target.value)}
+                  placeholder="Search release job number or customer"
+                  className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                />
               </div>
 
               <div className="space-y-3">
-                {releaseJobsForSelectedShipDate.map((job) => (
+                {releaseQueueJobs.map((job) => (
                   <div key={job.id} className="rounded-2xl border border-stone-300 bg-white p-3">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
@@ -5218,9 +5234,9 @@ function SchedulerApp() {
                     </div>
                   </div>
                 ))}
-                {!releaseJobsForSelectedShipDate.length && (
+                {!releaseQueueJobs.length && (
                   <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
-                    No unfinished release jobs are loaded for {selectedShipDate}.
+                    No unfinished release jobs match that search.
                   </div>
                 )}
               </div>
