@@ -1,5 +1,4 @@
 import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import * as XLSX from "xlsx";
 import { isSupabaseConfigured, supabase } from "./lib/supabase";
 import { exportWeeklyScheduleWorkbook, importWeeklyScheduleWorkbook } from "./lib/scheduleWorkbook";
 
@@ -2550,20 +2549,15 @@ function SchedulerApp() {
     downloadFile(`schedule-${isoDate(weekStart)}.csv`, csv, "text/csv;charset=utf-8");
   }
 
-  function exportScheduleWorkbook() {
+  async function exportScheduleWorkbook() {
     if (!userCanManageUsers) return;
 
     const lanesByDay = {};
     const finishedRowsByDay = {};
-    const sectionMetaByDayPress = {};
 
     weekColumns.forEach((day) => {
       lanesByDay[day.key] = {};
       PRESS_ORDER.forEach((press) => {
-        sectionMetaByDayPress[`${day.key}::${press}`] = {
-          operator: getPressOperator(day.key, press),
-          duty: getPressDuty(day.key, press),
-        };
         lanesByDay[day.key][press] = (board[day.key]?.[press] || [])
           .filter(({ assignment }) => assignment.status !== "finished")
           .map(({ assignment, job }) =>
@@ -2622,22 +2616,16 @@ function SchedulerApp() {
       finishedRowsByDay[day.key] = groupRows;
     });
 
-    const workbook = exportWeeklyScheduleWorkbook({
+    const workbookBuffer = await exportWeeklyScheduleWorkbook({
       weekStart,
       weekColumns,
       lanesByDay,
-      sectionMetaByDayPress,
       finishedRowsByDay,
-    });
-    const output = XLSX.write(workbook, {
-      bookType: "xlsx",
-      type: "array",
-      cellDates: true,
     });
 
     downloadFile(
       `schedule-${isoDate(weekStart)}.xlsx`,
-      output,
+      workbookBuffer,
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     );
     recordActivity("Exported Excel schedule", "Scheduler", `The week of ${isoDate(weekStart)} was exported to Excel.`);

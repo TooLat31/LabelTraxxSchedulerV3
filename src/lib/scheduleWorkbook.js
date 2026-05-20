@@ -1,4 +1,5 @@
 import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 
 const DAY_BLOCK_WIDTH = 6;
 const DAY_BLOCK_STARTS = [6, 12, 18, 24, 30];
@@ -7,7 +8,7 @@ const SCHEDULE_HEADERS = ["Customer & Job #", "EST Time", "Quantity", "Footage",
 const FINISHED_HEADERS = ["Customer & Job #", "Total CRTN", "Quantity", "Skids", "Ship Via", "Cost"];
 const WORKBOOK_SHEET_PATTERN = /^\d{1,2}-\d{1,2}\s+\d{1,2}-\d{1,2}$/;
 
-const EXPORT_SECTIONS = [
+const BASE_EXPORT_SECTIONS = [
   { press: "5.1", label: "Press 5", type: "schedule" },
   { press: "6.1", label: "Press 6", type: "schedule" },
   { press: "2.1", label: "Press 2", type: "schedule" },
@@ -340,25 +341,6 @@ export function importWeeklyScheduleWorkbook(arrayBuffer, existingJobs = []) {
   };
 }
 
-function createEmptyGrid(rowCount, colCount) {
-  return Array.from({ length: rowCount }, () => Array.from({ length: colCount }, () => ""));
-}
-
-function setGridCell(grid, rowIndex, colIndex, value) {
-  while (grid.length <= rowIndex) {
-    grid.push([]);
-  }
-  while (grid[rowIndex].length <= colIndex) {
-    grid[rowIndex].push("");
-  }
-  grid[rowIndex][colIndex] = value;
-}
-
-function formatSectionLabel(baseLabel, operator, duty) {
-  const details = [safeText(operator), safeText(duty)].filter(Boolean);
-  return details.length ? `${baseLabel} | ${details.join(" | ")}` : baseLabel;
-}
-
 function scheduleEntryRow(entry) {
   if (entry.kind === "manual") {
     return [safeText(entry.title), "", "", "", "", ""];
@@ -384,11 +366,16 @@ function finishedEntryRow(entry) {
   ];
 }
 
-export function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lanesByDay, sectionMetaByDayPress, finishedRowsByDay }) {
-  const rowPlan = [];
-
-  EXPORT_SECTIONS.forEach((section) => {
-    const size = Math.max(
+function buildExportSections(lanesByDay, finishedRowsByDay, weekColumns) {
+  return BASE_EXPORT_SECTIONS.filter((section) => {
+    if (section.press === "Extra Duties") {
+      return weekColumns.some((day) => (lanesByDay?.[day.key]?.[section.press] || []).length);
+    }
+    if (section.type === "finished") return true;
+    return true;
+  }).map((section) => ({
+    ...section,
+    rowCount: Math.max(
       1,
       ...weekColumns.map((day) => {
         const rowsForDay =
@@ -397,115 +384,195 @@ export function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lanesByDa
             : lanesByDay?.[day.key]?.[section.press] || [];
         return rowsForDay.length;
       })
-    );
-    rowPlan.push({
-      ...section,
-      rowCount: size,
-    });
+    ),
+  }));
+}
+
+function applyBorder(cell, border) {
+  cell.border = border;
+}
+
+function manualRowStyle(title) {
+  const value = safeText(title).toLowerCase();
+  if (value.includes("memorial") || value.includes("holiday")) {
+    return { fill: "FFFF0000", color: "FF000000" };
+  }
+  return { fill: "FFFFFF00", color: "FF000000" };
+}
+
+function styleSectionLabelCell(cell) {
+  cell.font = { name: "Calibri", size: 16, bold: true };
+  cell.alignment = { horizontal: "center", vertical: "middle" };
+}
+
+function styleHeaderCell(cell) {
+  cell.font = { name: "Calibri", size: 8, bold: true };
+  cell.alignment = { horizontal: "center", vertical: "middle" };
+}
+
+function styleBodyCell(cell, isText = false) {
+  cell.font = { name: "Calibri", size: 8 };
+  cell.alignment = {
+    horizontal: isText ? "left" : "center",
+    vertical: "middle",
+  };
+}
+
+export async function exportWeeklyScheduleWorkbook({ weekStart, weekColumns, lanesByDay, finishedRowsByDay }) {
+  const rowPlan = buildExportSections(lanesByDay, finishedRowsByDay, weekColumns);
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "OpenAI Codex";
+  workbook.created = new Date();
+  workbook.modified = new Date();
+  const sheet = workbook.addWorksheet(buildSheetName(weekStart), {
+    views: [{ state: "frozen", ySplit: 3 }],
+    properties: { defaultRowHeight: 16 },
   });
 
-  const totalRows = rowPlan.reduce((sum, section) => sum + 2 + section.rowCount, 3);
-  const grid = createEmptyGrid(totalRows, 36);
-  const merges = [];
+  sheet.columns = [
+    { width: 4 },
+    { width: 4 },
+    { width: 4 },
+    { width: 4 },
+    { width: 4 },
+    { width: 4 },
+    { width: 14 },
+    { width: 9 },
+    { width: 10 },
+    { width: 10 },
+    { width: 8 },
+    { width: 8 },
+    { width: 14 },
+    { width: 9 },
+    { width: 10 },
+    { width: 10 },
+    { width: 8 },
+    { width: 8 },
+    { width: 14 },
+    { width: 9 },
+    { width: 10 },
+    { width: 10 },
+    { width: 8 },
+    { width: 8 },
+    { width: 14 },
+    { width: 9 },
+    { width: 10 },
+    { width: 10 },
+    { width: 8 },
+    { width: 8 },
+    { width: 14 },
+    { width: 9 },
+    { width: 10 },
+    { width: 10 },
+    { width: 8 },
+    { width: 8 },
+  ];
 
-  setGridCell(grid, 0, 6, "Graphic Packaging Group Schedule");
-  merges.push({ s: { r: 0, c: 6 }, e: { r: 0, c: 35 } });
+  sheet.mergeCells(1, 7, 1, 36);
+  const titleCell = sheet.getCell(1, 7);
+  titleCell.value = "Graphic Packaging Group Schedule";
+  titleCell.font = { name: "Calibri", size: 18 };
+  titleCell.alignment = { horizontal: "left", vertical: "middle" };
+  applyBorder(titleCell, { bottom: { style: "thin", color: { argb: "FF000000" } } });
 
   weekColumns.forEach((day, index) => {
-    const startCol = DAY_BLOCK_STARTS[index];
-    setGridCell(grid, 1, startCol, day.label);
-    setGridCell(grid, 2, startCol, day.date);
-    merges.push({ s: { r: 1, c: startCol }, e: { r: 1, c: startCol + DAY_BLOCK_WIDTH - 1 } });
+    const startCol = DAY_BLOCK_STARTS[index] + 1;
+    const endCol = startCol + DAY_BLOCK_WIDTH - 1;
+    sheet.mergeCells(2, startCol, 2, endCol);
+    sheet.mergeCells(3, startCol, 3, endCol);
+
+    const dayCell = sheet.getCell(2, startCol);
+    dayCell.value = day.label;
+    dayCell.font = { name: "Calibri", size: 16 };
+    dayCell.alignment = { horizontal: "center", vertical: "middle" };
+
+    const dateCell = sheet.getCell(3, startCol);
+    dateCell.value = day.date;
+    dateCell.numFmt = "m/d/yy";
+    dateCell.font = { name: "Calibri", size: 14, bold: true };
+    dateCell.alignment = { horizontal: "center", vertical: "middle" };
+    dateCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF8EAADB" },
+    };
+    for (let col = startCol; col <= endCol; col += 1) {
+      const cell = sheet.getCell(3, col);
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FF8EAADB" },
+      };
+      cell.border = {
+        top: { style: "thin", color: { argb: "FF000000" } },
+        bottom: { style: "thin", color: { argb: "FF000000" } },
+      };
+    }
   });
 
-  let rowCursor = 3;
+  let rowCursor = 4;
   rowPlan.forEach((section) => {
     weekColumns.forEach((day, index) => {
-      const startCol = DAY_BLOCK_STARTS[index];
-      const meta = sectionMetaByDayPress?.[`${day.key}::${section.press}`] || {};
-      const label = section.type === "finished" ? section.label : formatSectionLabel(section.label, meta.operator, meta.duty);
-      setGridCell(grid, rowCursor, startCol, label);
-      merges.push({ s: { r: rowCursor, c: startCol }, e: { r: rowCursor, c: startCol + DAY_BLOCK_WIDTH - 1 } });
-
-      const headers = section.type === "finished" ? FINISHED_HEADERS : SCHEDULE_HEADERS;
-      headers.forEach((header, headerIndex) => {
-        setGridCell(grid, rowCursor + 1, startCol + headerIndex, header);
-      });
-
+      const startCol = DAY_BLOCK_STARTS[index] + 1;
+      const endCol = startCol + DAY_BLOCK_WIDTH - 1;
       const rowsForDay =
         section.type === "finished"
           ? finishedRowsByDay?.[day.key] || []
           : lanesByDay?.[day.key]?.[section.press] || [];
 
+      sheet.mergeCells(rowCursor, startCol, rowCursor, endCol);
+      const labelCell = sheet.getCell(rowCursor, startCol);
+      labelCell.value = section.label;
+      styleSectionLabelCell(labelCell);
+      for (let col = startCol; col <= endCol; col += 1) {
+        const cell = sheet.getCell(rowCursor, col);
+        cell.border = {
+          top: { style: "thin", color: { argb: "FF000000" } },
+          bottom: { style: "thin", color: { argb: "FF000000" } },
+        };
+      }
+
+      const headers = section.type === "finished" ? FINISHED_HEADERS : SCHEDULE_HEADERS;
+      headers.forEach((header, headerIndex) => {
+        const cell = sheet.getCell(rowCursor + 1, startCol + headerIndex);
+        cell.value = header;
+        styleHeaderCell(cell);
+      });
+
       for (let itemIndex = 0; itemIndex < section.rowCount; itemIndex += 1) {
+        const dataRowIndex = rowCursor + 2 + itemIndex;
         const entry = rowsForDay[itemIndex];
-        const values = !entry
-          ? ["", "", "", "", "", ""]
-          : section.type === "finished"
-            ? finishedEntryRow(entry)
-            : scheduleEntryRow(entry);
+        if (!entry) continue;
+
+        if (section.type === "schedule" && entry.kind === "manual") {
+          sheet.mergeCells(dataRowIndex, startCol, dataRowIndex, endCol);
+          const cell = sheet.getCell(dataRowIndex, startCol);
+          cell.value = safeText(entry.title);
+          cell.font = { name: "Calibri", size: 16 };
+          cell.alignment = { horizontal: "center", vertical: "middle" };
+          const style = manualRowStyle(entry.title);
+          for (let col = startCol; col <= endCol; col += 1) {
+            const mergedCell = sheet.getCell(dataRowIndex, col);
+            mergedCell.fill = {
+              type: "pattern",
+              pattern: "solid",
+              fgColor: { argb: style.fill },
+            };
+          }
+          continue;
+        }
+
+        const values = section.type === "finished" ? finishedEntryRow(entry) : scheduleEntryRow(entry);
         values.forEach((value, valueIndex) => {
-          setGridCell(grid, rowCursor + 2 + itemIndex, startCol + valueIndex, value);
+          const cell = sheet.getCell(dataRowIndex, startCol + valueIndex);
+          cell.value = value;
+          styleBodyCell(cell, valueIndex === 0 || valueIndex === 4 || (section.type === "finished" && valueIndex === 4));
         });
       }
     });
+
     rowCursor += 2 + section.rowCount;
   });
 
-  const worksheet = XLSX.utils.aoa_to_sheet(grid, { cellDates: true });
-  worksheet["!merges"] = merges;
-  worksheet["!cols"] = [
-    { wch: 4 },
-    { wch: 14 },
-    { wch: 18 },
-    { wch: 10 },
-    { wch: 10 },
-    { wch: 10 },
-    { wch: 24 },
-    { wch: 10 },
-    { wch: 12 },
-    { wch: 12 },
-    { wch: 14 },
-    { wch: 12 },
-    { wch: 24 },
-    { wch: 10 },
-    { wch: 12 },
-    { wch: 12 },
-    { wch: 14 },
-    { wch: 12 },
-    { wch: 24 },
-    { wch: 10 },
-    { wch: 12 },
-    { wch: 12 },
-    { wch: 14 },
-    { wch: 12 },
-    { wch: 24 },
-    { wch: 10 },
-    { wch: 12 },
-    { wch: 12 },
-    { wch: 14 },
-    { wch: 12 },
-    { wch: 24 },
-    { wch: 10 },
-    { wch: 12 },
-    { wch: 12 },
-    { wch: 14 },
-    { wch: 12 },
-  ];
-  worksheet["!freeze"] = { xSplit: 0, ySplit: 3 };
-
-  DAY_BLOCK_STARTS.forEach((startCol, index) => {
-    const dateCell = XLSX.utils.encode_cell({ r: 2, c: startCol });
-    if (worksheet[dateCell]) {
-      worksheet[dateCell].z = "m/d/yy";
-    }
-  });
-
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, buildSheetName(weekStart));
-  workbook.Props = {
-    Title: "Label Traxx Scheduler Weekly Schedule",
-    Subject: "Weekly schedule export",
-  };
-  return workbook;
+  return workbook.xlsx.writeBuffer();
 }
