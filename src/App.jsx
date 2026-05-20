@@ -1808,8 +1808,17 @@ function SchedulerApp() {
         ...job,
         finishMeta: finishedMetaByJobId.get(job.id) || null,
       }))
-      .sort((left, right) => dateSortValue(right.dateDone || right.finishMeta?.finishedAt) - dateSortValue(left.dateDone || left.finishMeta?.finishedAt));
+      .sort((left, right) => {
+        const dateDiff = dateSortValue(right.dateDone || right.finishMeta?.finishedAt) - dateSortValue(left.dateDone || left.finishMeta?.finishedAt);
+        if (dateDiff !== 0) return dateDiff;
+        return parseNumber(right.number) - parseNumber(left.number);
+      });
   }, [finishedMetaByJobId, jobs, selectedShipDate]);
+
+  const dateDoneJobNumbers = useMemo(
+    () => dateDoneJobs.map((job) => safeText(job.number)).filter(Boolean).join(", "),
+    [dateDoneJobs]
+  );
 
   const readyToShipJobs = useMemo(() => {
     return dateDoneJobs
@@ -5308,6 +5317,11 @@ function SchedulerApp() {
                   <div>
                     <div className="text-sm font-semibold">Date done on {selectedShipDate}</div>
                     <div className="text-xs text-stone-600">This queue follows the imported DateDone value from the TXT. Grouped or removed jobs stay visible so you can still track what was done.</div>
+                    {!!dateDoneJobs.length && (
+                      <div className="mt-2 text-[11px] text-stone-700">
+                        Jobs in queue: {dateDoneJobNumbers}
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     <button
