@@ -464,6 +464,7 @@ function normalizeAssignments(assignments) {
           manualTitle: safeText(assignment.manualTitle),
           kind: safeText(assignment.kind) || "press",
           status: safeText(assignment.status) || "scheduled",
+          laneOrder: Number.isFinite(Number(assignment.laneOrder)) ? Number(assignment.laneOrder) : null,
         }))
     : [];
 }
@@ -517,10 +518,20 @@ function normalizeShipmentEmailGroups(groups) {
     : [];
 }
 
+function normalizePressOperators(operators) {
+  const source = operators && typeof operators === "object" ? operators : {};
+  return Object.fromEntries(
+    Object.entries(source)
+      .map(([key, value]) => [safeText(key), safeText(value)])
+      .filter(([key, value]) => key && value)
+  );
+}
+
 function defaultSharedSnapshot() {
   return {
     jobs: [],
     assignments: [],
+    pressOperators: {},
     requests: [],
     pullPaperRequests: [],
     notes: [],
@@ -541,6 +552,7 @@ function normalizeSharedSnapshot(snapshot) {
   return {
     jobs: normalizeJobs(source.jobs),
     assignments: normalizeAssignments(source.assignments),
+    pressOperators: normalizePressOperators(source.pressOperators),
     requests: normalizeRequests(source.requests),
     pullPaperRequests: normalizePullPaperRequests(source.pullPaperRequests),
     notes: normalizeNotes(source.notes),
@@ -560,6 +572,7 @@ function buildSharedSnapshot(state) {
   return {
     jobs: state.jobs,
     assignments: state.assignments,
+    pressOperators: state.pressOperators,
     requests: state.requests,
     pullPaperRequests: state.pullPaperRequests,
     notes: state.notes,
@@ -864,10 +877,15 @@ function deriveVisibleJobState(jobId, activePressJobIds, finishedJobIds) {
   return "open";
 }
 
+function pressOperatorKey(dayKey, press) {
+  return `${safeText(dayKey)}::${safeText(press)}`;
+}
+
 function SchedulerApp() {
   const [isReady, setIsReady] = useState(false);
   const [jobs, setJobs] = useState([]);
   const [assignments, setAssignments] = useState([]);
+  const [pressOperators, setPressOperators] = useState({});
   const [requests, setRequests] = useState([]);
   const [pullPaperRequests, setPullPaperRequests] = useState([]);
   const [notes, setNotes] = useState([]);
@@ -939,6 +957,7 @@ function SchedulerApp() {
       const normalized = normalizeSharedSnapshot(snapshot);
       setJobs(normalized.jobs);
       setAssignments(normalized.assignments);
+      setPressOperators(normalized.pressOperators);
       setRequests(normalized.requests);
       setPullPaperRequests(normalized.pullPaperRequests);
       setNotes(normalized.notes);
@@ -1044,6 +1063,7 @@ function SchedulerApp() {
     const sharedSnapshot = buildSharedSnapshot({
       jobs,
       assignments,
+      pressOperators,
       requests,
       pullPaperRequests,
       notes,
@@ -1101,7 +1121,7 @@ function SchedulerApp() {
     return () => {
       window.clearTimeout(saveTimerRef.current);
     };
-  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, suppliesRequests, users, weekStart]);
+  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressOperators, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, suppliesRequests, users, weekStart]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -1395,6 +1415,62 @@ function SchedulerApp() {
     [allUserFinishedJobs, filteredJobIds]
   );
 
+  function compareLaneAssignments(left, right) {
+    const leftOrder = Number.isFinite(Number(left.laneOrder)) ? Number(left.laneOrder) : null;
+    const rightOrder = Number.isFinite(Number(right.laneOrder)) ? Number(right.laneOrder) : null;
+    if (leftOrder != null || rightOrder != null) {
+      if (leftOrder == null) return 1;
+      if (rightOrder == null) return -1;
+      if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    }
+
+    const leftIsManual = left.kind === "manual";
+    const rightIsManual = right.kind === "manual";
+    if (leftIsManual && rightIsManual) {
+      const titleCompare = safeText(left.manualTitle).localeCompare(safeText(right.manualTitle));
+      if (titleCompare !== 0) return titleCompare;
+      return safeText(left.id).localeCompare(safeText(right.id));
+    }
+    if (leftIsManual) return -1;
+    if (rightIsManual) return 1;
+
+    const leftJob = jobMap.get(left.jobId);
+    const rightJob = jobMap.get(right.jobId);
+    const estTimeCompare = (rightJob?.estPressTime || 0) - (leftJob?.estPressTime || 0);
+    if (estTimeCompare !== 0) return estTimeCompare;
+    return safeText(left.id).localeCompare(safeText(right.id));
+  }
+
+  function getSortedLaneAssignments(sourceAssignments, dayKey, press, excludedAssignmentId = "") {
+    return sourceAssignments
+      .filter(
+        (assignment) =>
+          assignment.dayKey === dayKey && assignment.press === press && assignment.id !== excludedAssignmentId
+      )
+      .sort(compareLaneAssignments);
+  }
+
+  function normalizeLaneAssignments(laneAssignments, dayKey, press) {
+    return laneAssignments.map((assignment, index) => ({
+      ...assignment,
+      dayKey,
+      press,
+      laneOrder: index,
+    }));
+  }
+
+  function applyLaneAssignmentUpdates(current, updatedAssignments, addedAssignments = []) {
+    const updatedById = new Map(updatedAssignments.map((assignment) => [assignment.id, assignment]));
+    const next = current.map((assignment) => updatedById.get(assignment.id) || assignment);
+    addedAssignments.forEach((assignment) => {
+      const updatedAssignment = updatedById.get(assignment.id) || assignment;
+      if (!next.some((item) => item.id === updatedAssignment.id)) {
+        next.push(updatedAssignment);
+      }
+    });
+    return next;
+  }
+
   const board = useMemo(() => {
     const map = {};
     weekColumns.forEach((day) => {
@@ -1418,12 +1494,7 @@ function SchedulerApp() {
 
     Object.values(map).forEach((pressMap) => {
       Object.values(pressMap).forEach((laneJobs) => {
-        laneJobs.sort((left, right) => {
-          if (!left.job && !right.job) return left.assignment.manualTitle.localeCompare(right.assignment.manualTitle);
-          if (!left.job) return -1;
-          if (!right.job) return 1;
-          return right.job.estPressTime - left.job.estPressTime;
-        });
+        laneJobs.sort((left, right) => compareLaneAssignments(left.assignment, right.assignment));
       });
     });
 
@@ -1797,7 +1868,25 @@ function SchedulerApp() {
     if (fallbackJobId) addAssignment(fallbackJobId, dayKey, press);
   }
 
-  function addAssignment(jobId, dayKey, press) {
+  function handleScheduleCardDrop(event, dayKey, press, targetAssignmentId) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!userCanMoveJobs) return;
+    const payload = parseDragPayload(event.dataTransfer.getData("application/json"));
+    if (payload?.type === "queue" && payload.jobId) {
+      addAssignment(payload.jobId, dayKey, press, targetAssignmentId);
+      return;
+    }
+    if (payload?.type === "scheduled" && payload.assignmentId) {
+      if (payload.assignmentId === targetAssignmentId) return;
+      moveAssignment(payload.assignmentId, dayKey, press, targetAssignmentId);
+      return;
+    }
+    const fallbackJobId = event.dataTransfer.getData("text/plain");
+    if (fallbackJobId) addAssignment(fallbackJobId, dayKey, press, targetAssignmentId);
+  }
+
+  function addAssignment(jobId, dayKey, press, beforeAssignmentId = "") {
     if (!userCanMoveJobs) return;
     const exists = assignments.some(
       (assignment) =>
@@ -1809,20 +1898,35 @@ function SchedulerApp() {
     );
     if (exists) return;
     const job = jobMap.get(jobId);
-    setAssignments((current) => [
-      ...current,
-      {
-        id: makeId("asg"),
-        jobId,
+    const newAssignment = {
+      id: makeId("asg"),
+      jobId,
+      dayKey,
+      press,
+      kind: "press",
+      status: "scheduled",
+      createdAt: new Date().toISOString(),
+      finishedAt: null,
+      finishedBy: "",
+      laneOrder: null,
+    };
+    setAssignments((current) => {
+      const laneAssignments = getSortedLaneAssignments(current, dayKey, press);
+      const targetIndex = beforeAssignmentId
+        ? laneAssignments.findIndex((assignment) => assignment.id === beforeAssignmentId)
+        : -1;
+      const insertAt = targetIndex >= 0 ? targetIndex : laneAssignments.length;
+      const nextLane = normalizeLaneAssignments(
+        [
+          ...laneAssignments.slice(0, insertAt),
+          newAssignment,
+          ...laneAssignments.slice(insertAt),
+        ],
         dayKey,
-        press,
-        kind: "press",
-        status: "scheduled",
-        createdAt: new Date().toISOString(),
-        finishedAt: null,
-        finishedBy: "",
-      },
-    ]);
+        press
+      );
+      return applyLaneAssignmentUpdates(current, nextLane, [newAssignment]);
+    });
     recordActivity(
       "Scheduled job",
       "Scheduler",
@@ -1839,21 +1943,25 @@ function SchedulerApp() {
     const press = safeText(manualScheduleForm.press);
     if (!title || !dayKey || !PRESS_ORDER.includes(press)) return;
 
-    setAssignments((current) => [
-      {
-        id: makeId("manual"),
-        jobId: "",
-        manualTitle: title,
-        dayKey,
-        press,
-        kind: "manual",
-        status: "scheduled",
-        createdAt: new Date().toISOString(),
-        finishedAt: null,
-        finishedBy: "",
-      },
-      ...current,
-    ]);
+    const newAssignment = {
+      id: makeId("manual"),
+      jobId: "",
+      manualTitle: title,
+      dayKey,
+      press,
+      kind: "manual",
+      status: "scheduled",
+      createdAt: new Date().toISOString(),
+      finishedAt: null,
+      finishedBy: "",
+      laneOrder: null,
+    };
+
+    setAssignments((current) => {
+      const laneAssignments = getSortedLaneAssignments(current, dayKey, press);
+      const nextLane = normalizeLaneAssignments([...laneAssignments, newAssignment], dayKey, press);
+      return applyLaneAssignmentUpdates(current, nextLane, [newAssignment]);
+    });
     recordActivity(
       "Added manual block",
       "Scheduler",
@@ -1863,11 +1971,12 @@ function SchedulerApp() {
     setManualScheduleForm((current) => ({ ...current, title: "" }));
   }
 
-  function moveAssignment(assignmentId, dayKey, press) {
+  function moveAssignment(assignmentId, dayKey, press, beforeAssignmentId = "") {
     if (!userCanMoveJobs) return;
     const assignmentToMove = assignments.find((assignment) => assignment.id === assignmentId);
     if (!assignmentToMove) return;
-    if (assignmentToMove.kind === "press" && assignmentToMove.status === "finished") return;
+    const movingWithinLane = assignmentToMove.dayKey === dayKey && assignmentToMove.press === press;
+    if (assignmentToMove.kind === "press" && assignmentToMove.status === "finished" && !movingWithinLane) return;
     const duplicate = assignments.some(
       (assignment) =>
         assignment.id !== assignmentId &&
@@ -1883,32 +1992,90 @@ function SchedulerApp() {
             assignment.status !== "finished")
         )
     );
-    if (duplicate) return;
+    if (duplicate && !movingWithinLane) return;
 
-    setAssignments((current) =>
-      current.map((assignment) =>
-        assignment.id === assignmentId
-          ? {
-              ...assignment,
-              dayKey,
-              press,
-            }
-          : assignment
-      )
-    );
+    setAssignments((current) => {
+      const currentAssignment = current.find((assignment) => assignment.id === assignmentId);
+      if (!currentAssignment) return current;
+      const isSameLane = currentAssignment.dayKey === dayKey && currentAssignment.press === press;
+      const sourceDayKey = currentAssignment.dayKey;
+      const sourcePress = currentAssignment.press;
+      const sourceLane = getSortedLaneAssignments(current, sourceDayKey, sourcePress, assignmentId);
+      const destinationBase = isSameLane ? sourceLane : getSortedLaneAssignments(current, dayKey, press);
+      const targetIndex = beforeAssignmentId
+        ? destinationBase.findIndex((assignment) => assignment.id === beforeAssignmentId)
+        : -1;
+      const insertAt = targetIndex >= 0 ? targetIndex : destinationBase.length;
+      const movedAssignment = {
+        ...currentAssignment,
+        dayKey,
+        press,
+      };
+      const destinationLane = normalizeLaneAssignments(
+        [
+          ...destinationBase.slice(0, insertAt),
+          movedAssignment,
+          ...destinationBase.slice(insertAt),
+        ],
+        dayKey,
+        press
+      );
+      if (isSameLane) {
+        return applyLaneAssignmentUpdates(current, destinationLane);
+      }
+      const updatedSourceLane = normalizeLaneAssignments(sourceLane, sourceDayKey, sourcePress);
+      return applyLaneAssignmentUpdates(current, [...destinationLane, ...updatedSourceLane]);
+    });
     const job = assignmentToMove.jobId ? jobMap.get(assignmentToMove.jobId) : null;
     const title = assignmentToMove.kind === "manual" ? assignmentToMove.manualTitle : `${job?.customerName || ""} ${job?.number || ""}`.trim();
     recordActivity(
-      "Moved schedule item",
+      movingWithinLane ? "Reordered schedule item" : "Moved schedule item",
       "Scheduler",
-      `${title || "Schedule item"} moved to Press ${press} on ${dayKey}.`,
+      movingWithinLane
+        ? `${title || "Schedule item"} was reordered on Press ${press} for ${dayKey}.`
+        : `${title || "Schedule item"} moved to Press ${press} on ${dayKey}.`,
       {
         assignmentId,
         fromDay: assignmentToMove.dayKey,
         fromPress: assignmentToMove.press,
         toDay: dayKey,
         toPress: press,
+        beforeAssignmentId,
       }
+    );
+  }
+
+  function moveAssignmentByStep(assignmentId, direction) {
+    if (!userCanMoveJobs) return;
+    const assignmentToMove = assignments.find((assignment) => assignment.id === assignmentId);
+    if (!assignmentToMove) return;
+    const laneAssignments = getSortedLaneAssignments(assignments, assignmentToMove.dayKey, assignmentToMove.press);
+    const currentIndex = laneAssignments.findIndex((assignment) => assignment.id === assignmentId);
+    const targetIndex = currentIndex + direction;
+    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= laneAssignments.length) return;
+
+    setAssignments((current) => {
+      const currentAssignment = current.find((assignment) => assignment.id === assignmentId);
+      if (!currentAssignment) return current;
+      const currentLane = getSortedLaneAssignments(current, currentAssignment.dayKey, currentAssignment.press);
+      const liveIndex = currentLane.findIndex((assignment) => assignment.id === assignmentId);
+      const liveTargetIndex = liveIndex + direction;
+      if (liveIndex < 0 || liveTargetIndex < 0 || liveTargetIndex >= currentLane.length) return current;
+      const reorderedLane = [...currentLane];
+      [reorderedLane[liveIndex], reorderedLane[liveTargetIndex]] = [reorderedLane[liveTargetIndex], reorderedLane[liveIndex]];
+      return applyLaneAssignmentUpdates(
+        current,
+        normalizeLaneAssignments(reorderedLane, currentAssignment.dayKey, currentAssignment.press)
+      );
+    });
+
+    const job = assignmentToMove.jobId ? jobMap.get(assignmentToMove.jobId) : null;
+    const title = assignmentToMove.kind === "manual" ? assignmentToMove.manualTitle : `${job?.customerName || ""} ${job?.number || ""}`.trim();
+    recordActivity(
+      "Reordered schedule item",
+      "Scheduler",
+      `${title || "Schedule item"} moved ${direction < 0 ? "up" : "down"} on Press ${assignmentToMove.press} for ${assignmentToMove.dayKey}.`,
+      { assignmentId, direction, dayKey: assignmentToMove.dayKey, press: assignmentToMove.press }
     );
   }
 
@@ -1939,18 +2106,21 @@ function SchedulerApp() {
     );
     if (exists) return;
 
-    setAssignments((current) => [
-      ...current,
-      {
-        ...assignmentToCopy,
-        id: makeId("asg"),
-        dayKey: nextDayKey,
-        createdAt: new Date().toISOString(),
-        finishedAt: null,
-        finishedBy: "",
-        status: "scheduled",
-      },
-    ]);
+    const nextAssignment = {
+      ...assignmentToCopy,
+      id: makeId("asg"),
+      dayKey: nextDayKey,
+      createdAt: new Date().toISOString(),
+      finishedAt: null,
+      finishedBy: "",
+      status: "scheduled",
+      laneOrder: null,
+    };
+    setAssignments((current) => {
+      const laneAssignments = getSortedLaneAssignments(current, nextDayKey, assignmentToCopy.press);
+      const nextLane = normalizeLaneAssignments([...laneAssignments, nextAssignment], nextDayKey, assignmentToCopy.press);
+      return applyLaneAssignmentUpdates(current, nextLane, [nextAssignment]);
+    });
     const job = assignmentToCopy.jobId ? jobMap.get(assignmentToCopy.jobId) : null;
     const title = assignmentToCopy.kind === "manual" ? assignmentToCopy.manualTitle : `${job?.customerName || ""} ${job?.number || ""}`.trim();
     recordActivity(
@@ -1965,7 +2135,15 @@ function SchedulerApp() {
     if (!userCanMoveJobs) return;
     const assignment = assignments.find((item) => item.id === assignmentId);
     if (!assignment) return;
-    setAssignments((current) => current.filter((assignment) => assignment.id !== assignmentId));
+    setAssignments((current) => {
+      const next = current.filter((item) => item.id !== assignmentId);
+      const updatedLane = normalizeLaneAssignments(
+        getSortedLaneAssignments(next, assignment.dayKey, assignment.press),
+        assignment.dayKey,
+        assignment.press
+      );
+      return applyLaneAssignmentUpdates(next, updatedLane);
+    });
     const job = assignment.jobId ? jobMap.get(assignment.jobId) : null;
     const title = assignment.kind === "manual" ? assignment.manualTitle : `${job?.customerName || ""} ${job?.number || ""}`.trim();
     recordActivity(
@@ -1973,6 +2151,38 @@ function SchedulerApp() {
       "Scheduler",
       `${title || "Schedule item"} was removed from Press ${assignment.press} on ${assignment.dayKey}.`,
       { assignmentId, dayKey: assignment.dayKey, press: assignment.press }
+    );
+  }
+
+  function getPressOperator(dayKey, press) {
+    return pressOperators[pressOperatorKey(dayKey, press)] || "";
+  }
+
+  function updatePressOperator(dayKey, press, value) {
+    if (!userCanEdit) return;
+    const key = pressOperatorKey(dayKey, press);
+    const nextValue = safeText(value);
+    setPressOperators((current) => {
+      if (nextValue) return { ...current, [key]: nextValue };
+      if (!(key in current)) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }
+
+  function commitPressOperator(dayKey, press, previousValue, value) {
+    if (!currentUser || !userCanEdit) return;
+    const previous = safeText(previousValue);
+    const nextValue = safeText(value);
+    if (previous === nextValue) return;
+    recordActivity(
+      nextValue ? "Updated press operator" : "Cleared press operator",
+      "Scheduler",
+      nextValue
+        ? `${nextValue} is assigned to Press ${press} on ${dayKey}.`
+        : `The operator was cleared from Press ${press} on ${dayKey}.`,
+      { dayKey, press, operator: nextValue }
     );
   }
 
@@ -2023,6 +2233,36 @@ function SchedulerApp() {
       recordActivity("Marked job done", "Scheduler", `${job.customerName} ${job.number} was marked done.`, {
         jobId,
         shipDate: defaultShipDate,
+      });
+    }
+  }
+
+  function undoFinishJob(jobId) {
+    if (!currentUser || !userCanEdit) return;
+    const job = jobMap.get(jobId);
+    const finishedAssignments = assignments.filter(
+      (assignment) => assignment.jobId === jobId && assignment.kind === "press" && assignment.status === "finished"
+    );
+    if (!finishedAssignments.length) return;
+
+    setAssignments((current) =>
+      current.map((assignment) =>
+        assignment.jobId === jobId && assignment.kind === "press" && assignment.status === "finished"
+          ? {
+              ...assignment,
+              status: "scheduled",
+              finishedAt: null,
+              finishedBy: "",
+              excludeFromShipping: false,
+            }
+          : assignment
+      )
+    );
+    setSelectedShipmentJobs((current) => current.filter((value) => value !== jobId));
+    setSelectedShipQueueJobs((current) => current.filter((value) => value !== jobId));
+    if (job) {
+      recordActivity("Reopened finished job", "Scheduler", `${job.customerName} ${job.number} was marked back to scheduled.`, {
+        jobId,
       });
     }
   }
@@ -3629,6 +3869,7 @@ function SchedulerApp() {
                       {weekColumns.map((day) => {
                         const laneJobs = board[day.key]?.[press] || [];
                         const totalHours = laneJobs.reduce((sum, item) => sum + (item.job?.estPressTime || 0), 0);
+                        const operatorName = getPressOperator(day.key, press);
                         return (
                           <div
                             key={`${press}-${day.key}`}
@@ -3636,16 +3877,25 @@ function SchedulerApp() {
                             onDrop={(event) => handleScheduleDrop(event, day.key, press)}
                             className="rounded-2xl border border-stone-300 bg-white p-2"
                           >
-                            <div className="mb-2 flex items-start justify-between gap-2">
+                            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                               <div className="text-[11px] text-stone-600">
                                 {laneJobs.length} jobs - {totalHours.toFixed(2)} hrs
                               </div>
+                              <input
+                                type="text"
+                                value={operatorName}
+                                onChange={(event) => updatePressOperator(day.key, press, event.target.value)}
+                                onBlur={(event) => commitPressOperator(day.key, press, operatorName, event.target.value)}
+                                placeholder="Operator"
+                                disabled={!userCanEdit}
+                                className="min-w-[110px] rounded-xl border border-stone-300 bg-stone-50 px-3 py-1.5 text-[11px] text-stone-800 outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
+                              />
                               <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">
                                 drop
                               </span>
                             </div>
                             <div className="space-y-2">
-                              {laneJobs.map(({ assignment, job }) => (
+                              {laneJobs.map(({ assignment, job }, index) => (
                                 <CompactScheduleCard
                                   key={assignment.id}
                                   job={job}
@@ -3654,10 +3904,16 @@ function SchedulerApp() {
                                   density={scheduleCardDensity}
                                   selected={job ? selectedJobId === job.id : false}
                                   onSelect={job ? () => selectJob(job.id) : undefined}
+                                  canMoveUp={userCanMoveJobs && index > 0}
+                                  canMoveDown={userCanMoveJobs && index < laneJobs.length - 1}
+                                  onMoveUp={userCanMoveJobs && index > 0 ? () => moveAssignmentByStep(assignment.id, -1) : undefined}
+                                  onMoveDown={userCanMoveJobs && index < laneJobs.length - 1 ? () => moveAssignmentByStep(assignment.id, 1) : undefined}
+                                  onDropBefore={userCanMoveJobs ? (event) => handleScheduleCardDrop(event, day.key, press, assignment.id) : undefined}
                                   onUnschedule={userCanMoveJobs ? () => removeAssignment(assignment.id) : undefined}
                                   onFinish={job && userCanEdit ? () => finishJob(job.id) : undefined}
+                                  onUndoFinish={job && userCanEdit && assignment.status === "finished" ? () => undoFinishJob(job.id) : undefined}
                                   onDuplicate={userCanMoveJobs ? () => duplicateAssignmentToNextDay(assignment.id) : undefined}
-                                  draggable={userCanMoveJobs && assignment.status !== "finished"}
+                                  draggable={userCanMoveJobs}
                                 />
                               ))}
                               {!laneJobs.length && (
@@ -3720,6 +3976,23 @@ function SchedulerApp() {
                         <Detail label="Footage" value={selectedJob.estFootage.toLocaleString()} />
                         <Detail label="Stock" value={selectedJob.stockDisplay || "-"} />
                       </div>
+                      {selectedJobFinishMeta && (
+                        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-950">
+                          <div>
+                            Marked done on {formatDateTime(selectedJobFinishMeta.finishedAt)}
+                            {selectedJobFinishMeta.finishedBy ? ` by ${selectedJobFinishMeta.finishedBy}` : ""}
+                          </div>
+                          {userCanEdit && (
+                            <button
+                              type="button"
+                              onClick={() => undoFinishJob(selectedJob.id)}
+                              className="mt-3 rounded-xl border border-emerald-300 bg-white px-3 py-2 text-[11px] font-medium text-emerald-950"
+                            >
+                              Unmark done
+                            </button>
+                          )}
+                        </div>
+                      )}
                       <div>
                         <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Notes</div>
                         <div className="max-h-56 overflow-auto whitespace-pre-wrap rounded-2xl bg-stone-100 p-3 text-sm text-stone-800">
@@ -3810,6 +4083,7 @@ function SchedulerApp() {
                             onClick={() => selectJob(job.id)}
                             finishedAt={job.finishMeta?.finishedAt}
                             finishedBy={job.finishMeta?.finishedBy}
+                            onUndoFinish={userCanEdit ? () => undoFinishJob(job.id) : undefined}
                           />
                         ))}
                       {!doneJobs.filter((job) => sameDay(job.finishMeta?.finishedAt, todayKey())).length && (
@@ -5462,6 +5736,7 @@ function JobCard({
   onDoubleClick,
   onQuickAssign,
   onFinish,
+  onUndoFinish,
   onUpdatePress,
   pressOptions = [],
   weekColumns,
@@ -5565,7 +5840,7 @@ function JobCard({
       {finishedAt && <div className="mt-2 text-xs text-stone-600">Finished {formatDateTime(finishedAt)}</div>}
       {finishedBy && <div className="mt-1 text-xs text-stone-600">Finished by {finishedBy}</div>}
 
-      {state !== "finished" && ((weekColumns && canMove) || onFinish) && (
+      {(state !== "finished" || onUndoFinish) && ((weekColumns && canMove) || onFinish || onUndoFinish) && (
         <div className="mt-3 flex flex-wrap gap-2">
           {weekColumns && canMove &&
             weekColumns.map((day) => (
@@ -5589,6 +5864,17 @@ function JobCard({
               className="rounded-xl bg-emerald-900 px-2 py-1 text-[11px] text-white"
             >
               Finish
+            </button>
+          )}
+          {onUndoFinish && (
+            <button
+              onClick={(event) => {
+                event.stopPropagation();
+                onUndoFinish();
+              }}
+              className="rounded-xl border border-emerald-300 bg-white px-2 py-1 text-[11px] text-emerald-950"
+            >
+              Unmark done
             </button>
           )}
         </div>
@@ -5707,8 +5993,14 @@ function CompactScheduleCard({
   density = "compact",
   selected = false,
   onSelect,
+  canMoveUp = false,
+  canMoveDown = false,
+  onMoveUp,
+  onMoveDown,
+  onDropBefore,
   onUnschedule,
   onFinish,
+  onUndoFinish,
   onDuplicate,
   draggable = false,
 }) {
@@ -5719,7 +6011,8 @@ function CompactScheduleCard({
   const showSubtitle = density !== "compact";
   const showStats = density === "detailed" && !isManual;
   const showFinishedStamp = density === "detailed" && !isManual;
-  const isCardDraggable = draggable && !!job;
+  const isCardDraggable = draggable;
+  const showReorderControls = canMoveUp || canMoveDown || onMoveUp || onMoveDown;
   const suppressClickUntilRef = useRef(0);
   const handleSelect = () => {
     if (Date.now() < suppressClickUntilRef.current) return;
@@ -5731,7 +6024,7 @@ function CompactScheduleCard({
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData(
       "application/json",
-      makeDragPayload({ type: "scheduled", assignmentId: assignment.id, jobId: job.id })
+      makeDragPayload({ type: "scheduled", assignmentId: assignment.id, jobId: job?.id || "" })
     );
   };
 
@@ -5742,6 +6035,15 @@ function CompactScheduleCard({
       onDragEnd={() => {
         suppressClickUntilRef.current = Date.now() + 150;
       }}
+      onDragOver={
+        onDropBefore
+          ? (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+          : undefined
+      }
+      onDrop={onDropBefore}
       className={`rounded-2xl border p-2 transition-colors ${selected ? "border-sky-300 bg-sky-50 ring-1 ring-sky-200" : "border-stone-300 bg-stone-100"} ${isCardDraggable ? "cursor-grab" : ""}`}
     >
       <div className="flex items-start justify-between gap-2">
@@ -5760,6 +6062,32 @@ function CompactScheduleCard({
           {showSubtitle && <div className="mt-1 line-clamp-2 text-[11px] text-stone-700">{subtitle}</div>}
         </div>
         <div className="flex items-start gap-2">
+          {showReorderControls && (
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onMoveUp?.();
+                }}
+                disabled={!canMoveUp}
+                className={`rounded-full border px-2 py-1 text-[10px] font-medium ${canMoveUp ? "border-stone-300 bg-white text-stone-800" : "border-stone-200 bg-stone-200 text-stone-400"}`}
+                aria-label="Move schedule item up">
+                &uarr;
+              </button>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onMoveDown?.();
+                }}
+                disabled={!canMoveDown}
+                className={`rounded-full border px-2 py-1 text-[10px] font-medium ${canMoveDown ? "border-stone-300 bg-white text-stone-800" : "border-stone-200 bg-stone-200 text-stone-400"}`}
+                aria-label="Move schedule item down">
+                &darr;
+              </button>
+            </div>
+          )}
           <span className={`rounded-full px-2 py-1 text-[10px] font-medium ${statusTone(state)}`}>{state}</span>
           {isCardDraggable && <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">drag</span>}
         </div>
@@ -5775,7 +6103,7 @@ function CompactScheduleCard({
           {formatDateTime(finishMeta.finishedAt)} {finishMeta.finishedBy ? `- ${finishMeta.finishedBy}` : ""}
         </div>
       )}
-      {(onUnschedule || onFinish || onDuplicate) && (
+      {(onUnschedule || onFinish || onUndoFinish || onDuplicate) && (
         <div className={`${density === "compact" ? "mt-1" : "mt-2"} flex flex-wrap gap-2`}>
           {onUnschedule && (
             <button onClick={onUnschedule} className="rounded-xl border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800">
@@ -5790,6 +6118,11 @@ function CompactScheduleCard({
           {onFinish && (
             <button onClick={onFinish} className="rounded-xl bg-emerald-900 px-2 py-1 text-[11px] text-white">
               Finish
+            </button>
+          )}
+          {onUndoFinish && (
+            <button onClick={onUndoFinish} className="rounded-xl border border-emerald-300 bg-white px-2 py-1 text-[11px] text-emerald-950">
+              Unmark done
             </button>
           )}
         </div>
@@ -5870,3 +6203,4 @@ export default function App() {
     </AppErrorBoundary>
   );
 }
+
