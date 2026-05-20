@@ -1794,11 +1794,18 @@ function SchedulerApp() {
       .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
   }, [allUserFinishedJobs, assignedShipmentJobIds]);
 
-  const readyToShipJobs = useMemo(() => {
-    return unassignedFinishedJobs
+  const dateDoneJobs = useMemo(() => {
+    return allUserFinishedJobs
       .filter((job) => sameDay(job.finishMeta?.finishedAt, selectedShipDate))
       .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
-  }, [selectedShipDate, unassignedFinishedJobs]);
+  }, [allUserFinishedJobs, selectedShipDate]);
+
+  const readyToShipJobs = useMemo(() => {
+    return dateDoneJobs
+      .filter((job) => !job.finishMeta?.excludeFromShipping)
+      .filter((job) => !assignedShipmentJobIds.has(job.id))
+      .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
+  }, [assignedShipmentJobIds, dateDoneJobs]);
 
   const shipmentGroupsForDay = useMemo(
     () =>
@@ -5256,7 +5263,7 @@ function SchedulerApp() {
                 <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
                     <div className="text-sm font-semibold">Date done on {selectedShipDate}</div>
-                    <div className="text-xs text-stone-600">This queue shows jobs finished on that date. Select one or more jobs, then create a shipment group whenever you are ready.</div>
+                    <div className="text-xs text-stone-600">This queue shows every job finished on that date. Grouped or removed jobs stay visible so you can still track what was done.</div>
                   </div>
                   <div className="flex items-center gap-2">
                     <button
@@ -5273,17 +5280,28 @@ function SchedulerApp() {
                     >
                       Clear
                     </button>
-                    <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{readyToShipJobs.length}</div>
+                    <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{dateDoneJobs.length}</div>
                   </div>
                 </div>
 
                 <div className="space-y-3">
-                  {readyToShipJobs.map((job) => (
-                    <label key={job.id} className="flex gap-3 rounded-2xl border border-stone-300 bg-white p-3">
+                  {dateDoneJobs.map((job) => {
+                    const isGrouped = assignedShipmentJobIds.has(job.id);
+                    const isRemoved = Boolean(job.finishMeta?.excludeFromShipping);
+                    const isSelectable = !isGrouped && !isRemoved;
+                    const statusLabel = isGrouped ? "grouped" : isRemoved ? "removed" : "ready";
+                    return (
+                    <label
+                      key={job.id}
+                      className={`flex gap-3 rounded-2xl border p-3 ${
+                        isSelectable ? "border-stone-300 bg-white" : "border-stone-200 bg-stone-100/80"
+                      }`}
+                    >
                       <input
                         type="checkbox"
                         checked={selectedShipmentJobs.includes(job.id)}
                         onChange={() => toggleShipmentJob(job.id)}
+                        disabled={!isSelectable}
                         className="mt-1 h-4 w-4"
                       />
                       <div className="min-w-0 flex-1">
@@ -5294,7 +5312,7 @@ function SchedulerApp() {
                             </div>
                             <div className="mt-1 text-xs text-stone-700">{job.generalDescr}</div>
                           </div>
-                          <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone("done")}`}>done</span>
+                          <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone(isSelectable ? "done" : "blocked")}`}>{statusLabel}</span>
                         </div>
                         <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-stone-700 md:grid-cols-4">
                           <InfoPill label="Press" value={job.press || "-"} />
@@ -5302,10 +5320,15 @@ function SchedulerApp() {
                           <InfoPill label="Finished" value={formatDateTime(job.finishMeta?.finishedAt)} />
                           <InfoPill label="By" value={job.finishMeta?.finishedBy || "-"} />
                         </div>
+                        {!isSelectable && (
+                          <div className="mt-2 text-xs text-stone-600">
+                            {isGrouped ? "Already included in a shipment group." : "Removed from the shipping queue."}
+                          </div>
+                        )}
                       </div>
                     </label>
-                  ))}
-                  {!readyToShipJobs.length && (
+                  )})}
+                  {!dateDoneJobs.length && (
                     <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
                       No finished jobs match that done date.
                     </div>
