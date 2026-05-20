@@ -1541,6 +1541,25 @@ function SchedulerApp() {
     return map;
   }, [activePressAssignments]);
 
+  const allScheduleLocationsByJobId = useMemo(() => {
+    const map = new Map();
+    assignments
+      .filter((assignment) => assignment.kind === "press" && visibleSchedulerJobIds.has(assignment.jobId))
+      .forEach((assignment) => {
+        const current = map.get(assignment.jobId) || [];
+        current.push(assignment);
+        map.set(assignment.jobId, current);
+      });
+    map.forEach((items) => {
+      items.sort((left, right) => {
+        if (left.dayKey !== right.dayKey) return left.dayKey.localeCompare(right.dayKey);
+        if (left.press !== right.press) return left.press.localeCompare(right.press);
+        return dateSortValue(left.finishedAt) - dateSortValue(right.finishedAt);
+      });
+    });
+    return map;
+  }, [assignments, visibleSchedulerJobIds]);
+
   const requestAssigneeOptions = useMemo(
     () => users.map((user) => user.username).sort((left, right) => left.localeCompare(right)),
     [users]
@@ -1549,7 +1568,6 @@ function SchedulerApp() {
   const unscheduledJobs = useMemo(() => {
     return filteredJobs
       .filter((job) => !isReleaseJob(job))
-      .filter((job) => !userFinishedJobIds.has(job.id))
       .filter((job) => {
         const isScheduled = activePressJobIds.has(job.id);
         if (queueScheduleFilter === "Scheduled") return isScheduled;
@@ -1579,7 +1597,7 @@ function SchedulerApp() {
         if (leftDate !== rightDate) return leftDate - rightDate;
         return right.estPressTime - left.estPressTime;
       });
-  }, [activePressJobIds, filteredJobs, jobSearchTextById, normalizedUnscheduledSearch, queuePressFilter, queuePriorityFilters, queueScheduleFilter, queueStatusFilter, userFinishedJobIds]);
+  }, [activePressJobIds, filteredJobs, jobSearchTextById, normalizedUnscheduledSearch, queuePressFilter, queuePriorityFilters, queueScheduleFilter, queueStatusFilter]);
 
   const allUserFinishedJobs = useMemo(() => {
     return jobs
@@ -1979,18 +1997,6 @@ function SchedulerApp() {
       methods,
     };
   }, [selectedShipDate, shipmentGroupsForDay, shipmentItemsByGroupId]);
-
-  const shipmentEmailAttachments = useMemo(() => {
-    const attachmentMap = new Map();
-    shipmentGroupsForDay.forEach((group) => {
-      normalizeAttachments(group.attachments).forEach((attachment) => {
-        if (!attachmentMap.has(attachment.id)) {
-          attachmentMap.set(attachment.id, attachment);
-        }
-      });
-    });
-    return Array.from(attachmentMap.values());
-  }, [shipmentGroupsForDay]);
 
   const shipmentEmailHistory = useMemo(
     () =>
@@ -3447,28 +3453,18 @@ function SchedulerApp() {
     });
   }
 
-  async function openShipmentEmailDraft() {
+  function openShipmentEmailDraft() {
     if (!userCanEdit) return;
     const recipients = safeText(shipmentEmailForm.recipients);
     const cc = safeText(shipmentEmailForm.cc);
-    const attachmentParts = await Promise.all(
-      shipmentEmailAttachments.map((attachment) => resolveEmailAttachment(attachment))
-    );
-    const fileContent = buildEmailDraftFile({
-      recipients,
-      cc,
-      subject: shipmentEmailDraft.subject,
-      body: shipmentEmailDraft.body,
-      attachments: [
-        {
-          name: `daily-shipment-${selectedShipDate}.txt`,
-          type: "text/plain; charset=utf-8",
-          base64: utf8ToBase64(shipmentEmailDraft.body),
-        },
-        ...attachmentParts.filter(Boolean),
-      ],
-    });
-    downloadFile(`daily-shipment-${selectedShipDate}.eml`, fileContent, "message/rfc822;charset=utf-8");
+    const queryParts = [
+      `subject=${encodeURIComponent(shipmentEmailDraft.subject)}`,
+      `body=${encodeURIComponent(shipmentEmailDraft.body)}`,
+    ];
+    if (cc) {
+      queryParts.push(`cc=${encodeURIComponent(cc)}`);
+    }
+    window.location.href = `mailto:${encodeURIComponent(recipients)}?${queryParts.join("&")}`;
   }
 
   function logShipmentEmail() {
@@ -4276,7 +4272,7 @@ function SchedulerApp() {
                               onOpenDetails={() => selectJob(job.id, true)}
                               onFinish={userCanEdit ? () => finishJob(job.id) : undefined}
                               canMove={userCanMoveJobs}
-                              scheduledAssignments={activeScheduleLocationsByJobId.get(job.id) || []}
+                              scheduledAssignments={allScheduleLocationsByJobId.get(job.id) || []}
                               pressOptions={PRESS_ORDER}
                               onUpdatePress={userCanMoveJobs ? (press) => updateJobRecommendedPress(job.id, press) : undefined}
                               weekColumns={weekColumns}
@@ -5451,7 +5447,7 @@ function SchedulerApp() {
                 <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
                   <div className="mb-4">
                     <div className="text-sm font-semibold">Daily shipment email</div>
-                    <div className="text-xs text-stone-600">Download an Outlook-ready draft for this ship date with normal spacing and attached shipment files, then log it so everyone can see it was already sent.</div>
+                    <div className="text-xs text-stone-600">Open a draft email for this ship date with normal spacing, then log it so everyone can see it was already sent.</div>
                   </div>
                   <div className="grid gap-3">
                     <Field
@@ -5523,9 +5519,6 @@ function SchedulerApp() {
                       <div className="font-semibold">{shipmentEmailDraft.subject}</div>
                       <div className="mt-2 text-xs text-stone-600">To: {shipmentEmailForm.recipients || "-"}</div>
                       <div className="mt-1 text-xs text-stone-600">CC: {shipmentEmailForm.cc || "-"}</div>
-                      <div className="mt-1 text-xs text-stone-600">
-                        Attachments: {shipmentEmailAttachments.length + 1} file{shipmentEmailAttachments.length === 0 ? "" : "s"} including the shipment summary text file
-                      </div>
                       <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap text-xs text-stone-700">{shipmentEmailDraft.body}</pre>
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -5535,7 +5528,7 @@ function SchedulerApp() {
                         onClick={openShipmentEmailDraft}
                         className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        Download email draft
+                        Open email draft
                       </button>
                       <button
                         type="button"
