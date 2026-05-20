@@ -1,7 +1,7 @@
 import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { isSupabaseConfigured, supabase } from "./lib/supabase";
 
-const PRESS_ORDER = ["5.1", "6.1", "1.1", "2.1", "8", "9", "Rewind"];
+const PRESS_ORDER = ["5.1", "6.1", "1.1", "2.1", "8", "9", "Extra Duties", "Rewind"];
 const STORAGE_KEY = "labeltraxx-scheduler-v4";
 const SESSION_STORAGE_KEY = "labeltraxx-scheduler-session-v1";
 const SHARED_STATE_ROW_ID = "labeltraxx-shared-state";
@@ -28,6 +28,8 @@ const EMPTY_REQUEST_FORM = {
   customer: "",
   requestorName: "",
   description: "",
+  requestType: "General Request",
+  assignedToAccount: "",
 };
 
 const EMPTY_PULL_PAPER_FORM = {
@@ -80,11 +82,13 @@ const EMPTY_SHIPMENT_FORM = {
 const EMPTY_EMAIL_FORM = {
   groupId: "",
   recipients: "",
+  cc: "",
 };
 
 const EMPTY_EMAIL_GROUP_FORM = {
   name: "",
   recipients: "",
+  cc: "",
 };
 
 const EMPTY_ACTIVITY_FILTERS = {
@@ -321,12 +325,14 @@ function normalizeJobs(jobs) {
         shipByDate: job.shipByDate ? new Date(job.shipByDate) : null,
         entryDate: job.entryDate ? new Date(job.entryDate) : null,
         dueOnSiteDate: job.dueOnSiteDate ? new Date(job.dueOnSiteDate) : null,
+        holdActive: !!job.holdActive,
+        holdNote: safeText(job.holdNote),
       }))
     : [];
 }
 
 function buildJobSearchText(job) {
-  return `${safeText(job.number)} ${safeText(job.customerName)} ${safeText(job.generalDescr)} ${safeText(job.notes)}`.toLowerCase();
+  return `${safeText(job.number)} ${safeText(job.customerName)} ${safeText(job.generalDescr)} ${safeText(job.notes)} ${safeText(job.holdNote)}`.toLowerCase();
 }
 
 function sanitizeAttachmentName(name) {
@@ -403,6 +409,8 @@ function normalizeRequests(requests) {
         attachments: normalizeAttachments(request.attachments),
         createdByAccount: request.createdByAccount || "",
         completedByAccount: request.completedByAccount || "",
+        requestType: safeText(request.requestType) || "General Request",
+        assignedToAccount: safeText(request.assignedToAccount),
       }))
     : [];
 }
@@ -493,6 +501,7 @@ function normalizeShipmentEmailLogs(logs) {
           id: log.id || `email-${index + 1}`,
           shipDate: safeText(log.shipDate),
           recipients: safeText(log.recipients),
+          cc: safeText(log.cc),
           subject: safeText(log.subject),
           body: safeText(log.body),
           jobCount: parseNumber(log.jobCount),
@@ -513,8 +522,9 @@ function normalizeShipmentEmailGroups(groups) {
           id: group.id || `email-group-${index + 1}`,
           name: safeText(group.name),
           recipients: safeText(group.recipients),
+          cc: safeText(group.cc),
         }))
-        .filter((group) => group.name && group.recipients)
+        .filter((group) => group.name && (group.recipients || group.cc))
     : [];
 }
 
@@ -527,11 +537,21 @@ function normalizePressOperators(operators) {
   );
 }
 
+function normalizePressDuties(duties) {
+  const source = duties && typeof duties === "object" ? duties : {};
+  return Object.fromEntries(
+    Object.entries(source)
+      .map(([key, value]) => [safeText(key), safeText(value)])
+      .filter(([key, value]) => key && value)
+  );
+}
+
 function defaultSharedSnapshot() {
   return {
     jobs: [],
     assignments: [],
     pressOperators: {},
+    pressDuties: {},
     requests: [],
     pullPaperRequests: [],
     notes: [],
@@ -553,6 +573,7 @@ function normalizeSharedSnapshot(snapshot) {
     jobs: normalizeJobs(source.jobs),
     assignments: normalizeAssignments(source.assignments),
     pressOperators: normalizePressOperators(source.pressOperators),
+    pressDuties: normalizePressDuties(source.pressDuties),
     requests: normalizeRequests(source.requests),
     pullPaperRequests: normalizePullPaperRequests(source.pullPaperRequests),
     notes: normalizeNotes(source.notes),
@@ -573,6 +594,7 @@ function buildSharedSnapshot(state) {
     jobs: state.jobs,
     assignments: state.assignments,
     pressOperators: state.pressOperators,
+    pressDuties: state.pressDuties,
     requests: state.requests,
     pullPaperRequests: state.pullPaperRequests,
     notes: state.notes,
@@ -687,6 +709,16 @@ function normalizePressValue(value) {
   if (normalized === "1") return "1.1";
   if (normalized === "2") return "2.1";
   return normalized;
+}
+
+function formatPressLabel(press) {
+  const normalized = safeText(press);
+  if (!normalized) return "-";
+  return normalized === "Extra Duties" ? normalized : `Press ${normalized}`;
+}
+
+function isReleaseJob(job) {
+  return comparableUsername(job?.priority).includes("release");
 }
 
 function parseLabelTraxxText(text) {
@@ -881,11 +913,22 @@ function pressOperatorKey(dayKey, press) {
   return `${safeText(dayKey)}::${safeText(press)}`;
 }
 
+function canUserViewRequest(user, request) {
+  if (!request) return false;
+  if (hasManagementAccess(user)) return true;
+  const username = safeText(user?.username);
+  if (!username) return false;
+  const assignedTo = safeText(request.assignedToAccount);
+  if (!assignedTo) return true;
+  return comparableUsername(assignedTo) === comparableUsername(username) || comparableUsername(request.createdByAccount) === comparableUsername(username);
+}
+
 function SchedulerApp() {
   const [isReady, setIsReady] = useState(false);
   const [jobs, setJobs] = useState([]);
   const [assignments, setAssignments] = useState([]);
   const [pressOperators, setPressOperators] = useState({});
+  const [pressDuties, setPressDuties] = useState({});
   const [requests, setRequests] = useState([]);
   const [pullPaperRequests, setPullPaperRequests] = useState([]);
   const [notes, setNotes] = useState([]);
@@ -958,6 +1001,7 @@ function SchedulerApp() {
       setJobs(normalized.jobs);
       setAssignments(normalized.assignments);
       setPressOperators(normalized.pressOperators);
+      setPressDuties(normalized.pressDuties);
       setRequests(normalized.requests);
       setPullPaperRequests(normalized.pullPaperRequests);
       setNotes(normalized.notes);
@@ -1064,6 +1108,7 @@ function SchedulerApp() {
       jobs,
       assignments,
       pressOperators,
+      pressDuties,
       requests,
       pullPaperRequests,
       notes,
@@ -1121,7 +1166,7 @@ function SchedulerApp() {
     return () => {
       window.clearTimeout(saveTimerRef.current);
     };
-  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressOperators, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, suppliesRequests, users, weekStart]);
+  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressDuties, pressOperators, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, suppliesRequests, users, weekStart]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -1285,6 +1330,8 @@ function SchedulerApp() {
     const map = new Map();
     assignments.forEach((assignment) => {
       if (assignment.kind !== "press" || !assignment.jobId) return;
+      const job = jobMap.get(assignment.jobId);
+      if (job && isReleaseJob(job) && assignment.status !== "finished") return;
       const current = map.get(assignment.jobId);
       if (current) {
         current.push(assignment);
@@ -1299,7 +1346,7 @@ function SchedulerApp() {
       });
     });
     return map;
-  }, [assignments]);
+  }, [assignments, jobMap]);
   const normalizedSearch = deferredSearch.trim().toLowerCase();
   const normalizedUnscheduledSearch = deferredUnscheduledSearch.trim().toLowerCase();
   const normalizedLocationSearch = deferredLocationSearch.trim().toLowerCase();
@@ -1356,15 +1403,25 @@ function SchedulerApp() {
     [finishedMetaByJobId]
   );
 
+  const visibleSchedulerJobIds = useMemo(
+    () =>
+      new Set(
+        filteredJobs
+          .filter((job) => !isReleaseJob(job) || userFinishedJobIds.has(job.id))
+          .map((job) => job.id)
+      ),
+    [filteredJobs, userFinishedJobIds]
+  );
+
   const activePressAssignments = useMemo(
     () =>
       assignments.filter(
         (assignment) =>
           assignment.kind === "press" &&
           assignment.status !== "finished" &&
-          filteredJobIds.has(assignment.jobId)
+          visibleSchedulerJobIds.has(assignment.jobId)
       ),
-    [assignments, filteredJobIds]
+    [assignments, visibleSchedulerJobIds]
   );
 
   const activePressJobIds = useMemo(
@@ -1372,8 +1429,30 @@ function SchedulerApp() {
     [activePressAssignments]
   );
 
+  const activeScheduleLocationsByJobId = useMemo(() => {
+    const map = new Map();
+    activePressAssignments.forEach((assignment) => {
+      const current = map.get(assignment.jobId) || [];
+      current.push(assignment);
+      map.set(assignment.jobId, current);
+    });
+    map.forEach((items) => {
+      items.sort((left, right) => {
+        if (left.dayKey !== right.dayKey) return left.dayKey.localeCompare(right.dayKey);
+        return left.press.localeCompare(right.press);
+      });
+    });
+    return map;
+  }, [activePressAssignments]);
+
+  const requestAssigneeOptions = useMemo(
+    () => users.map((user) => user.username).sort((left, right) => left.localeCompare(right)),
+    [users]
+  );
+
   const unscheduledJobs = useMemo(() => {
     return filteredJobs
+      .filter((job) => !isReleaseJob(job))
       .filter((job) => !userFinishedJobIds.has(job.id))
       .filter((job) => {
         if (queueStatusFilter === "All") return true;
@@ -1486,7 +1565,7 @@ function SchedulerApp() {
         map[assignment.dayKey][assignment.press].push({ assignment, job: null });
         return;
       }
-      if (!filteredJobIds.has(assignment.jobId)) return;
+      if (!visibleSchedulerJobIds.has(assignment.jobId)) return;
       const job = jobMap.get(assignment.jobId);
       if (!job) return;
       map[assignment.dayKey][assignment.press].push({ assignment, job });
@@ -1499,23 +1578,25 @@ function SchedulerApp() {
     });
 
     return map;
-  }, [assignments, filteredJobIds, jobMap, weekColumns]);
+  }, [assignments, jobMap, visibleSchedulerJobIds, weekColumns]);
 
   const openRequests = useMemo(
     () =>
       requests
         .filter((request) => request.status === "open")
+        .filter((request) => canUserViewRequest(currentUser, request))
         .sort((left, right) => dateSortValue(right.createdAt) - dateSortValue(left.createdAt)),
-    [requests]
+    [currentUser, requests]
   );
 
   const requestHistory = useMemo(
     () =>
       requests
         .filter((request) => request.status === "done")
+        .filter((request) => canUserViewRequest(currentUser, request))
         .filter((request) => !requestHistoryFilterDate || sameDay(request.completedAt, requestHistoryFilterDate))
         .sort((left, right) => dateSortValue(right.completedAt) - dateSortValue(left.completedAt)),
-    [requestHistoryFilterDate, requests]
+    [currentUser, requestHistoryFilterDate, requests]
   );
 
   const pendingRegistrationRequests = useMemo(
@@ -1690,6 +1771,7 @@ function SchedulerApp() {
   const jobsDueToday = useMemo(
     () =>
       jobs
+        .filter((job) => !isReleaseJob(job))
         .filter((job) => job.shipByDate && isoDate(job.shipByDate) === todayDateKey && !userFinishedJobIds.has(job.id))
         .sort((left, right) => left.estPressTime - right.estPressTime),
     [jobs, todayDateKey, userFinishedJobIds]
@@ -1824,7 +1906,23 @@ function SchedulerApp() {
   function importText(text) {
     const parsed = parseLabelTraxxText(text);
     if (!parsed.length) return;
-    setJobs(parsed);
+    setJobs((current) => {
+      const currentById = new Map(current.map((job) => [job.id, job]));
+      return parsed.map((job) => {
+        const previous = currentById.get(job.id);
+        return previous
+          ? {
+              ...job,
+              holdActive: !!previous.holdActive,
+              holdNote: safeText(previous.holdNote),
+            }
+          : {
+              ...job,
+              holdActive: false,
+              holdNote: "",
+            };
+      });
+    });
     setAssignments((current) =>
       current.filter(
         (assignment) => assignment.kind === "manual" || parsed.some((job) => job.id === assignment.jobId)
@@ -1888,6 +1986,8 @@ function SchedulerApp() {
 
   function addAssignment(jobId, dayKey, press, beforeAssignmentId = "") {
     if (!userCanMoveJobs) return;
+    const job = jobMap.get(jobId);
+    if (job && isReleaseJob(job)) return;
     const exists = assignments.some(
       (assignment) =>
         assignment.jobId === jobId &&
@@ -1897,7 +1997,6 @@ function SchedulerApp() {
         assignment.status !== "finished"
     );
     if (exists) return;
-    const job = jobMap.get(jobId);
     const newAssignment = {
       id: makeId("asg"),
       jobId,
@@ -2186,6 +2285,38 @@ function SchedulerApp() {
     );
   }
 
+  function getPressDuty(dayKey, press) {
+    return pressDuties[pressOperatorKey(dayKey, press)] || "";
+  }
+
+  function updatePressDuty(dayKey, press, value) {
+    if (!userCanEdit) return;
+    const key = pressOperatorKey(dayKey, press);
+    const nextValue = safeText(value);
+    setPressDuties((current) => {
+      if (nextValue) return { ...current, [key]: nextValue };
+      if (!(key in current)) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }
+
+  function commitPressDuty(dayKey, press, previousValue, value) {
+    if (!currentUser || !userCanEdit) return;
+    const previous = safeText(previousValue);
+    const nextValue = safeText(value);
+    if (previous === nextValue) return;
+    recordActivity(
+      nextValue ? "Updated press duty" : "Cleared press duty",
+      "Scheduler",
+      nextValue
+        ? `${formatPressLabel(press)} on ${dayKey} is set to ${nextValue}.`
+        : `The duty was cleared from ${formatPressLabel(press)} on ${dayKey}.`,
+      { dayKey, press, duty: nextValue }
+    );
+  }
+
   function finishJob(jobId) {
     if (!currentUser || !userCanEdit) return;
     const finishedAt = new Date().toISOString();
@@ -2272,6 +2403,7 @@ function SchedulerApp() {
     const nextAssignments = [...assignments];
     let addedCount = 0;
     jobs.forEach((job) => {
+      if (isReleaseJob(job)) return;
       if (!job.shipByDate) return;
       const dayKey = isoDate(job.shipByDate);
       if (!weekKeys.has(dayKey)) return;
@@ -2452,10 +2584,15 @@ function SchedulerApp() {
       return;
     }
 
+    const assignedToAccount = safeText(requestForm.assignedToAccount);
+    const requestType = safeText(requestForm.requestType) || "General Request";
+
     setRequests((current) => [
       {
         id: makeId("req"),
         ...requestForm,
+        assignedToAccount,
+        requestType,
         attachments: requestDraftAttachments,
         createdAt: new Date().toISOString(),
         createdByAccount: currentUser.username,
@@ -2465,7 +2602,12 @@ function SchedulerApp() {
       },
       ...current,
     ]);
-    recordActivity("Created request", "Requests", `${requestForm.customer} ${requestForm.jobNumber} was added to open requests.`);
+    recordActivity(
+      "Created request",
+      "Requests",
+      `${requestForm.customer} ${requestForm.jobNumber} was added to open requests${assignedToAccount ? ` for ${assignedToAccount}` : ""}.`,
+      { requestType, assignedToAccount }
+    );
     setRequestForm(EMPTY_REQUEST_FORM);
     setRequestDraftAttachments([]);
     setActiveTab("Open Requests");
@@ -2889,6 +3031,45 @@ function SchedulerApp() {
     }
   }
 
+  function updateJobHoldState(jobId, holdActive) {
+    if (!userCanEdit) return;
+    const job = jobMap.get(jobId);
+    setJobs((current) =>
+      current.map((item) =>
+        item.id === jobId
+          ? {
+              ...item,
+              holdActive: !!holdActive,
+            }
+          : item
+      )
+    );
+    if (job) {
+      recordActivity(
+        holdActive ? "Marked job hold" : "Cleared job hold",
+        "Scheduler",
+        holdActive
+          ? `${job.customerName} ${job.number} was marked on hold.`
+          : `${job.customerName} ${job.number} was taken off hold.`,
+        { jobId, holdActive: !!holdActive }
+      );
+    }
+  }
+
+  function updateJobHoldNote(jobId, holdNote) {
+    if (!userCanEdit) return;
+    setJobs((current) =>
+      current.map((item) =>
+        item.id === jobId
+          ? {
+              ...item,
+              holdNote,
+            }
+          : item
+      )
+    );
+  }
+
   function addNote(event) {
     event.preventDefault();
     if (!currentUser || !userCanEdit) return;
@@ -2993,10 +3174,12 @@ function SchedulerApp() {
   function openShipmentEmailDraft() {
     if (!userCanEdit) return;
     const recipients = safeText(shipmentEmailForm.recipients);
+    const cc = safeText(shipmentEmailForm.cc);
     const params = new URLSearchParams({
       subject: shipmentEmailDraft.subject,
       body: shipmentEmailDraft.body,
     });
+    if (cc) params.set("cc", cc);
     window.location.href = `mailto:${encodeURIComponent(recipients)}?${params.toString()}`;
   }
 
@@ -3007,6 +3190,7 @@ function SchedulerApp() {
         id: makeId("email"),
         shipDate: selectedShipDate,
         recipients: safeText(shipmentEmailForm.recipients),
+        cc: safeText(shipmentEmailForm.cc),
         subject: shipmentEmailDraft.subject,
         body: shipmentEmailDraft.body,
         jobCount: shipmentEmailDraft.jobCount,
@@ -3021,8 +3205,8 @@ function SchedulerApp() {
     recordActivity(
       "Logged shipment email",
       "Shipping",
-      `Shipment email for ${selectedShipDate} was marked sent to ${safeText(shipmentEmailForm.recipients) || "the saved group"}.`,
-      { shipDate: selectedShipDate, recipients: safeText(shipmentEmailForm.recipients) }
+      `Shipment email for ${selectedShipDate} was marked sent to ${safeText(shipmentEmailForm.recipients) || "the saved group"}${safeText(shipmentEmailForm.cc) ? ` with cc ${safeText(shipmentEmailForm.cc)}` : ""}.`,
+      { shipDate: selectedShipDate, recipients: safeText(shipmentEmailForm.recipients), cc: safeText(shipmentEmailForm.cc) }
     );
   }
 
@@ -3045,6 +3229,7 @@ function SchedulerApp() {
     setShipmentEmailForm({
       groupId,
       recipients: group?.recipients || "",
+      cc: group?.cc || "",
     });
   }
 
@@ -3052,17 +3237,18 @@ function SchedulerApp() {
     if (!userCanEdit) return;
     const name = safeText(shipmentEmailGroupForm.name);
     const recipients = safeText(shipmentEmailGroupForm.recipients || shipmentEmailForm.recipients);
-    if (!name || !recipients) return;
+    const cc = safeText(shipmentEmailGroupForm.cc || shipmentEmailForm.cc);
+    if (!name || (!recipients && !cc)) return;
 
     setShipmentEmailGroups((current) => {
       const existing = current.find((group) => comparableUsername(group.name) === comparableUsername(name));
       if (existing) {
-        return current.map((group) => (group.id === existing.id ? { ...group, name, recipients } : group));
+        return current.map((group) => (group.id === existing.id ? { ...group, name, recipients, cc } : group));
       }
-      return [...current, { id: makeId("email-group"), name, recipients }];
+      return [...current, { id: makeId("email-group"), name, recipients, cc }];
     });
 
-    setShipmentEmailForm((current) => ({ ...current, recipients }));
+    setShipmentEmailForm((current) => ({ ...current, recipients, cc }));
     setShipmentEmailGroupForm(EMPTY_EMAIL_GROUP_FORM);
     recordActivity("Saved email group", "Shipping", `${name} was saved as a shipment email group.`);
   }
@@ -3072,7 +3258,7 @@ function SchedulerApp() {
     const group = shipmentEmailGroups.find((item) => item.id === groupId);
     setShipmentEmailGroups((current) => current.filter((group) => group.id !== groupId));
     setShipmentEmailForm((current) =>
-      current.groupId === groupId ? { groupId: "", recipients: "" } : current
+      current.groupId === groupId ? { groupId: "", recipients: "", cc: "" } : current
     );
     if (group) {
       recordActivity("Removed email group", "Shipping", `${group.name} was removed from shipment email groups.`);
@@ -3409,7 +3595,7 @@ function SchedulerApp() {
                       <div key={item.assignment.id} className="rounded-2xl border border-stone-300 bg-white p-3">
                         <div className="mb-2 flex flex-wrap items-center gap-2">
                           <span className="rounded-full bg-stone-200 px-2 py-1 text-[11px] font-medium text-stone-800">
-                            Press {item.press}
+                            {formatPressLabel(item.press)}
                           </span>
                           <span
                             className={`rounded-full px-2 py-1 text-[11px] font-medium ${
@@ -3460,7 +3646,7 @@ function SchedulerApp() {
                             </div>
                             <div className="mt-1 text-xs text-stone-700">{job.generalDescr}</div>
                             <div className="mt-2 text-[11px] text-stone-600">
-                              Press {job.press || "-"} · EST {job.estPressTime.toFixed(2)} hrs
+                              {formatPressLabel(job.press || "-")} · EST {job.estPressTime.toFixed(2)} hrs
                             </div>
                           </div>
                           <button
@@ -3673,7 +3859,7 @@ function SchedulerApp() {
                           >
                             {PRESS_ORDER.map((press) => (
                               <option key={press} value={press}>
-                                Press {press}
+                                  {formatPressLabel(press)}
                               </option>
                             ))}
                           </select>
@@ -3763,6 +3949,7 @@ function SchedulerApp() {
                         onFinish={userCanEdit ? () => finishJob(job.id) : undefined}
                         weekColumns={weekColumns}
                         canMove={userCanMoveJobs}
+                        scheduledAssignments={activeScheduleLocationsByJobId.get(job.id) || []}
                         pressOptions={PRESS_ORDER}
                         onUpdatePress={userCanMoveJobs ? (press) => updateJobRecommendedPress(job.id, press) : undefined}
                         onQuickAssign={(dayKey) => addAssignment(job.id, dayKey, PRESS_ORDER.includes(job.press) ? job.press : "Rewind")}
@@ -3804,7 +3991,7 @@ function SchedulerApp() {
                     <option value="All">All presses</option>
                     {PRESS_ORDER.map((press) => (
                       <option key={press} value={press}>
-                        Press {press}
+                        {formatPressLabel(press)}
                       </option>
                     ))}
                   </select>
@@ -3863,13 +4050,14 @@ function SchedulerApp() {
                   {visibleScheduleRows.map((press) => (
                     <React.Fragment key={press}>
                       <div className="rounded-2xl border border-stone-300 bg-stone-100 px-4 py-3">
-                        <div className="text-sm font-semibold text-stone-900">Press {press}</div>
+                        <div className="text-sm font-semibold text-stone-900">{formatPressLabel(press)}</div>
                         <div className="mt-1 text-[11px] text-stone-600">Aligned across the week</div>
                       </div>
                       {weekColumns.map((day) => {
                         const laneJobs = board[day.key]?.[press] || [];
                         const totalHours = laneJobs.reduce((sum, item) => sum + (item.job?.estPressTime || 0), 0);
                         const operatorName = getPressOperator(day.key, press);
+                        const dutyName = getPressDuty(day.key, press);
                         return (
                           <div
                             key={`${press}-${day.key}`}
@@ -3881,18 +4069,29 @@ function SchedulerApp() {
                               <div className="text-[11px] text-stone-600">
                                 {laneJobs.length} jobs - {totalHours.toFixed(2)} hrs
                               </div>
-                              <input
-                                type="text"
-                                value={operatorName}
-                                onChange={(event) => updatePressOperator(day.key, press, event.target.value)}
-                                onBlur={(event) => commitPressOperator(day.key, press, operatorName, event.target.value)}
-                                placeholder="Operator"
-                                disabled={!userCanEdit}
-                                className="min-w-[110px] rounded-xl border border-stone-300 bg-stone-50 px-3 py-1.5 text-[11px] text-stone-800 outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
-                              />
-                              <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">
-                                drop
-                              </span>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <input
+                                  type="text"
+                                  value={operatorName}
+                                  onChange={(event) => updatePressOperator(day.key, press, event.target.value)}
+                                  onBlur={(event) => commitPressOperator(day.key, press, operatorName, event.target.value)}
+                                  placeholder="Operator"
+                                  disabled={!userCanEdit}
+                                  className="min-w-[110px] rounded-xl border border-stone-300 bg-stone-50 px-3 py-1.5 text-[11px] text-stone-800 outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
+                                />
+                                <input
+                                  type="text"
+                                  value={dutyName}
+                                  onChange={(event) => updatePressDuty(day.key, press, event.target.value)}
+                                  onBlur={(event) => commitPressDuty(day.key, press, dutyName, event.target.value)}
+                                  placeholder="Duty"
+                                  disabled={!userCanEdit}
+                                  className="min-w-[110px] rounded-xl border border-stone-300 bg-stone-50 px-3 py-1.5 text-[11px] text-stone-800 outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
+                                />
+                                <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">
+                                  drop
+                                </span>
+                              </div>
                             </div>
                             <div className="space-y-2">
                               {laneJobs.map(({ assignment, job }, index) => (
@@ -3965,7 +4164,7 @@ function SchedulerApp() {
                         <div className="text-stone-700">{selectedJob.generalDescr}</div>
                       </div>
                       <div className="grid grid-cols-2 gap-3 text-xs text-stone-700">
-                        <Detail label="Default press" value={selectedJob.press || "-"} />
+                        <Detail label="Default press" value={selectedJob.press ? formatPressLabel(selectedJob.press) : "-"} />
                         <Detail label="Priority" value={selectedJob.priority || "-"} />
                         <Detail label="Ship by" value={formatDate(selectedJob.shipByDate)} />
                         <Detail label="Imported status" value={selectedJob.ticketStatus || "-"} />
@@ -3993,8 +4192,36 @@ function SchedulerApp() {
                           )}
                         </div>
                       )}
+                      <div className={`rounded-2xl border p-4 ${selectedJob.holdActive ? "border-rose-300 bg-rose-50" : "border-stone-300 bg-white/60"}`}>
+                        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                          <div>
+                            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Job hold</div>
+                            <div className="mt-1 text-sm text-stone-700">Keep a red hold note on this job even after new TXT imports.</div>
+                          </div>
+                          <label className="flex items-center gap-2 text-sm font-medium text-stone-800">
+                            <input
+                              type="checkbox"
+                              checked={!!selectedJob.holdActive}
+                              onChange={(event) => updateJobHoldState(selectedJob.id, event.target.checked)}
+                              disabled={!userCanEdit}
+                              className="h-4 w-4"
+                            />
+                            <span>Highlight this job as hold</span>
+                          </label>
+                        </div>
+                        <div className="mt-3">
+                          <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Hold reason</div>
+                          <textarea
+                            value={selectedJob.holdNote || ""}
+                            onChange={(event) => updateJobHoldNote(selectedJob.id, event.target.value)}
+                            disabled={!userCanEdit}
+                            placeholder="Why is this job on hold?"
+                            className="h-24 w-full rounded-2xl border border-stone-300 bg-white px-3 py-3 text-sm outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
+                          />
+                        </div>
+                      </div>
                       <div>
-                        <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Notes</div>
+                        <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Imported notes</div>
                         <div className="max-h-56 overflow-auto whitespace-pre-wrap rounded-2xl bg-stone-100 p-3 text-sm text-stone-800">
                           {selectedJob.notes || "No notes on this job."}
                         </div>
@@ -4047,7 +4274,7 @@ function SchedulerApp() {
                               >
                                 <span>{location.dayKey}</span>
                                 <span>
-                                  Press {location.press} · {location.status === "finished" ? "done" : location.status}
+                                  {formatPressLabel(location.press)} · {location.status === "finished" ? "done" : location.status}
                                 </span>
                               </button>
                             )) : (
@@ -4202,6 +4429,34 @@ function SchedulerApp() {
                   onChange={(value) => setRequestForm((current) => ({ ...current, requestorName: value }))}
                   placeholder="Who is asking for it"
                 />
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div>
+                    <div className="mb-2 text-sm font-medium text-stone-800">Request type</div>
+                    <select
+                      value={requestForm.requestType}
+                      onChange={(event) => setRequestForm((current) => ({ ...current, requestType: event.target.value }))}
+                      className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                    >
+                      <option>General Request</option>
+                      <option>Ticket Checklist</option>
+                    </select>
+                  </div>
+                  <div>
+                    <div className="mb-2 text-sm font-medium text-stone-800">Send to one user</div>
+                    <select
+                      value={requestForm.assignedToAccount}
+                      onChange={(event) => setRequestForm((current) => ({ ...current, assignedToAccount: event.target.value }))}
+                      className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                    >
+                      <option value="">Everyone with access</option>
+                      {requestAssigneeOptions.map((username) => (
+                        <option key={username} value={username}>
+                          {username}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
                 <div>
                   <div className="mb-2 text-sm font-medium text-stone-800">Description</div>
                   <textarea
@@ -4245,7 +4500,7 @@ function SchedulerApp() {
             <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
               <div className="mb-4">
                 <div className="text-sm font-semibold">Request workflow</div>
-                <div className="text-xs text-stone-600">Open requests live in their own tab. Mark done records which logged-in user completed the request and when.</div>
+                <div className="text-xs text-stone-600">Use Ticket Checklist when a job needs a second check, and optionally route it to just one user instead of the full queue.</div>
               </div>
               <div className="grid gap-3">
                 <StatRow label="Open requests" value={openRequests.length} />
@@ -4663,12 +4918,28 @@ function SchedulerApp() {
 
             <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_420px]">
               <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
-                <div className="mb-4 flex items-center justify-between">
+                <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
                     <div className="text-sm font-semibold">Ready to ship on {selectedShipDate}</div>
                     <div className="text-xs text-stone-600">Select one or more jobs, then create a shipment group.</div>
                   </div>
-                  <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{readyToShipJobs.length}</div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedShipmentJobs(readyToShipJobs.map((job) => job.id))}
+                      className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800"
+                    >
+                      Select all
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedShipmentJobs([])}
+                      className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800"
+                    >
+                      Clear
+                    </button>
+                    <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{readyToShipJobs.length}</div>
+                  </div>
                 </div>
 
                 <div className="space-y-3">
@@ -4850,6 +5121,12 @@ function SchedulerApp() {
                       onChange={(value) => setShipmentEmailForm((current) => ({ ...current, recipients: value }))}
                       placeholder="shipping@company.com; billing@company.com"
                     />
+                    <Field
+                      label="CC"
+                      value={shipmentEmailForm.cc}
+                      onChange={(value) => setShipmentEmailForm((current) => ({ ...current, cc: value }))}
+                      placeholder="manager@company.com; office@company.com"
+                    />
                     <div className="rounded-2xl border border-stone-300 bg-white p-4">
                       <div className="mb-3 text-sm font-semibold">Email groups</div>
                       <div className="grid gap-3">
@@ -4887,6 +5164,12 @@ function SchedulerApp() {
                           onChange={(value) => setShipmentEmailGroupForm((current) => ({ ...current, recipients: value }))}
                           placeholder="team1@company.com; team2@company.com"
                         />
+                        <Field
+                          label="Group CC"
+                          value={shipmentEmailGroupForm.cc}
+                          onChange={(value) => setShipmentEmailGroupForm((current) => ({ ...current, cc: value }))}
+                          placeholder="lead@company.com; accounting@company.com"
+                        />
                         <button
                           type="button"
                           disabled={!userCanEdit}
@@ -4899,6 +5182,8 @@ function SchedulerApp() {
                     </div>
                     <div className="rounded-2xl bg-stone-100 p-4 text-sm text-stone-800">
                       <div className="font-semibold">{shipmentEmailDraft.subject}</div>
+                      <div className="mt-2 text-xs text-stone-600">To: {shipmentEmailForm.recipients || "-"}</div>
+                      <div className="mt-1 text-xs text-stone-600">CC: {shipmentEmailForm.cc || "-"}</div>
                       <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap text-xs text-stone-700">{shipmentEmailDraft.body}</pre>
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -5097,6 +5382,7 @@ function SchedulerApp() {
                         Sent by {log.createdBy || "-"} on {formatDateTime(log.createdAt)}
                       </div>
                       <div className="mt-1 text-xs text-stone-600">Recipients: {log.recipients || "-"}</div>
+                      <div className="mt-1 text-xs text-stone-600">CC: {log.cc || "-"}</div>
                       <div className="mt-1 text-xs text-stone-600">
                         Methods: {log.methods.length ? log.methods.join(", ") : "-"} · Cost {formatCurrency(log.totalCost)} · Bill {formatCurrency(log.totalBill)}
                       </div>
@@ -5672,6 +5958,14 @@ function RequestCard({
               <div className="text-sm font-semibold">
                 {request.customer} - {request.jobNumber}
               </div>
+              <span className="rounded-full bg-stone-200 px-2 py-1 text-[11px] font-medium text-stone-800">
+                {request.requestType || "General Request"}
+              </span>
+              {request.assignedToAccount && (
+                <span className="rounded-full bg-sky-100 px-2 py-1 text-[11px] font-medium text-sky-900">
+                  For {request.assignedToAccount}
+                </span>
+              )}
               <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone(request.status)}`}>
                 {request.status}
               </span>
@@ -5738,6 +6032,7 @@ function JobCard({
   onFinish,
   onUndoFinish,
   onUpdatePress,
+  scheduledAssignments = [],
   pressOptions = [],
   weekColumns,
   finishedAt,
@@ -5746,6 +6041,11 @@ function JobCard({
   selected = false,
 }) {
   const isDraggable = state !== "finished" && canMove;
+  const cardTone = selected
+    ? "border-sky-300 bg-sky-50 shadow-sky-100/70 ring-1 ring-sky-200"
+    : job.holdActive
+      ? "border-rose-300 bg-rose-50 shadow-rose-100/70"
+      : "border-stone-300 bg-white shadow-stone-300/20";
   const suppressClickUntilRef = useRef(0);
   const handleCardClick = () => {
     if (Date.now() < suppressClickUntilRef.current) return;
@@ -5770,7 +6070,7 @@ function JobCard({
         suppressClickUntilRef.current = Date.now() + 150;
       }}
       onDoubleClick={() => onDoubleClick?.()}
-      className={`rounded-2xl border p-3 shadow-sm transition-colors ${selected ? "border-sky-300 bg-sky-50 shadow-sky-100/70 ring-1 ring-sky-200" : "border-stone-300 bg-white shadow-stone-300/20"} ${isDraggable ? "cursor-grab" : ""}`}
+      className={`rounded-2xl border p-3 shadow-sm transition-colors ${cardTone} ${isDraggable ? "cursor-grab" : ""}`}
     >
       <div className="mb-2 flex items-start justify-between gap-2">
         <div
@@ -5792,6 +6092,11 @@ function JobCard({
           <span className={`rounded-full border px-2 py-1 text-[11px] font-medium ${priorityTone(job.priority)}`}>
             {job.priority || "-"}
           </span>
+          {job.holdActive && (
+            <span className="rounded-full bg-rose-700 px-2 py-1 text-[10px] font-medium text-white">
+              hold
+            </span>
+          )}
           {isDraggable && (
             <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">
               drag
@@ -5821,7 +6126,7 @@ function JobCard({
           >
             {pressOptions.map((press) => (
               <option key={press} value={press}>
-                Press {press}
+                {formatPressLabel(press)}
               </option>
             ))}
           </select>
@@ -5836,6 +6141,26 @@ function JobCard({
           </span>
         )}
       </div>
+
+      {scheduledAssignments.length > 0 && (
+        <div className="mt-3 rounded-2xl border border-stone-200 bg-stone-50 p-3">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-600">Scheduled on</div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {scheduledAssignments.map((assignment) => (
+              <span key={assignment.id} className="rounded-full bg-white px-2 py-1 text-[11px] font-medium text-stone-800">
+                {formatShortDate(new Date(`${assignment.dayKey}T12:00:00`))} - {formatPressLabel(assignment.press)}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {job.holdNote && (
+        <div className="mt-2 rounded-2xl border border-rose-200 bg-white/80 p-3 text-xs text-rose-900">
+          <div className="font-semibold uppercase tracking-[0.14em]">Hold note</div>
+          <div className="mt-1 whitespace-pre-wrap">{job.holdNote}</div>
+        </div>
+      )}
 
       {finishedAt && <div className="mt-2 text-xs text-stone-600">Finished {formatDateTime(finishedAt)}</div>}
       {finishedBy && <div className="mt-1 text-xs text-stone-600">Finished by {finishedBy}</div>}
@@ -6009,10 +6334,16 @@ function CompactScheduleCard({
   const title = isManual ? assignment.manualTitle || "Manual block" : `${job.customerName} ${job.number}`;
   const subtitle = isManual ? "Manual schedule block" : job.generalDescr;
   const showSubtitle = density !== "compact";
-  const showStats = density === "detailed" && !isManual;
+  const showStateBadge = isManual || assignment.status === "finished";
+  const showStats = !isManual;
   const showFinishedStamp = density === "detailed" && !isManual;
   const isCardDraggable = draggable;
   const showReorderControls = canMoveUp || canMoveDown || onMoveUp || onMoveDown;
+  const cardTone = selected
+    ? "border-sky-300 bg-sky-50 ring-1 ring-sky-200"
+    : job?.holdActive
+      ? "border-rose-300 bg-rose-50"
+      : "border-stone-300 bg-stone-100";
   const suppressClickUntilRef = useRef(0);
   const handleSelect = () => {
     if (Date.now() < suppressClickUntilRef.current) return;
@@ -6044,7 +6375,7 @@ function CompactScheduleCard({
           : undefined
       }
       onDrop={onDropBefore}
-      className={`rounded-2xl border p-2 transition-colors ${selected ? "border-sky-300 bg-sky-50 ring-1 ring-sky-200" : "border-stone-300 bg-stone-100"} ${isCardDraggable ? "cursor-grab" : ""}`}
+      className={`rounded-2xl border p-2 transition-colors ${cardTone} ${isCardDraggable ? "cursor-grab" : ""}`}
     >
       <div className="flex items-start justify-between gap-2">
         <div
@@ -6088,14 +6419,27 @@ function CompactScheduleCard({
               </button>
             </div>
           )}
-          <span className={`rounded-full px-2 py-1 text-[10px] font-medium ${statusTone(state)}`}>{state}</span>
+          {job?.holdActive && (
+            <span className="rounded-full bg-rose-700 px-2 py-1 text-[10px] font-medium text-white">hold</span>
+          )}
+          {showStateBadge && <span className={`rounded-full px-2 py-1 text-[10px] font-medium ${statusTone(state)}`}>{state}</span>}
           {isCardDraggable && <span className="rounded-full bg-stone-200 px-2 py-1 text-[10px] font-medium text-stone-700">drag</span>}
         </div>
       </div>
       {showStats && (
-        <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-stone-700">
+        <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-stone-700 md:grid-cols-3">
           <InfoPill label="Est" value={`${job.estPressTime.toFixed(2)}h`} />
-          <InfoPill label="Qty" value={job.ticQuantity.toLocaleString()} />
+          <InfoPill label="Footage" value={job.estFootage.toLocaleString()} />
+          <InfoPill label="Stock" value={job.stockDisplay || "-"} />
+          <InfoPill label="Ship" value={formatDate(job.shipByDate)} />
+          <InfoPill label="Priority" value={job.priority || "-"} />
+          <InfoPill label="Die" value={job.mainTool || job.toolNo2 || "-"} />
+        </div>
+      )}
+      {job?.holdNote && (
+        <div className="mt-2 rounded-2xl border border-rose-200 bg-white/80 p-2 text-[11px] text-rose-900">
+          <div className="font-semibold uppercase tracking-[0.14em]">Hold note</div>
+          <div className="mt-1 whitespace-pre-wrap">{job.holdNote}</div>
         </div>
       )}
       {finishMeta?.finishedAt && showFinishedStamp && (
