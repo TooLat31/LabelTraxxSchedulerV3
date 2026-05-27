@@ -8,6 +8,7 @@ const SESSION_STORAGE_KEY = "labeltraxx-scheduler-session-v1";
 const SHARED_STATE_ROW_ID = "labeltraxx-shared-state";
 const LOGIN_SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
 const SHARED_SAVE_DEBOUNCE_MS = 700;
+const SHARED_REFRESH_INTERVAL_MS = 15000;
 const ATTACHMENT_BUCKET = "labeltraxx-attachments";
 const ACTIVITY_LOG_LIMIT = 300;
 const BASE_TABS = ["Today", "Scheduler", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails", "Activity Log"];
@@ -1100,34 +1101,60 @@ function SchedulerApp() {
   const [lastSyncAt, setLastSyncAt] = useState("");
   const jobDetailsRef = useRef(null);
   const lastSharedSnapshotRef = useRef("");
+  const lastLocalSharedChangeRef = useRef(0);
   const saveTimerRef = useRef(null);
   const deferredSearch = useDeferredValue(search);
   const deferredUnscheduledSearch = useDeferredValue(unscheduledSearch);
   const deferredLocationSearch = useDeferredValue(locationSearch);
 
+  function applySharedStateSnapshot(snapshot) {
+    const normalized = normalizeSharedSnapshot(snapshot);
+    setJobs(normalized.jobs);
+    setAssignments(normalized.assignments);
+    setPressOperators(normalized.pressOperators);
+    setPressDuties(normalized.pressDuties);
+    setRequests(normalized.requests);
+    setPullPaperRequests(normalized.pullPaperRequests);
+    setNotes(normalized.notes);
+    setRegistrationRequests(normalized.registrationRequests);
+    setSuppliesRequests(normalized.suppliesRequests);
+    setShipmentGroups(normalized.shipmentGroups);
+    setShipmentEmailLogs(normalized.shipmentEmailLogs);
+    setShipmentEmailGroups(normalized.shipmentEmailGroups);
+    setActivityLog(normalized.activityLog);
+    setShipmentMethods(normalized.shipmentMethods);
+    setUsers(normalized.users);
+    setWeekStart(normalized.weekStart);
+    return normalized;
+  }
+
+  async function fetchLatestSharedState({ force = false } = {}) {
+    if (!isSupabaseConfigured || !supabase) return null;
+    if (!force && Date.now() - lastLocalSharedChangeRef.current < SHARED_SAVE_DEBOUNCE_MS + 400) return null;
+
+    const { data, error } = await supabase
+      .from("app_state")
+      .select("payload, updated_at")
+      .eq("id", SHARED_STATE_ROW_ID)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data?.payload) return null;
+
+    const normalized = normalizeSharedSnapshot(data.payload);
+    const digest = JSON.stringify(buildSharedSnapshot(normalized));
+    if (digest !== lastSharedSnapshotRef.current) {
+      applySharedStateSnapshot(data.payload);
+      lastSharedSnapshotRef.current = digest;
+    }
+
+    setSyncStatus("Live sync");
+    setLastSyncAt(data.updated_at || new Date().toISOString());
+    return normalized;
+  }
+
   useEffect(() => {
     let isCancelled = false;
-
-    function applySharedState(snapshot) {
-      const normalized = normalizeSharedSnapshot(snapshot);
-      setJobs(normalized.jobs);
-      setAssignments(normalized.assignments);
-      setPressOperators(normalized.pressOperators);
-      setPressDuties(normalized.pressDuties);
-      setRequests(normalized.requests);
-      setPullPaperRequests(normalized.pullPaperRequests);
-      setNotes(normalized.notes);
-      setRegistrationRequests(normalized.registrationRequests);
-      setSuppliesRequests(normalized.suppliesRequests);
-      setShipmentGroups(normalized.shipmentGroups);
-      setShipmentEmailLogs(normalized.shipmentEmailLogs);
-      setShipmentEmailGroups(normalized.shipmentEmailGroups);
-      setActivityLog(normalized.activityLog);
-      setShipmentMethods(normalized.shipmentMethods);
-      setUsers(normalized.users);
-      setWeekStart(normalized.weekStart);
-      return normalized;
-    }
 
     async function hydrate() {
       let saved = {};
@@ -1171,7 +1198,7 @@ function SchedulerApp() {
 
         if (isCancelled) return;
 
-        const normalized = applySharedState(sharedSnapshot);
+        const normalized = applySharedStateSnapshot(sharedSnapshot);
         const digest = JSON.stringify(buildSharedSnapshot(normalized));
         lastSharedSnapshotRef.current = digest;
         const sessionUsername = safeText(session.currentUsername);
@@ -1199,7 +1226,7 @@ function SchedulerApp() {
         console.error("Failed to load shared scheduler state.", error);
         const fallbackSource = Object.keys(saved || {}).length ? saved : defaultSharedSnapshot();
         const fallback = normalizeSharedSnapshot(fallbackSource);
-        applySharedState(fallback);
+        applySharedStateSnapshot(fallback);
         lastSharedSnapshotRef.current = JSON.stringify(buildSharedSnapshot(fallback));
         setSyncStatus(isSupabaseConfigured ? "Sync error" : "Local only");
       } finally {
@@ -1234,6 +1261,7 @@ function SchedulerApp() {
       users,
       weekStart,
     });
+    lastLocalSharedChangeRef.current = Date.now();
     window.clearTimeout(saveTimerRef.current);
     if (isSupabaseConfigured && supabase) {
       setSyncStatus("Saving...");
@@ -1351,6 +1379,48 @@ function SchedulerApp() {
   useEffect(() => {
     if (!isReady || !isSupabaseConfigured || !supabase) return undefined;
 
+    let isCancelled = false;
+
+    const refreshFromServer = async (force = false) => {
+      try {
+        await fetchLatestSharedState({ force });
+      } catch (error) {
+        if (isCancelled) return;
+        console.error("Failed to refresh shared scheduler state.", error);
+        setSyncStatus("Sync error");
+      }
+    };
+
+    const handleFocus = () => {
+      refreshFromServer(true);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshFromServer(true);
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        refreshFromServer();
+      }
+    }, SHARED_REFRESH_INTERVAL_MS);
+
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      isCancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [isReady]);
+
+  useEffect(() => {
+    if (!isReady || !isSupabaseConfigured || !supabase) return undefined;
+
     const channel = supabase
       .channel("labeltraxx-shared-state")
       .on(
@@ -1371,22 +1441,8 @@ function SchedulerApp() {
             return;
           }
 
-          const normalized = normalizeSharedSnapshot(nextPayload);
+          const normalized = applySharedStateSnapshot(nextPayload);
           lastSharedSnapshotRef.current = JSON.stringify(buildSharedSnapshot(normalized));
-          setJobs(normalized.jobs);
-          setAssignments(normalized.assignments);
-          setRequests(normalized.requests);
-          setPullPaperRequests(normalized.pullPaperRequests);
-          setNotes(normalized.notes);
-          setRegistrationRequests(normalized.registrationRequests);
-          setSuppliesRequests(normalized.suppliesRequests);
-          setShipmentGroups(normalized.shipmentGroups);
-          setShipmentEmailLogs(normalized.shipmentEmailLogs);
-          setShipmentEmailGroups(normalized.shipmentEmailGroups);
-          setActivityLog(normalized.activityLog);
-          setShipmentMethods(normalized.shipmentMethods);
-          setUsers(normalized.users);
-          setWeekStart(normalized.weekStart);
           setSyncStatus("Live sync");
           setLastSyncAt(payload.new?.updated_at || new Date().toISOString());
         }
@@ -1398,6 +1454,9 @@ function SchedulerApp() {
         }
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
           setSyncStatus("Sync error");
+          fetchLatestSharedState({ force: true }).catch((error) => {
+            console.error("Failed to recover shared scheduler state after realtime error.", error);
+          });
         }
       });
 
