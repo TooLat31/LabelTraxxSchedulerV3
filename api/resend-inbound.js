@@ -147,7 +147,7 @@ function buildRequestDescription(email, bodyText, attachmentSummaries) {
 }
 
 async function uploadInboundAttachments({ supabase, resend, emailId, senderTag }) {
-  const { data: attachments = [], error } = await resend.emails.receiving.attachments.list({
+  const { data: attachmentList, error } = await resend.emails.receiving.attachments.list({
     emailId,
   });
 
@@ -155,6 +155,7 @@ async function uploadInboundAttachments({ supabase, resend, emailId, senderTag }
     throw new Error(error.message || "Failed to list inbound attachments.");
   }
 
+  const attachments = Array.isArray(attachmentList?.data) ? attachmentList.data : [];
   const uploaded = [];
 
   for (const attachment of attachments) {
