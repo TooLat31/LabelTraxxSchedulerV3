@@ -68,6 +68,107 @@ function stripHtml(html) {
     .trim();
 }
 
+function normalizeEmailBody(text) {
+  return safeText(text)
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.replace(/\s+$/g, ""))
+    .filter((line) => !/^\[cid:.*\]$/i.test(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function parseForwardedHeaders(lines, startIndex) {
+  const headers = {};
+  let index = startIndex;
+  let activeHeader = "";
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!safeText(line)) {
+      index += 1;
+      break;
+    }
+
+    const match = line.match(/^([A-Za-z-]+):\s*(.*)$/);
+    if (match) {
+      activeHeader = match[1];
+      headers[activeHeader] = safeText(match[2]);
+    } else if (activeHeader) {
+      headers[activeHeader] = `${headers[activeHeader]} ${safeText(line)}`.trim();
+    } else {
+      break;
+    }
+    index += 1;
+  }
+
+  return {
+    headers,
+    bodyStartIndex: index,
+  };
+}
+
+function extractOriginalMessage(email) {
+  const rawBody = normalizeEmailBody(safeText(email.text) || stripHtml(email.html));
+  if (!rawBody) {
+    return {
+      senderRaw: safeText(email.from),
+      subject: safeText(email.subject),
+      to: Array.isArray(email.to) ? email.to : [],
+      cc: Array.isArray(email.cc) ? email.cc : [],
+      bodyText: "",
+      wasForwarded: false,
+    };
+  }
+
+  const lines = rawBody.split("\n");
+  const fromIndexes = [];
+  lines.forEach((line, index) => {
+    if (/^From:\s/i.test(line)) fromIndexes.push(index);
+  });
+
+  for (let index = fromIndexes.length - 1; index >= 0; index -= 1) {
+    const fromIndex = fromIndexes[index];
+    const { headers, bodyStartIndex } = parseForwardedHeaders(lines, fromIndex);
+    if (!safeText(headers.From) || !safeText(headers.Subject)) continue;
+
+    const originalBody = lines
+      .slice(bodyStartIndex)
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+
+    return {
+      senderRaw: safeText(headers.From),
+      subject: safeText(headers.Subject),
+      to: safeText(headers.To)
+        ? safeText(headers.To)
+            .split(/;\s*|,\s*/)
+            .map((value) => safeText(value))
+            .filter(Boolean)
+        : [],
+      cc: safeText(headers.Cc)
+        ? safeText(headers.Cc)
+            .split(/;\s*|,\s*/)
+            .map((value) => safeText(value))
+            .filter(Boolean)
+        : [],
+      bodyText: originalBody || rawBody,
+      wasForwarded: true,
+    };
+  }
+
+  return {
+    senderRaw: safeText(email.from),
+    subject: safeText(email.subject),
+    to: Array.isArray(email.to) ? email.to : [],
+    cc: Array.isArray(email.cc) ? email.cc : [],
+    bodyText: rawBody,
+    wasForwarded: false,
+  };
+}
+
 function appendActivityEntry(currentLog, entry) {
   const nextEntry = {
     id: entry.id || makeId("activity"),
@@ -124,23 +225,29 @@ function inferAssignedUser(users, recipients) {
   return "";
 }
 
-function buildRequestDescription(email, bodyText, attachmentSummaries) {
+function isInlineAttachment(attachment) {
+  const filename = safeText(attachment.filename || attachment.name).toLowerCase();
+  const disposition = safeText(attachment.content_disposition).toLowerCase();
+  const contentId = safeText(attachment.content_id);
+  return disposition === "inline" || !!contentId || /^image\d+\.(png|jpe?g|gif|webp)$/i.test(filename);
+}
+
+function buildRequestDescription(emailView, attachmentSummaries) {
   const lines = [
-    `Subject: ${safeText(email.subject) || "(no subject)"}`,
-    `From: ${safeText(email.from) || "-"}`,
-    `To: ${(email.to || []).map((value) => safeText(value)).filter(Boolean).join(", ") || "-"}`,
+    `Subject: ${safeText(emailView.subject) || "(no subject)"}`,
+    `From: ${safeText(emailView.senderRaw) || "-"}`,
   ];
 
-  if (Array.isArray(email.cc) && email.cc.length) {
-    lines.push(`CC: ${email.cc.map((value) => safeText(value)).filter(Boolean).join(", ")}`);
+  if (Array.isArray(emailView.cc) && emailView.cc.length) {
+    lines.push(`CC: ${emailView.cc.map((value) => safeText(value)).filter(Boolean).join(", ")}`);
   }
 
   if (attachmentSummaries.length) {
     lines.push(`Attachments: ${attachmentSummaries.map((item) => item.name).join(", ")}`);
   }
 
-  if (bodyText) {
-    lines.push("", bodyText);
+  if (emailView.bodyText) {
+    lines.push("", emailView.bodyText);
   }
 
   return lines.join("\n").trim();
@@ -160,6 +267,7 @@ async function uploadInboundAttachments({ supabase, resend, emailId, senderTag }
   const uploaded = [];
 
   for (const attachment of attachments) {
+    if (isInlineAttachment(attachment)) continue;
     const downloadUrl = safeText(attachment.download_url);
     if (!downloadUrl) continue;
 
@@ -298,25 +406,28 @@ export default async function handler(req, res) {
     const recipients = Array.isArray(email.to) ? email.to : [];
     const sender = parseAddressParts(email.from);
     const senderLabel = sender.name || sender.email || "Inbound email";
+    const emailView = extractOriginalMessage(email);
+    const originalSender = parseAddressParts(emailView.senderRaw);
+    const originalSenderLabel = originalSender.name || originalSender.email || senderLabel;
     const attachmentUploads = await uploadInboundAttachments({
       supabase,
       resend,
       emailId,
-      senderTag: senderLabel,
+      senderTag: originalSenderLabel,
     });
 
-    const bodyText = safeText(email.text) || stripHtml(email.html);
     const users = Array.isArray(currentSnapshot.users) ? currentSnapshot.users : [];
     const assignedToAccount = inferAssignedUser(users, recipients);
     const jobNumber =
-      extractJobNumber(email.subject, bodyText) || `EMAIL-${safeText(emailId).replace(/[^a-zA-Z0-9]/g, "").slice(0, 6).toUpperCase()}`;
+      extractJobNumber(emailView.subject, emailView.bodyText, email.subject) ||
+      `EMAIL-${safeText(emailId).replace(/[^a-zA-Z0-9]/g, "").slice(0, 6).toUpperCase()}`;
 
     const newRequest = {
       id: makeId("req"),
       jobNumber,
-      customer: sender.name || sender.email || "Email Request",
-      requestorName: sender.email ? `${senderLabel} <${sender.email}>` : senderLabel,
-      description: buildRequestDescription(email, bodyText, attachmentUploads),
+      customer: originalSender.name || originalSender.email || sender.name || sender.email || "Email Request",
+      requestorName: originalSender.email ? `${originalSenderLabel} <${originalSender.email}>` : originalSenderLabel,
+      description: buildRequestDescription(emailView, attachmentUploads),
       requestType: "Email Request",
       assignedToAccount,
       attachments: attachmentUploads,
@@ -330,7 +441,7 @@ export default async function handler(req, res) {
       inboundTo: recipients,
       inboundCc: Array.isArray(email.cc) ? email.cc : [],
       inboundFrom: safeText(email.from),
-      inboundSubject: safeText(email.subject),
+      inboundSubject: safeText(emailView.subject || email.subject),
       inboundReceivedAt: email.created_at || event.created_at || new Date().toISOString(),
     };
 
