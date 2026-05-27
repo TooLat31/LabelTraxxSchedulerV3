@@ -152,7 +152,8 @@ async function uploadInboundAttachments({ supabase, resend, emailId, senderTag }
   });
 
   if (error) {
-    throw new Error(error.message || "Failed to list inbound attachments.");
+    console.warn("Failed to list inbound attachments.", error.message || error);
+    return [];
   }
 
   const attachments = Array.isArray(attachmentList?.data) ? attachmentList.data : [];
@@ -162,36 +163,51 @@ async function uploadInboundAttachments({ supabase, resend, emailId, senderTag }
     const downloadUrl = safeText(attachment.download_url);
     if (!downloadUrl) continue;
 
-    const response = await fetch(downloadUrl);
-    if (!response.ok) {
-      throw new Error(`Failed to download inbound attachment ${safeText(attachment.filename)}.`);
+    try {
+      const response = await fetch(downloadUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to download inbound attachment ${safeText(attachment.filename)}.`);
+      }
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const storagePath = `inbound-email/${safeText(emailId)}/${makeId("att")}-${sanitizeAttachmentName(attachment.filename)}`;
+      const contentType = safeText(attachment.content_type) || response.headers.get("content-type") || "application/octet-stream";
+
+      const { error: uploadError } = await supabase.storage.from(ATTACHMENT_BUCKET).upload(storagePath, buffer, {
+        upsert: false,
+        contentType,
+      });
+
+      if (uploadError) {
+        throw new Error(uploadError.message || `Failed to upload ${safeText(attachment.filename)} to storage.`);
+      }
+
+      const { data } = supabase.storage.from(ATTACHMENT_BUCKET).getPublicUrl(storagePath);
+      uploaded.push({
+        id: makeId("att"),
+        name: safeText(attachment.filename) || "attachment",
+        size: Number(attachment.size) || buffer.length,
+        type: contentType,
+        uploadedAt: new Date().toISOString(),
+        uploadedBy: senderTag,
+        storagePath,
+        publicUrl: safeText(data?.publicUrl),
+        dataUrl: "",
+      });
+    } catch (attachmentError) {
+      console.warn(`Falling back to Resend attachment link for ${safeText(attachment.filename)}.`, attachmentError);
+      uploaded.push({
+        id: makeId("att"),
+        name: safeText(attachment.filename) || "attachment",
+        size: Number(attachment.size) || 0,
+        type: safeText(attachment.content_type) || "application/octet-stream",
+        uploadedAt: new Date().toISOString(),
+        uploadedBy: senderTag,
+        storagePath: "",
+        publicUrl: downloadUrl,
+        dataUrl: "",
+      });
     }
-
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const storagePath = `inbound-email/${safeText(emailId)}/${makeId("att")}-${sanitizeAttachmentName(attachment.filename)}`;
-    const contentType = safeText(attachment.content_type) || response.headers.get("content-type") || "application/octet-stream";
-
-    const { error: uploadError } = await supabase.storage.from(ATTACHMENT_BUCKET).upload(storagePath, buffer, {
-      upsert: false,
-      contentType,
-    });
-
-    if (uploadError) {
-      throw new Error(uploadError.message || `Failed to upload ${safeText(attachment.filename)} to storage.`);
-    }
-
-    const { data } = supabase.storage.from(ATTACHMENT_BUCKET).getPublicUrl(storagePath);
-    uploaded.push({
-      id: makeId("att"),
-      name: safeText(attachment.filename) || "attachment",
-      size: Number(attachment.size) || buffer.length,
-      type: contentType,
-      uploadedAt: new Date().toISOString(),
-      uploadedBy: senderTag,
-      storagePath,
-      publicUrl: safeText(data?.publicUrl),
-      dataUrl: "",
-    });
   }
 
   return uploaded;
