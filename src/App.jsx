@@ -1597,27 +1597,6 @@ function SchedulerApp() {
     );
   }, [shipmentMethods]);
 
-  useEffect(() => {
-    if (!matchedShipmentRateRule) return;
-    const packageCount = parseNumber(shipmentForm.packageCount);
-    if (!packageCount) return;
-    const nextTotalCost = (matchedShipmentRateRule.costPerUnit * packageCount).toFixed(2);
-    const nextBillAmount = (matchedShipmentRateRule.billPerUnit * packageCount).toFixed(2);
-    setShipmentForm((current) => {
-      if (
-        current.totalCost === nextTotalCost &&
-        current.billAmount === nextBillAmount
-      ) {
-        return current;
-      }
-      return {
-        ...current,
-        totalCost: nextTotalCost,
-        billAmount: nextBillAmount,
-      };
-    });
-  }, [matchedShipmentRateRule, shipmentForm.packageCount]);
-
   const tabs = useMemo(
     () => [...BASE_TABS, "User Admin"].filter((tab) => canAccessTab(currentUser, tab)),
     [currentUser]
@@ -2063,6 +2042,24 @@ function SchedulerApp() {
       ) || null,
     [selectedShipmentCustomer, shipmentForm.method, shipmentForm.packageType, shipmentRateRules]
   );
+
+  useEffect(() => {
+    if (!matchedShipmentRateRule) return;
+    const packageCount = parseNumber(shipmentForm.packageCount);
+    if (!packageCount) return;
+    const nextTotalCost = (matchedShipmentRateRule.costPerUnit * packageCount).toFixed(2);
+    const nextBillAmount = (matchedShipmentRateRule.billPerUnit * packageCount).toFixed(2);
+    setShipmentForm((current) => {
+      if (current.totalCost === nextTotalCost && current.billAmount === nextBillAmount) {
+        return current;
+      }
+      return {
+        ...current,
+        totalCost: nextTotalCost,
+        billAmount: nextBillAmount,
+      };
+    });
+  }, [matchedShipmentRateRule, shipmentForm.packageCount]);
 
   const shipmentGroupsForDay = useMemo(
     () =>
