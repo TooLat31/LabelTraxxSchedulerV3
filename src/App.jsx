@@ -1125,6 +1125,7 @@ function SchedulerApp() {
   const [sessionExpiresAt, setSessionExpiresAt] = useState("");
   const [userForm, setUserForm] = useState(EMPTY_USER_FORM);
   const [userPasswordDrafts, setUserPasswordDrafts] = useState({});
+  const [userUsernameDrafts, setUserUsernameDrafts] = useState({});
   const [requestHistoryFilterDate, setRequestHistoryFilterDate] = useState("");
   const [shipmentHistoryFilterDate, setShipmentHistoryFilterDate] = useState("");
   const [shipmentEmailHistoryFilterDate, setShipmentEmailHistoryFilterDate] = useState("");
@@ -3919,6 +3920,142 @@ function SchedulerApp() {
     }
   }
 
+  function renameUser(userId) {
+    if (!userCanManageUsers) return;
+    const target = users.find((user) => user.id === userId);
+    const nextUsername = safeText(userUsernameDrafts[userId]);
+    if (!target || !nextUsername || comparableUsername(target.username) === comparableUsername(nextUsername)) return;
+    const exists = users.some(
+      (user) => user.id !== userId && comparableUsername(user.username) === comparableUsername(nextUsername)
+    );
+    if (exists) {
+      window.alert("That username already exists.");
+      return;
+    }
+
+    const previousUsername = target.username;
+    const isSameUser = (value) => comparableUsername(value) === comparableUsername(previousUsername);
+
+    setUsers((current) => current.map((user) => (user.id === userId ? { ...user, username: nextUsername } : user)));
+    setRequests((current) =>
+      current.map((request) => ({
+        ...request,
+        assignedToAccount: isSameUser(request.assignedToAccount) ? nextUsername : request.assignedToAccount,
+        createdByAccount: isSameUser(request.createdByAccount) ? nextUsername : request.createdByAccount,
+        completedByAccount: isSameUser(request.completedByAccount) ? nextUsername : request.completedByAccount,
+      }))
+    );
+    setPullPaperRequests((current) =>
+      current.map((request) => ({
+        ...request,
+        createdBy: isSameUser(request.createdBy) ? nextUsername : request.createdBy,
+        completedBy: isSameUser(request.completedBy) ? nextUsername : request.completedBy,
+      }))
+    );
+    setSuppliesRequests((current) =>
+      current.map((request) => ({
+        ...request,
+        createdBy: isSameUser(request.createdBy) ? nextUsername : request.createdBy,
+        completedBy: isSameUser(request.completedBy) ? nextUsername : request.completedBy,
+      }))
+    );
+    setNotes((current) =>
+      current.map((note) => ({
+        ...note,
+        ownerUsername: isSameUser(note.ownerUsername) ? nextUsername : note.ownerUsername,
+      }))
+    );
+    setAssignments((current) =>
+      current.map((assignment) => ({
+        ...assignment,
+        finishedBy: isSameUser(assignment.finishedBy) ? nextUsername : assignment.finishedBy,
+      }))
+    );
+    setShipmentGroups((current) =>
+      current.map((group) => ({
+        ...group,
+        createdBy: isSameUser(group.createdBy) ? nextUsername : group.createdBy,
+        jobItems: Array.isArray(group.jobItems)
+          ? group.jobItems.map((item) => ({
+              ...item,
+              finishedBy: isSameUser(item.finishedBy) ? nextUsername : item.finishedBy,
+            }))
+          : group.jobItems,
+      }))
+    );
+    setShipmentEmailLogs((current) =>
+      current.map((log) => ({
+        ...log,
+        createdBy: isSameUser(log.createdBy) ? nextUsername : log.createdBy,
+      }))
+    );
+    setRegistrationRequests((current) =>
+      current.map((request) => ({
+        ...request,
+        approvedBy: isSameUser(request.approvedBy) ? nextUsername : request.approvedBy,
+        deniedBy: isSameUser(request.deniedBy) ? nextUsername : request.deniedBy,
+      }))
+    );
+    setActivityLog((current) =>
+      current.map((entry) => ({
+        ...entry,
+        actor: isSameUser(entry.actor) ? nextUsername : entry.actor,
+      }))
+    );
+    if (isSameUser(currentUsername)) {
+      setCurrentUsername(nextUsername);
+    }
+    setUserUsernameDrafts((current) => ({ ...current, [userId]: "" }));
+    recordActivity("Renamed user", "Users", `${previousUsername} was renamed to ${nextUsername}.`, {
+      userId,
+      previousUsername,
+      nextUsername,
+    });
+  }
+
+  function deleteUser(userId) {
+    if (!userCanManageUsers) return;
+    const target = users.find((user) => user.id === userId);
+    if (!target) return;
+    if (comparableUsername(target.username) === comparableUsername(currentUsername)) {
+      window.alert("You cannot delete the account you are currently signed in with.");
+      return;
+    }
+    if (target.canManageUsers) {
+      const managers = users.filter((user) => user.canManageUsers);
+      if (managers.length <= 1) {
+        window.alert("Keep at least one user with admin access.");
+        return;
+      }
+    }
+    const confirmed = window.confirm(`Delete the ${target.username} account? This will remove personal notes and clear open request assignments for that user.`);
+    if (!confirmed) return;
+
+    const isSameUser = (value) => comparableUsername(value) === comparableUsername(target.username);
+    setUsers((current) => current.filter((user) => user.id !== userId));
+    setRequests((current) =>
+      current.map((request) => ({
+        ...request,
+        assignedToAccount: isSameUser(request.assignedToAccount) ? "" : request.assignedToAccount,
+      }))
+    );
+    setNotes((current) => current.filter((note) => !isSameUser(note.ownerUsername)));
+    setUserPasswordDrafts((current) => {
+      const next = { ...current };
+      delete next[userId];
+      return next;
+    });
+    setUserUsernameDrafts((current) => {
+      const next = { ...current };
+      delete next[userId];
+      return next;
+    });
+    recordActivity("Deleted user", "Users", `${target.username} was deleted from the scheduler.`, {
+      userId,
+      username: target.username,
+    });
+  }
+
   function approveRegistrationRequest(requestId) {
     if (!userCanManageUsers) return;
     const request = registrationRequests.find((item) => item.id === requestId);
@@ -6266,7 +6403,7 @@ function SchedulerApp() {
               <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
                 <div className="mb-5">
                   <div className="text-sm font-semibold">Manage users</div>
-                  <div className="text-xs text-stone-600">Reset passwords, choose edit or view-only, and control which tabs each account can see.</div>
+                  <div className="text-xs text-stone-600">Rename users, reset passwords, choose edit or view-only, delete accounts, and control which tabs each account can see.</div>
                 </div>
                 <div className="space-y-3">
                   {users.map((user) => (
@@ -6284,21 +6421,47 @@ function SchedulerApp() {
                               Created {formatDateTime(user.createdAt)} by {user.createdBy || "-"}
                             </div>
                           </div>
-                          <div className="flex flex-col gap-2 md:w-[320px]">
-                            <input
-                              type="text"
-                              value={userPasswordDrafts[user.id] || ""}
-                              onChange={(event) =>
-                                setUserPasswordDrafts((current) => ({ ...current, [user.id]: event.target.value }))
-                              }
-                              placeholder={`Set new password for ${user.username}`}
-                              className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
-                            />
+                          <div className="grid gap-2 md:w-[380px]">
+                            <div className="grid gap-2 md:grid-cols-[1fr_auto]">
+                              <input
+                                type="text"
+                                value={userUsernameDrafts[user.id] ?? user.username}
+                                onChange={(event) =>
+                                  setUserUsernameDrafts((current) => ({ ...current, [user.id]: event.target.value }))
+                                }
+                                placeholder={`Rename ${user.username}`}
+                                className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                              />
+                              <button
+                                onClick={() => renameUser(user.id)}
+                                className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
+                              >
+                                Save name
+                              </button>
+                            </div>
+                            <div className="grid gap-2 md:grid-cols-[1fr_auto]">
+                              <input
+                                type="text"
+                                value={userPasswordDrafts[user.id] || ""}
+                                onChange={(event) =>
+                                  setUserPasswordDrafts((current) => ({ ...current, [user.id]: event.target.value }))
+                                }
+                                placeholder={`Set new password for ${user.username}`}
+                                className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                              />
+                              <button
+                                onClick={() => updateUserPassword(user.id)}
+                                className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
+                              >
+                                Save password
+                              </button>
+                            </div>
                             <button
-                              onClick={() => updateUserPassword(user.id)}
-                              className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
+                              onClick={() => deleteUser(user.id)}
+                              disabled={comparableUsername(user.username) === comparableUsername(currentUsername)}
+                              className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
                             >
-                              Save password
+                              Delete user
                             </button>
                           </div>
                         </div>
