@@ -1140,7 +1140,7 @@ function SchedulerApp() {
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date()));
   const [search, setSearch] = useState("");
   const [unscheduledSearch, setUnscheduledSearch] = useState("");
-  const [queueStatusFilter, setQueueStatusFilter] = useState("All");
+  const [queueStatusFilter, setQueueStatusFilter] = useState("Open");
   const [queuePressFilter, setQueuePressFilter] = useState("All");
   const [queueScheduleFilter, setQueueScheduleFilter] = useState("All");
   const [selectedJobId, setSelectedJobId] = useState(null);
