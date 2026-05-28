@@ -1665,12 +1665,6 @@ function SchedulerApp() {
 
   const filteredJobIds = useMemo(() => new Set(filteredJobs.map((job) => job.id)), [filteredJobs]);
 
-  const importedSummary = useMemo(() => {
-    const openCount = jobs.filter((job) => job.normalizedStatus === "open").length;
-    const closedCount = jobs.filter((job) => job.normalizedStatus === "closed").length;
-    return { openCount, closedCount };
-  }, [jobs]);
-
   const userFinishedAssignments = useMemo(
     () =>
       assignments.filter(
@@ -2209,15 +2203,34 @@ function SchedulerApp() {
   );
 
   const summary = useMemo(() => {
+    const openJobs = jobs.filter((job) => job.normalizedStatus === "open").length;
+    const markedFinishedThisWeek = jobs.filter((job) => {
+      const finishMeta = finishedMetaByJobId.get(job.id);
+      const finishedKey = job.dateDone ? isoDate(job.dateDone) : finishMeta?.finishedAt ? isoDate(finishMeta.finishedAt) : "";
+      return finishedKey && weekKeys.has(finishedKey);
+    }).length;
+    const scheduledJobsThisWeek = assignments.filter(
+      (assignment) =>
+        assignment.kind === "press" &&
+        assignment.status !== "finished" &&
+        weekKeys.has(assignment.dayKey) &&
+        visibleSchedulerJobIds.has(assignment.jobId)
+    ).length;
+    const shipmentsThisWeekNotGrouped = jobs.filter((job) => {
+      const finishMeta = finishedMetaByJobId.get(job.id);
+      const finishedKey = job.dateDone ? isoDate(job.dateDone) : finishMeta?.finishedAt ? isoDate(finishMeta.finishedAt) : "";
+      if (!finishedKey || !weekKeys.has(finishedKey)) return false;
+      if (finishMeta?.excludeFromShipping) return false;
+      return !assignedShipmentJobIds.has(job.id);
+    }).length;
     return {
-      txtOpen: importedSummary.openCount,
-      txtClosed: importedSummary.closedCount,
-      markedFinished: allUserFinishedJobs.length,
+      openJobs,
+      markedFinishedThisWeek,
       openRequests: openRequests.length,
-      scheduledJobs: activePressAssignments.length,
-      shipGroupsOnDate: shipmentGroupsForDay.length,
+      scheduledJobsThisWeek,
+      shipmentsThisWeekNotGrouped,
     };
-  }, [activePressAssignments.length, allUserFinishedJobs.length, importedSummary.closedCount, importedSummary.openCount, openRequests.length, shipmentGroupsForDay.length]);
+  }, [assignedShipmentJobIds, assignments, finishedMetaByJobId, jobs, openRequests.length, visibleSchedulerJobIds, weekKeys]);
 
   const shipmentEmailsForSelectedDate = useMemo(
     () =>
@@ -4288,12 +4301,11 @@ function SchedulerApp() {
   }
 
   const schedulerCards = [
-    ["TXT open", summary.txtOpen],
-    ["TXT closed", summary.txtClosed],
-    ["Marked finished", summary.markedFinished],
+    ["Open jobs", summary.openJobs],
+    ["Marked finished this week", summary.markedFinishedThisWeek],
     ["Open requests", summary.openRequests],
-    ["Scheduled jobs", summary.scheduledJobs],
-    ["Ship groups", summary.shipGroupsOnDate],
+    ["Scheduled jobs this week", summary.scheduledJobsThisWeek],
+    ["Shipments this week not grouped", summary.shipmentsThisWeekNotGrouped],
   ];
 
   const tabBadges = {
