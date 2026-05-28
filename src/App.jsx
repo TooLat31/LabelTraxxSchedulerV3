@@ -2161,6 +2161,20 @@ function SchedulerApp() {
         .sort((left, right) => left.estPressTime - right.estPressTime),
     [jobs, todayDateKey, userFinishedJobIds]
   );
+  const lateJobs = useMemo(
+    () =>
+      jobs
+        .filter((job) => !!job.shipByDate)
+        .filter((job) => isoDate(job.shipByDate) < todayDateKey)
+        .filter((job) => !job.holdActive)
+        .filter((job) => !job.dateDone && !userFinishedJobIds.has(job.id))
+        .sort((left, right) => {
+          const shipDiff = isoDate(left.shipByDate).localeCompare(isoDate(right.shipByDate));
+          if (shipDiff !== 0) return shipDiff;
+          return parseNumber(left.number) - parseNumber(right.number);
+        }),
+    [jobs, todayDateKey, userFinishedJobIds]
+  );
   const finishedTodayJobs = useMemo(
     () => allUserFinishedJobs.filter((job) => sameDay(job.finishMeta?.finishedAt, todayDateKey)),
     [allUserFinishedJobs, todayDateKey]
@@ -5184,6 +5198,67 @@ function SchedulerApp() {
                       {!jobLocationResults.length && (
                         <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
                           {locationSearch.trim() ? "No jobs matched that search." : "Type a search to see where jobs are scheduled or finished."}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
+                    <div className="mb-3 flex items-center justify-between">
+                      <div>
+                        <div className="text-sm font-semibold">Running late</div>
+                        <div className="text-xs text-stone-600">Jobs past ship date that are not on hold and not marked finished.</div>
+                      </div>
+                      <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{lateJobs.length}</div>
+                    </div>
+                    <div className="max-h-[34vh] space-y-3 overflow-y-auto">
+                      {lateJobs.map((job) => {
+                        const scheduledLocation = (activeScheduleLocationsByJobId.get(job.id) || allScheduleLocationsByJobId.get(job.id) || [])[0] || null;
+                        return (
+                          <div key={job.id} className="rounded-2xl border border-stone-300 bg-white p-3">
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-stone-900">
+                                  {job.customerName} {job.number}
+                                </div>
+                                <div className="mt-1 text-xs text-stone-700">{job.generalDescr}</div>
+                                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-stone-600">
+                                  <span>Ship {formatDate(job.shipByDate)}</span>
+                                  <span>•</span>
+                                  <span>{formatPressLabel(job.press || "-")}</span>
+                                  {scheduledLocation ? (
+                                    <>
+                                      <span>•</span>
+                                      <span>
+                                        Scheduled {scheduledLocation.dayKey} on {formatPressLabel(scheduledLocation.press)}
+                                      </span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <span>•</span>
+                                      <span>Not scheduled</span>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                              <button
+                                onClick={() => {
+                                  if (scheduledLocation) {
+                                    setWeekStart(startOfWeek(new Date(`${scheduledLocation.dayKey}T12:00:00`)));
+                                  }
+                                  selectJob(job.id, true);
+                                }}
+                                className="rounded-2xl border border-stone-300 bg-stone-50 px-3 py-2 text-sm text-stone-800"
+                              >
+                                Open
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {!lateJobs.length && (
+                        <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
+                          No late jobs are currently outside of hold.
                         </div>
                       )}
                     </div>
