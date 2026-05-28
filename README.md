@@ -25,27 +25,17 @@ To turn on shared mode:
 
 Full setup notes are in [`SUPABASE_SETUP.md`](./SUPABASE_SETUP.md).
 
-## Resend inbound requests
+## Demo mode
 
-This project now includes a Vercel Function at [`api/resend-inbound.js`](./api/resend-inbound.js) that can turn inbound Resend emails into open requests.
+You can open a safe sample workspace by using the login screen button or by visiting the site with:
 
-Setup:
+- `?demo=1`
 
-1. Add these Vercel env vars:
-   - `RESEND_API_KEY`
-   - `RESEND_WEBHOOK_SECRET`
-   - `SUPABASE_URL`
-   - `SUPABASE_SERVICE_ROLE_KEY`
-2. In Resend, create an `email.received` webhook that points to:
-   - `https://label-traxx-scheduler-v3.vercel.app/api/resend-inbound`
-3. Forward your Outlook/shared mailbox to your Resend receiving address.
+The demo workspace:
 
-Behavior:
-
-- The webhook pulls the full inbound email body from Resend
-- Attachments are copied into the shared Supabase storage bucket
-- A new `Email Request` is created in `Open Requests`
-- If the mailbox alias matches a username, the request is auto-assigned to that user
+- uses fake jobs, requests, users, shipments, and notes
+- does not write changes back to the shared Supabase workspace
+- is intended for presentations and internal walkthroughs
 
 ## Current shared features
 

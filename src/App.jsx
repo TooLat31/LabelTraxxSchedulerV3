@@ -1,6 +1,7 @@
 import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { isSupabaseConfigured, supabase } from "./lib/supabase";
 import { exportWeeklyScheduleWorkbook, importWeeklyScheduleWorkbook } from "./lib/scheduleWorkbook";
+import { buildDemoSharedSnapshot, DEMO_DEFAULT_PASSWORD, DEMO_DEFAULT_USERNAME } from "./lib/demoData";
 
 const PRESS_ORDER = ["5.1", "6.1", "1.1", "2.1", "8", "9", "Extra Duties", "Rewind"];
 const STORAGE_KEY = "labeltraxx-scheduler-v4";
@@ -11,6 +12,7 @@ const SHARED_SAVE_DEBOUNCE_MS = 700;
 const SHARED_REFRESH_INTERVAL_MS = 15000;
 const ATTACHMENT_BUCKET = "labeltraxx-attachments";
 const ACTIVITY_LOG_LIMIT = 300;
+const DEMO_QUERY_PARAM = "demo";
 const BASE_TABS = ["Today", "Scheduler", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails", "Activity Log"];
 const ACCESS_MODE_OPTIONS = ["edit", "view"];
 const ATTACHMENT_ACCEPT =
@@ -217,6 +219,22 @@ function localMiddayIso(date) {
 function sameDay(dateValue, dayKey) {
   if (!dateValue || !dayKey) return false;
   return isoDate(new Date(dateValue)) === dayKey;
+}
+
+function isDemoWorkspaceRequested() {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get(DEMO_QUERY_PARAM) === "1";
+}
+
+function updateDemoWorkspaceUrl(enabled) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (enabled) {
+    url.searchParams.set(DEMO_QUERY_PARAM, "1");
+  } else {
+    url.searchParams.delete(DEMO_QUERY_PARAM);
+  }
+  window.history.replaceState({}, "", url.toString());
 }
 
 function isWithinLookbackWindow(dateValue, days, referenceDate = new Date()) {
@@ -947,6 +965,7 @@ function statusTone(status) {
 function syncTone(status) {
   const value = safeText(status).toLowerCase();
   if (value.includes("live")) return "bg-emerald-100 text-emerald-900";
+  if (value.includes("demo")) return "bg-sky-100 text-sky-900";
   if (value.includes("saving") || value.includes("connecting")) return "bg-amber-100 text-amber-900";
   if (value.includes("error")) return "bg-rose-100 text-rose-900";
   return "bg-stone-100 text-stone-700";
@@ -1056,6 +1075,7 @@ function canUserViewRequest(user, request) {
 
 function SchedulerApp() {
   const [isReady, setIsReady] = useState(false);
+  const [workspaceMode, setWorkspaceMode] = useState(() => (isDemoWorkspaceRequested() ? "demo" : "live"));
   const [jobs, setJobs] = useState([]);
   const [assignments, setAssignments] = useState([]);
   const [pressOperators, setPressOperators] = useState({});
@@ -1181,7 +1201,39 @@ function SchedulerApp() {
       try {
         saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
         const session = JSON.parse(localStorage.getItem(SESSION_STORAGE_KEY) || "{}");
+        const demoRequested = isDemoWorkspaceRequested();
+        const sessionWorkspaceMode = safeText(session.workspaceMode) || "live";
+        const sessionUsername = safeText(session.currentUsername);
+        const storedExpiresAt = safeText(session.expiresAt);
+        const expiresAtValue = storedExpiresAt ? new Date(storedExpiresAt).getTime() : 0;
+        const isSessionActive = sessionUsername && Number.isFinite(expiresAtValue) && expiresAtValue > Date.now();
+
+        if (demoRequested) {
+          const demoSnapshot = buildDemoSharedSnapshot();
+          const normalized = applySharedStateSnapshot(demoSnapshot);
+          const digest = JSON.stringify(buildSharedSnapshot(normalized));
+          lastSharedSnapshotRef.current = digest;
+          if (!isCancelled) {
+            setWorkspaceMode("demo");
+            setSyncStatus("Demo mode");
+            setLastSyncAt("");
+          }
+          const nextDemoUsername =
+            isSessionActive && sessionWorkspaceMode === "demo"
+              ? normalized.users.find((user) => comparableUsername(user.username) === comparableUsername(sessionUsername))?.username ||
+                DEMO_DEFAULT_USERNAME
+              : DEMO_DEFAULT_USERNAME;
+          if (!isCancelled) {
+            setCurrentUsername(nextDemoUsername);
+            setSessionExpiresAt(new Date(Date.now() + LOGIN_SESSION_DURATION_MS).toISOString());
+          }
+          return;
+        }
+
         let sharedSnapshot = saved;
+        if (!isCancelled) {
+          setWorkspaceMode("live");
+        }
 
         if (isSupabaseConfigured && supabase) {
           setSyncStatus("Connecting...");
@@ -1221,10 +1273,6 @@ function SchedulerApp() {
         const normalized = applySharedStateSnapshot(sharedSnapshot);
         const digest = JSON.stringify(buildSharedSnapshot(normalized));
         lastSharedSnapshotRef.current = digest;
-        const sessionUsername = safeText(session.currentUsername);
-        const storedExpiresAt = safeText(session.expiresAt);
-        const expiresAtValue = storedExpiresAt ? new Date(storedExpiresAt).getTime() : 0;
-        const isSessionActive = sessionUsername && Number.isFinite(expiresAtValue) && expiresAtValue > Date.now();
         if (isSessionActive) {
           const match = normalized.users.find(
             (user) => comparableUsername(user.username) === comparableUsername(sessionUsername)
@@ -1263,6 +1311,10 @@ function SchedulerApp() {
 
   useEffect(() => {
     if (!isReady) return;
+    if (workspaceMode === "demo") {
+      setSyncStatus("Demo mode");
+      return;
+    }
     const sharedSnapshot = buildSharedSnapshot({
       jobs,
       assignments,
@@ -1326,7 +1378,7 @@ function SchedulerApp() {
     return () => {
       window.clearTimeout(saveTimerRef.current);
     };
-  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressDuties, pressOperators, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, suppliesRequests, users, weekStart]);
+  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressDuties, pressOperators, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, suppliesRequests, users, weekStart, workspaceMode]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -1334,9 +1386,10 @@ function SchedulerApp() {
       JSON.stringify({
         currentUsername,
         expiresAt: currentUsername ? sessionExpiresAt : "",
+        workspaceMode,
       })
     );
-  }, [currentUsername, sessionExpiresAt]);
+  }, [currentUsername, sessionExpiresAt, workspaceMode]);
 
   const currentUser = useMemo(
     () =>
@@ -1397,7 +1450,7 @@ function SchedulerApp() {
   }, [activeTab, currentUser]);
 
   useEffect(() => {
-    if (!isReady || !isSupabaseConfigured || !supabase) return undefined;
+    if (!isReady || workspaceMode === "demo" || !isSupabaseConfigured || !supabase) return undefined;
 
     let isCancelled = false;
 
@@ -1436,10 +1489,10 @@ function SchedulerApp() {
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [isReady]);
+  }, [isReady, workspaceMode]);
 
   useEffect(() => {
-    if (!isReady || !isSupabaseConfigured || !supabase) return undefined;
+    if (!isReady || workspaceMode === "demo" || !isSupabaseConfigured || !supabase) return undefined;
 
     const channel = supabase
       .channel("labeltraxx-shared-state")
@@ -1483,7 +1536,7 @@ function SchedulerApp() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [isReady]);
+  }, [isReady, workspaceMode]);
 
   useEffect(() => {
     if (!jobs.some((job) => job.id === selectedJobId)) setSelectedJobId(null);
@@ -3714,6 +3767,30 @@ function SchedulerApp() {
     setRegisterSuccess("");
   }
 
+  function enterDemoWorkspace() {
+    updateDemoWorkspaceUrl(true);
+    const demoSnapshot = buildDemoSharedSnapshot();
+    const normalized = applySharedStateSnapshot(demoSnapshot);
+    lastSharedSnapshotRef.current = JSON.stringify(buildSharedSnapshot(normalized));
+    setWorkspaceMode("demo");
+    setSyncStatus("Demo mode");
+    setLastSyncAt("");
+    setCurrentUsername(DEMO_DEFAULT_USERNAME);
+    setSessionExpiresAt(new Date(Date.now() + LOGIN_SESSION_DURATION_MS).toISOString());
+    setLoginForm({ username: DEMO_DEFAULT_USERNAME, password: DEMO_DEFAULT_PASSWORD });
+    setLoginError("");
+    setRegisterError("");
+    setRegisterSuccess("");
+    setAuthView("login");
+    setActiveTab("Scheduler");
+  }
+
+  function exitDemoWorkspace() {
+    if (workspaceMode !== "demo") return;
+    updateDemoWorkspaceUrl(false);
+    window.location.reload();
+  }
+
   function handleLogin(event) {
     event.preventDefault();
     const match = users.find(
@@ -3908,6 +3985,9 @@ function SchedulerApp() {
         onChangeView={switchAuthView}
         onSubmitLogin={handleLogin}
         onSubmitRegister={submitRegistrationRequest}
+        workspaceMode={workspaceMode}
+        onEnterDemo={enterDemoWorkspace}
+        onExitDemo={exitDemoWorkspace}
       />
     );
   }
@@ -3934,10 +4014,14 @@ function SchedulerApp() {
         <div className="mb-6 rounded-[2rem] border border-stone-300 bg-gradient-to-br from-stone-50 via-white to-stone-100 p-5 shadow-sm shadow-stone-300/40">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-900">Production board</p>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-900">
+                {workspaceMode === "demo" ? "Demo board" : "Production board"}
+              </p>
               <h1 className="mt-1 text-2xl font-semibold tracking-tight">Label Traxx Scheduler</h1>
               <p className="mt-2 max-w-3xl text-sm text-stone-700">
-                Logged in as {currentUser.username}. Request history, attachments, and completed work are now tied to user accounts.
+                {workspaceMode === "demo"
+                  ? `Logged in as ${currentUser.username} in the demo workspace. Everything here is sample data only for presentation use.`
+                  : `Logged in as ${currentUser.username}. Request history, attachments, and completed work are now tied to user accounts.`}
               </p>
             </div>
             <div className="flex flex-col gap-3 xl:items-end">
@@ -3975,6 +4059,15 @@ function SchedulerApp() {
                 <span className="rounded-full bg-stone-200 px-3 py-2 text-stone-800">
                   {currentUserRole} / {currentUserAccessMode === "edit" ? "Edit" : "View only"}: {currentUser.username}
                 </span>
+                {workspaceMode === "demo" && (
+                  <button
+                    type="button"
+                    onClick={exitDemoWorkspace}
+                    className="rounded-2xl border border-sky-200 bg-sky-50 px-3 py-2 text-sky-900"
+                  >
+                    Exit demo
+                  </button>
+                )}
                 <button onClick={handleLogout} className="rounded-2xl border border-stone-300 bg-stone-50 px-3 py-2 text-stone-800">
                   Log out
                 </button>
@@ -6279,6 +6372,9 @@ function LoginScreen({
   onChangeView,
   onSubmitLogin,
   onSubmitRegister,
+  workspaceMode,
+  onEnterDemo,
+  onExitDemo,
 }) {
   return (
     <div className="min-h-screen bg-stone-100 p-6 text-stone-900">
@@ -6287,7 +6383,9 @@ function LoginScreen({
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-900">Secure Access</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">Label Traxx Scheduler login</h1>
           <p className="mt-2 text-sm text-stone-700">
-            Sign in to open the scheduler, save your work, and stamp finished jobs and request history with your account.
+            {workspaceMode === "demo"
+              ? "This is the demo workspace. It uses fake sample jobs, requests, and shipment history only."
+              : "Sign in to open the scheduler, save your work, and stamp finished jobs and request history with your account."}
           </p>
         </div>
         <div className="mb-5 grid grid-cols-2 gap-2 rounded-2xl bg-stone-200/70 p-1">
@@ -6344,6 +6442,19 @@ function LoginScreen({
             <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
               Log in
             </button>
+            <button
+              type="button"
+              onClick={workspaceMode === "demo" ? onExitDemo : onEnterDemo}
+              className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm font-medium text-sky-900"
+            >
+              {workspaceMode === "demo" ? "Return to live workspace" : "Open demo workspace"}
+            </button>
+            {workspaceMode === "demo" && (
+              <div className="rounded-2xl bg-sky-50 px-4 py-3 text-sm text-sky-900">
+                Demo login: <span className="font-semibold">{DEMO_DEFAULT_USERNAME}</span> /{" "}
+                <span className="font-semibold">{DEMO_DEFAULT_PASSWORD}</span>
+              </div>
+            )}
           </form>
         ) : (
           <form onSubmit={onSubmitRegister} className="grid gap-4">
@@ -6383,7 +6494,13 @@ function LoginScreen({
           </form>
         )}
         <div className="mt-4 rounded-2xl bg-stone-200/70 px-4 py-3 text-sm text-stone-700">
-          Need to make an account? Email <span className="font-semibold">sinthavong@data-mail.com</span>
+          {workspaceMode === "demo" ? (
+            <span>The demo site does not send or receive any live company emails.</span>
+          ) : (
+            <span>
+              Need to make an account? Email <span className="font-semibold">sinthavong@data-mail.com</span>
+            </span>
+          )}
         </div>
       </div>
     </div>
