@@ -19,7 +19,17 @@ const ATTACHMENT_ACCEPT =
   ".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.png,.jpg,.jpeg,.zip,.msg,.eml";
 const PULL_PAPER_TARGETS = ["Press 5.1", "Press 6.1", "Press 2.1", "Press 1.1", "Digital"];
 const ROLE_OPTIONS = ["Management", "Warehouse/Shipper", "Operator"];
-const DEFAULT_SHIPMENT_METHODS = ["Skid", "FedEx", "UPS", "LTL", "Customer Pickup"];
+const DEFAULT_SHIPMENT_METHODS = ["Skid", "FedEx", "UPS", "LTL", "Customer Pickup", "JP Express"];
+const DEFAULT_SHIPMENT_RATE_RULES = [
+  {
+    id: "rate-premio-jp-skid",
+    customer: "Premio Foods",
+    method: "JP Express",
+    packageType: "Skids",
+    costPerUnit: 147.49,
+    billPerUnit: 350,
+  },
+];
 const SHIPMENT_QUEUE_WINDOW_OPTIONS = [
   { value: "7", label: "Last 7 days" },
   { value: "30", label: "Last 30 days" },
@@ -99,6 +109,14 @@ const EMPTY_EMAIL_GROUP_FORM = {
   name: "",
   recipients: "",
   cc: "",
+};
+
+const EMPTY_SHIPMENT_RATE_FORM = {
+  customer: "",
+  method: "JP Express",
+  packageType: "Skids",
+  costPerUnit: "",
+  billPerUnit: "",
 };
 
 const EMPTY_ACTIVITY_FILTERS = {
@@ -626,7 +644,23 @@ function normalizeShipmentMethods(methods) {
   const next = Array.isArray(methods)
     ? methods.map((method) => safeText(method)).filter(Boolean)
     : [];
-  return next.length ? Array.from(new Set(next)) : [...DEFAULT_SHIPMENT_METHODS];
+  return next.length ? Array.from(new Set([...next, ...DEFAULT_SHIPMENT_METHODS])) : [...DEFAULT_SHIPMENT_METHODS];
+}
+
+function normalizeShipmentRateRules(rules) {
+  const next = Array.isArray(rules)
+    ? rules
+        .map((rule, index) => ({
+          id: rule.id || `shipment-rate-${index + 1}`,
+          customer: safeText(rule.customer),
+          method: safeText(rule.method),
+          packageType: safeText(rule.packageType) || "Skids",
+          costPerUnit: parseCurrency(rule.costPerUnit),
+          billPerUnit: parseCurrency(rule.billPerUnit),
+        }))
+        .filter((rule) => rule.customer && rule.method)
+    : [];
+  return next.length ? next : DEFAULT_SHIPMENT_RATE_RULES.map((rule) => ({ ...rule }));
 }
 
 function normalizeShipmentEmailLogs(logs) {
@@ -697,6 +731,7 @@ function defaultSharedSnapshot() {
     shipmentEmailGroups: [],
     activityLog: [],
     shipmentMethods: [...DEFAULT_SHIPMENT_METHODS],
+    shipmentRateRules: DEFAULT_SHIPMENT_RATE_RULES.map((rule) => ({ ...rule })),
     users: [buildDefaultAdmin()],
     weekStart: startOfWeek(new Date()).toISOString(),
   };
@@ -719,6 +754,7 @@ function normalizeSharedSnapshot(snapshot) {
     shipmentEmailGroups: normalizeShipmentEmailGroups(source.shipmentEmailGroups),
     activityLog: normalizeActivityLog(source.activityLog),
     shipmentMethods: normalizeShipmentMethods(source.shipmentMethods),
+    shipmentRateRules: normalizeShipmentRateRules(source.shipmentRateRules),
     users: normalizeUsers(source.users),
     weekStart: source.weekStart ? new Date(source.weekStart) : startOfWeek(new Date()),
   };
@@ -740,6 +776,7 @@ function buildSharedSnapshot(state) {
     shipmentEmailGroups: state.shipmentEmailGroups,
     activityLog: state.activityLog,
     shipmentMethods: state.shipmentMethods,
+    shipmentRateRules: state.shipmentRateRules,
     users: state.users,
     weekStart: state.weekStart.toISOString(),
   };
@@ -1090,6 +1127,7 @@ function SchedulerApp() {
   const [shipmentEmailGroups, setShipmentEmailGroups] = useState([]);
   const [activityLog, setActivityLog] = useState([]);
   const [shipmentMethods, setShipmentMethods] = useState([...DEFAULT_SHIPMENT_METHODS]);
+  const [shipmentRateRules, setShipmentRateRules] = useState(DEFAULT_SHIPMENT_RATE_RULES.map((rule) => ({ ...rule })));
   const [users, setUsers] = useState([buildDefaultAdmin()]);
   const [currentUsername, setCurrentUsername] = useState("");
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date()));
@@ -1114,6 +1152,7 @@ function SchedulerApp() {
   const [shipmentForm, setShipmentForm] = useState({ ...EMPTY_SHIPMENT_FORM, shipDate: todayKey() });
   const [shipmentDraftAttachments, setShipmentDraftAttachments] = useState([]);
   const [newShipmentMethod, setNewShipmentMethod] = useState("");
+  const [shipmentRateForm, setShipmentRateForm] = useState(EMPTY_SHIPMENT_RATE_FORM);
   const [shipmentEmailForm, setShipmentEmailForm] = useState(EMPTY_EMAIL_FORM);
   const [shipmentEmailGroupForm, setShipmentEmailGroupForm] = useState(EMPTY_EMAIL_GROUP_FORM);
   const [loginForm, setLoginForm] = useState(EMPTY_LOGIN_FORM);
@@ -1164,6 +1203,7 @@ function SchedulerApp() {
     setShipmentEmailGroups(normalized.shipmentEmailGroups);
     setActivityLog(normalized.activityLog);
     setShipmentMethods(normalized.shipmentMethods);
+    setShipmentRateRules(normalized.shipmentRateRules);
     setUsers(normalized.users);
     setWeekStart(normalized.weekStart);
     return normalized;
@@ -1331,6 +1371,7 @@ function SchedulerApp() {
       shipmentEmailGroups,
       activityLog,
       shipmentMethods,
+      shipmentRateRules,
       users,
       weekStart,
     });
@@ -1379,7 +1420,7 @@ function SchedulerApp() {
     return () => {
       window.clearTimeout(saveTimerRef.current);
     };
-  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressDuties, pressOperators, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, suppliesRequests, users, weekStart, workspaceMode]);
+  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressDuties, pressOperators, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, shipmentRateRules, suppliesRequests, users, weekStart, workspaceMode]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -1555,6 +1596,27 @@ function SchedulerApp() {
       shipmentMethods.includes(current.method) ? current : { ...current, method: shipmentMethods[0] }
     );
   }, [shipmentMethods]);
+
+  useEffect(() => {
+    if (!matchedShipmentRateRule) return;
+    const packageCount = parseNumber(shipmentForm.packageCount);
+    if (!packageCount) return;
+    const nextTotalCost = (matchedShipmentRateRule.costPerUnit * packageCount).toFixed(2);
+    const nextBillAmount = (matchedShipmentRateRule.billPerUnit * packageCount).toFixed(2);
+    setShipmentForm((current) => {
+      if (
+        current.totalCost === nextTotalCost &&
+        current.billAmount === nextBillAmount
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        totalCost: nextTotalCost,
+        billAmount: nextBillAmount,
+      };
+    });
+  }, [matchedShipmentRateRule, shipmentForm.packageCount]);
 
   const tabs = useMemo(
     () => [...BASE_TABS, "User Admin"].filter((tab) => canAccessTab(currentUser, tab)),
@@ -1978,6 +2040,29 @@ function SchedulerApp() {
       .filter((job) => !assignedShipmentJobIds.has(job.id))
       .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
   }, [assignedShipmentJobIds, dateDoneJobs]);
+
+  const selectedShipmentCustomer = useMemo(() => {
+    const customers = Array.from(
+      new Set(
+        selectedShipmentJobs
+          .map((jobId) => jobMap.get(jobId)?.customerName)
+          .map((value) => safeText(value))
+          .filter(Boolean)
+      )
+    );
+    return customers.length === 1 ? customers[0] : "";
+  }, [jobMap, selectedShipmentJobs]);
+
+  const matchedShipmentRateRule = useMemo(
+    () =>
+      shipmentRateRules.find(
+        (rule) =>
+          comparableUsername(rule.customer) === comparableUsername(selectedShipmentCustomer) &&
+          comparableUsername(rule.method) === comparableUsername(shipmentForm.method) &&
+          comparableUsername(rule.packageType) === comparableUsername(shipmentForm.packageType)
+      ) || null,
+    [selectedShipmentCustomer, shipmentForm.method, shipmentForm.packageType, shipmentRateRules]
+  );
 
   const shipmentGroupsForDay = useMemo(
     () =>
@@ -3400,8 +3485,52 @@ function SchedulerApp() {
       if (current.method !== methodToRemove) return current;
       const fallback = shipmentMethods.find((method) => method !== methodToRemove) || current.method;
         return { ...current, method: fallback };
-      });
+    });
     recordActivity("Removed shipment method", "Shipping", `${methodToRemove} was removed from shipment methods.`);
+  }
+
+  function saveShipmentRateRule() {
+    if (!userCanEdit) return;
+    const customer = safeText(shipmentRateForm.customer);
+    const method = safeText(shipmentRateForm.method || shipmentForm.method);
+    const packageType = safeText(shipmentRateForm.packageType || "Skids");
+    const costPerUnit = parseCurrency(shipmentRateForm.costPerUnit);
+    const billPerUnit = parseCurrency(shipmentRateForm.billPerUnit);
+    if (!customer || !method || !costPerUnit) return;
+
+    setShipmentRateRules((current) => {
+      const existing = current.find(
+        (rule) =>
+          comparableUsername(rule.customer) === comparableUsername(customer) &&
+          comparableUsername(rule.method) === comparableUsername(method) &&
+          comparableUsername(rule.packageType) === comparableUsername(packageType)
+      );
+      if (existing) {
+        return current.map((rule) =>
+          rule.id === existing.id ? { ...rule, customer, method, packageType, costPerUnit, billPerUnit } : rule
+        );
+      }
+      return [...current, { id: makeId("ship-rate"), customer, method, packageType, costPerUnit, billPerUnit }];
+    });
+    setShipmentRateForm({ ...EMPTY_SHIPMENT_RATE_FORM, method: method || "JP Express" });
+    recordActivity(
+      "Saved shipment rate",
+      "Shipping",
+      `${customer} ${method} ${packageType.toLowerCase()} pricing was saved at ${formatCurrency(costPerUnit)} cost and ${formatCurrency(billPerUnit)} bill per unit.`
+    );
+  }
+
+  function removeShipmentRateRule(ruleId) {
+    if (!userCanEdit) return;
+    const rule = shipmentRateRules.find((item) => item.id === ruleId);
+    setShipmentRateRules((current) => current.filter((item) => item.id !== ruleId));
+    if (rule) {
+      recordActivity(
+        "Removed shipment rate",
+        "Shipping",
+        `${rule.customer} ${rule.method} ${safeText(rule.packageType).toLowerCase()} pricing was removed.`
+      );
+    }
   }
 
   function createShipmentGroup(event) {
@@ -5778,6 +5907,82 @@ function SchedulerApp() {
                       ))}
                     </div>
                   </div>
+                  <div className="mb-4 rounded-2xl border border-stone-300 bg-white p-4">
+                    <div className="mb-3 text-sm font-semibold">Saved shipment rates</div>
+                    <div className="mb-3 grid gap-3 md:grid-cols-2">
+                      <Field
+                        label="Customer"
+                        value={shipmentRateForm.customer}
+                        onChange={(value) => setShipmentRateForm((current) => ({ ...current, customer: value }))}
+                        placeholder="Premio Foods"
+                      />
+                      <div>
+                        <div className="mb-2 text-sm font-medium text-stone-800">Method</div>
+                        <select
+                          value={shipmentRateForm.method}
+                          onChange={(event) => setShipmentRateForm((current) => ({ ...current, method: event.target.value }))}
+                          className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                        >
+                          {shipmentMethods.map((method) => (
+                            <option key={method} value={method}>
+                              {method}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <div className="mb-2 text-sm font-medium text-stone-800">Type</div>
+                        <select
+                          value={shipmentRateForm.packageType}
+                          onChange={(event) => setShipmentRateForm((current) => ({ ...current, packageType: event.target.value }))}
+                          className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                        >
+                          <option>Skids</option>
+                          <option>Cartons</option>
+                        </select>
+                      </div>
+                      <Field
+                        label="Our cost per unit"
+                        value={shipmentRateForm.costPerUnit}
+                        onChange={(value) => setShipmentRateForm((current) => ({ ...current, costPerUnit: value }))}
+                        placeholder="147.49"
+                      />
+                      <Field
+                        label="Bill per unit"
+                        value={shipmentRateForm.billPerUnit}
+                        onChange={(value) => setShipmentRateForm((current) => ({ ...current, billPerUnit: value }))}
+                        placeholder="350.00"
+                      />
+                    </div>
+                    <div className="mb-3">
+                      <button
+                        type="button"
+                        onClick={saveShipmentRateRule}
+                        className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white"
+                      >
+                        Save rate
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {shipmentRateRules.map((rule) => (
+                        <div key={rule.id} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm text-stone-800">
+                          <div>
+                            <div className="font-medium">{rule.customer} - {rule.method} - {rule.packageType}</div>
+                            <div className="mt-1 text-xs text-stone-600">
+                              Cost {formatCurrency(rule.costPerUnit)} per unit · Bill {formatCurrency(rule.billPerUnit)} per unit
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => removeShipmentRateRule(rule.id)}
+                            className="rounded-2xl border border-rose-200 px-3 py-2 text-xs text-rose-700"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                   <form onSubmit={createShipmentGroup} className="grid gap-3">
                     <Field
                       label="Label"
@@ -5820,6 +6025,11 @@ function SchedulerApp() {
                         </select>
                       </div>
                     </div>
+                    {matchedShipmentRateRule && selectedShipmentCustomer && (
+                      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+                        Auto pricing {selectedShipmentCustomer} at {formatCurrency(matchedShipmentRateRule.costPerUnit)} cost and {formatCurrency(matchedShipmentRateRule.billPerUnit)} bill per {safeText(matchedShipmentRateRule.packageType).toLowerCase().replace(/s$/, "")}.
+                      </div>
+                    )}
                     <Field
                       label="Total price"
                       value={shipmentForm.totalCost}
