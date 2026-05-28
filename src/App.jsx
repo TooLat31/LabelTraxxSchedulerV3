@@ -18,6 +18,13 @@ const ATTACHMENT_ACCEPT =
 const PULL_PAPER_TARGETS = ["Press 5.1", "Press 6.1", "Press 2.1", "Press 1.1", "Digital"];
 const ROLE_OPTIONS = ["Management", "Warehouse/Shipper", "Operator"];
 const DEFAULT_SHIPMENT_METHODS = ["Skid", "FedEx", "UPS", "LTL", "Customer Pickup"];
+const SHIPMENT_QUEUE_WINDOW_OPTIONS = [
+  { value: "7", label: "Last 7 days" },
+  { value: "30", label: "Last 30 days" },
+  { value: "60", label: "Last 60 days" },
+  { value: "90", label: "Last 90 days" },
+  { value: "all", label: "All finished jobs" },
+];
 const SCHEDULE_DENSITY_OPTIONS = ["compact", "detailed"];
 const SCHEDULE_DENSITY_LABELS = {
   compact: "Compact cards",
@@ -210,6 +217,18 @@ function localMiddayIso(date) {
 function sameDay(dateValue, dayKey) {
   if (!dateValue || !dayKey) return false;
   return isoDate(new Date(dateValue)) === dayKey;
+}
+
+function isWithinLookbackWindow(dateValue, days, referenceDate = new Date()) {
+  if (!dateValue || days === "all") return days === "all";
+  const parsedDays = Number(days);
+  if (!Number.isFinite(parsedDays) || parsedDays <= 0) return true;
+  const valueDate = new Date(dateValue);
+  if (Number.isNaN(valueDate.getTime())) return false;
+  const cutoff = new Date(referenceDate);
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - parsedDays);
+  return valueDate >= cutoff;
 }
 
 function comparableUsername(value) {
@@ -1071,6 +1090,7 @@ function SchedulerApp() {
   const [shipDateDraft, setShipDateDraft] = useState(todayKey());
   const [selectedShipmentJobs, setSelectedShipmentJobs] = useState([]);
   const [selectedShipQueueJobs, setSelectedShipQueueJobs] = useState([]);
+  const [shipQueueWindow, setShipQueueWindow] = useState("30");
   const [shipmentForm, setShipmentForm] = useState({ ...EMPTY_SHIPMENT_FORM, shipDate: todayKey() });
   const [shipmentDraftAttachments, setShipmentDraftAttachments] = useState([]);
   const [newShipmentMethod, setNewShipmentMethod] = useState("");
@@ -1870,8 +1890,14 @@ function SchedulerApp() {
     return allUserFinishedJobs
       .filter((job) => !job.finishMeta?.excludeFromShipping)
       .filter((job) => !assignedShipmentJobIds.has(job.id))
+      .filter((job) => isWithinLookbackWindow(job.dateDone || job.finishMeta?.finishedAt, shipQueueWindow))
       .sort((left, right) => dateSortValue(right.finishMeta?.finishedAt) - dateSortValue(left.finishMeta?.finishedAt));
-  }, [allUserFinishedJobs, assignedShipmentJobIds]);
+  }, [allUserFinishedJobs, assignedShipmentJobIds, shipQueueWindow]);
+
+  useEffect(() => {
+    const visibleIds = new Set(unassignedFinishedJobs.map((job) => job.id));
+    setSelectedShipQueueJobs((current) => current.filter((jobId) => visibleIds.has(jobId)));
+  }, [unassignedFinishedJobs]);
 
   const dateDoneJobs = useMemo(() => {
     return jobs
@@ -5294,8 +5320,25 @@ function SchedulerApp() {
                   <div className="text-xs text-stone-600">
                     Pick the finished jobs that have not been grouped yet, assign them to a ship date, and they will move into that day's shipment queue.
                   </div>
+                  <div className="mt-1 text-[11px] text-stone-600">
+                    Showing {SHIPMENT_QUEUE_WINDOW_OPTIONS.find((option) => option.value === shipQueueWindow)?.label.toLowerCase() || "recent finished jobs"} so this tab stays fast.
+                  </div>
                 </div>
                 <div className="flex flex-wrap items-end gap-2">
+                  <div>
+                    <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Finished within</div>
+                    <select
+                      value={shipQueueWindow}
+                      onChange={(event) => setShipQueueWindow(event.target.value)}
+                      className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                    >
+                      {SHIPMENT_QUEUE_WINDOW_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                   <div>
                     <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Ship date</div>
                     <input
