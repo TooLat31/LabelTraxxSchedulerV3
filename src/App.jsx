@@ -1019,6 +1019,13 @@ function buildWeekColumns(weekStart) {
   });
 }
 
+function nextMondayFromDate(dateLike) {
+  const date = new Date(dateLike);
+  const day = date.getDay();
+  const offset = ((8 - day) % 7) || 7;
+  return addDays(date, offset);
+}
+
 function csvEscape(value) {
   const text = safeText(value).replace(/"/g, '""');
   return `"${text}"`;
@@ -1604,6 +1611,8 @@ function SchedulerApp() {
 
   const weekColumns = useMemo(() => buildWeekColumns(weekStart), [weekStart]);
   const weekKeys = useMemo(() => new Set(weekColumns.map((column) => column.key)), [weekColumns]);
+  const nextWeekMondayDate = useMemo(() => addDays(weekStart, 7), [weekStart]);
+  const nextWeekMondayKey = useMemo(() => isoDate(nextWeekMondayDate), [nextWeekMondayDate]);
   const jobMap = useMemo(() => new Map(jobs.map((job) => [job.id, job])), [jobs]);
   const jobSearchTextById = useMemo(() => {
     const map = new Map();
@@ -2498,9 +2507,9 @@ function SchedulerApp() {
   }
 
   function addAssignment(jobId, dayKey, press, beforeAssignmentId = "") {
-    if (!userCanMoveJobs) return;
+    if (!userCanMoveJobs) return false;
     const job = jobMap.get(jobId);
-    if (job && isReleaseJob(job)) return;
+    if (job && isReleaseJob(job)) return false;
     const exists = assignments.some(
       (assignment) =>
         assignment.jobId === jobId &&
@@ -2509,7 +2518,7 @@ function SchedulerApp() {
         assignment.kind === "press" &&
         assignment.status !== "finished"
     );
-    if (exists) return;
+    if (exists) return false;
     const newAssignment = {
       id: makeId("asg"),
       jobId,
@@ -2545,6 +2554,7 @@ function SchedulerApp() {
       `${job ? `${job.customerName} ${job.number}` : "A job"} was placed on Press ${press} for ${dayKey}.`,
       { jobId, dayKey, press }
     );
+    return true;
   }
 
   function addManualScheduleEntry(event) {
@@ -2584,11 +2594,11 @@ function SchedulerApp() {
   }
 
   function moveAssignment(assignmentId, dayKey, press, beforeAssignmentId = "") {
-    if (!userCanMoveJobs) return;
+    if (!userCanMoveJobs) return false;
     const assignmentToMove = assignments.find((assignment) => assignment.id === assignmentId);
-    if (!assignmentToMove) return;
+    if (!assignmentToMove) return false;
     const movingWithinLane = assignmentToMove.dayKey === dayKey && assignmentToMove.press === press;
-    if (assignmentToMove.kind === "press" && assignmentToMove.status === "finished" && !movingWithinLane) return;
+    if (assignmentToMove.kind === "press" && assignmentToMove.status === "finished" && !movingWithinLane) return false;
     const duplicate = assignments.some(
       (assignment) =>
         assignment.id !== assignmentId &&
@@ -2604,7 +2614,7 @@ function SchedulerApp() {
             assignment.status !== "finished")
         )
     );
-    if (duplicate && !movingWithinLane) return;
+    if (duplicate && !movingWithinLane) return false;
 
     setAssignments((current) => {
       const currentAssignment = current.find((assignment) => assignment.id === assignmentId);
@@ -2655,6 +2665,28 @@ function SchedulerApp() {
         beforeAssignmentId,
       }
     );
+    return true;
+  }
+
+  function scheduleJobToNextMonday(jobId, press) {
+    const targetPress = PRESS_ORDER.includes(press) ? press : "Rewind";
+    const didSchedule = addAssignment(jobId, nextWeekMondayKey, targetPress);
+    if (didSchedule) {
+      setWeekStart(nextWeekMondayDate);
+    }
+  }
+
+  function moveAssignmentToNextMonday(assignmentId) {
+    const assignment = assignments.find((item) => item.id === assignmentId);
+    if (!assignment) return;
+    const targetDate = nextMondayFromDate(`${assignment.dayKey}T12:00:00`);
+    const targetDayKey = isoDate(targetDate);
+    const didMove = moveAssignment(assignmentId, targetDayKey, assignment.press);
+    if (!didMove) return;
+    if (pickedUpItem?.type === "scheduled" && pickedUpItem.assignmentId === assignmentId) {
+      setPickedUpItem(null);
+    }
+    setWeekStart(startOfWeek(targetDate));
   }
 
   function moveAssignmentByStep(assignmentId, direction) {
@@ -4768,7 +4800,7 @@ function SchedulerApp() {
                       <table className="min-w-[1860px] border-collapse text-left text-[12px] text-stone-800">
                         <thead className="sticky top-0 z-10 bg-stone-100">
                           <tr className="border-b border-stone-300">
-                            {["Number", "Customer", "Priority", "PO No.", "Description", "Press", "Ship", "Due on site", "Quantity", "Status", "Stock", "Press Time", "Main", "Scheduled On", "Mon-Fri", "Actions"].map((label) => (
+                            {["Number", "Customer", "Priority", "PO No.", "Description", "Press", "Ship", "Due on site", "Quantity", "Status", "Stock", "Press Time", "Main", "Scheduled On", "Mon-Fri + Next Mon", "Actions"].map((label) => (
                               <th key={label} className="whitespace-nowrap border-r border-stone-200 px-3 py-2 font-semibold text-stone-700 last:border-r-0">
                                 {label}
                               </th>
@@ -4790,7 +4822,9 @@ function SchedulerApp() {
                               pressOptions={PRESS_ORDER}
                               onUpdatePress={userCanMoveJobs ? (press) => updateJobRecommendedPress(job.id, press) : undefined}
                               weekColumns={weekColumns}
+                              nextWeekMondayKey={nextWeekMondayKey}
                               onQuickAssign={(dayKey) => addAssignment(job.id, dayKey, PRESS_ORDER.includes(job.press) ? job.press : "Rewind")}
+                              onQuickAssignNextMonday={() => scheduleJobToNextMonday(job.id, job.press)}
                               onPickUp={userCanMoveJobs ? () => pickUpQueueJob(job.id) : undefined}
                             />
                           ))}
@@ -4960,6 +4994,7 @@ function SchedulerApp() {
                                   onFinish={job && userCanEdit ? () => finishJob(job.id) : undefined}
                                   onUndoFinish={job && userCanEdit && assignment.status === "finished" ? () => undoFinishJob(job.id) : undefined}
                                   onDuplicate={userCanMoveJobs ? () => duplicateAssignmentToNextDay(assignment.id) : undefined}
+                                  onMoveNextMonday={userCanMoveJobs ? () => moveAssignmentToNextMonday(assignment.id) : undefined}
                                   onPickUp={userCanMoveJobs ? () => pickUpScheduledAssignment(assignment.id) : undefined}
                                   draggable={userCanMoveJobs}
                                 />
@@ -7047,12 +7082,14 @@ function JobCard({
   onClick,
   onDoubleClick,
   onQuickAssign,
+  onQuickAssignNextMonday,
   onFinish,
   onUndoFinish,
   onUpdatePress,
   scheduledAssignments = [],
   pressOptions = [],
   weekColumns,
+  nextWeekMondayKey = "",
   finishedAt,
   finishedBy,
   canMove = true,
@@ -7198,6 +7235,17 @@ function JobCard({
                 {day.label.slice(0, 3)}
               </button>
             ))}
+          {onQuickAssignNextMonday && nextWeekMondayKey && (
+            <button
+              onClick={(event) => {
+                event.stopPropagation();
+                onQuickAssignNextMonday();
+              }}
+              className="rounded-xl border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] text-sky-900 hover:bg-sky-100"
+            >
+              Next Mon
+            </button>
+          )}
           {onFinish && (
             <button
               onClick={(event) => {
@@ -7274,7 +7322,9 @@ function PressQueueRow({
   pressOptions = [],
   onUpdatePress,
   weekColumns = [],
+  nextWeekMondayKey = "",
   onQuickAssign,
+  onQuickAssignNextMonday,
   onPickUp,
 }) {
   const suppressClickUntilRef = useRef(0);
@@ -7363,6 +7413,18 @@ function PressQueueRow({
               {day.label.slice(0, 3)}
             </button>
           ))}
+          {onQuickAssignNextMonday && nextWeekMondayKey && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onQuickAssignNextMonday();
+              }}
+              className="border border-sky-200 bg-sky-50 px-1.5 py-1 text-[10px] text-sky-900"
+            >
+              Next Mon
+            </button>
+          )}
         </div>
       </td>
       <td className="whitespace-nowrap px-3 py-2">
@@ -7492,6 +7554,7 @@ function CompactScheduleCard({
   onFinish,
   onUndoFinish,
   onDuplicate,
+  onMoveNextMonday,
   draggable = false,
   onPickUp,
 }) {
@@ -7619,7 +7682,7 @@ function CompactScheduleCard({
           {formatDateTime(finishMeta.finishedAt)} {finishMeta.finishedBy ? `- ${finishMeta.finishedBy}` : ""}
         </div>
       )}
-      {(onUnschedule || onFinish || onUndoFinish || onDuplicate) && (
+      {(onUnschedule || onFinish || onUndoFinish || onDuplicate || onMoveNextMonday) && (
         <div className={`${density === "compact" ? "mt-1" : "mt-2"} flex flex-wrap gap-2`}>
           {onPickUp && (
             <button onClick={onPickUp} className="border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800">
@@ -7634,6 +7697,11 @@ function CompactScheduleCard({
           {onDuplicate && (
             <button onClick={onDuplicate} className="border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800">
               Duplicate
+            </button>
+          )}
+          {onMoveNextMonday && (
+            <button onClick={onMoveNextMonday} className="border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] text-sky-900">
+              Next Mon
             </button>
           )}
           {onFinish && (
