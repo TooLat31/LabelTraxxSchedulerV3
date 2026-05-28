@@ -1158,6 +1158,8 @@ function SchedulerApp() {
   const [shipQueueWindow, setShipQueueWindow] = useState("30");
   const [shipmentForm, setShipmentForm] = useState({ ...EMPTY_SHIPMENT_FORM, shipDate: todayKey() });
   const [shipmentDraftAttachments, setShipmentDraftAttachments] = useState([]);
+  const [editingShipmentGroupId, setEditingShipmentGroupId] = useState("");
+  const [editingShipmentGroupForm, setEditingShipmentGroupForm] = useState({ ...EMPTY_SHIPMENT_FORM });
   const [newShipmentMethod, setNewShipmentMethod] = useState("");
   const [shipmentRateForm, setShipmentRateForm] = useState(EMPTY_SHIPMENT_RATE_FORM);
   const [shipmentEmailForm, setShipmentEmailForm] = useState(EMPTY_EMAIL_FORM);
@@ -3635,10 +3637,60 @@ function SchedulerApp() {
     );
   }
 
+  function beginEditingShipmentGroup(group) {
+    if (!userCanEdit || !group) return;
+    setEditingShipmentGroupId(group.id);
+    setEditingShipmentGroupForm({
+      label: safeText(group.label),
+      method: safeText(group.method || shipmentMethods[0] || DEFAULT_SHIPMENT_METHODS[0]),
+      packageCount: group.packageCount == null ? "" : String(group.packageCount),
+      packageType: safeText(group.packageType || "Skids"),
+      totalCost: group.totalCost == null ? "" : String(group.totalCost),
+      billAmount: group.billAmount == null ? "" : String(group.billAmount),
+      notes: safeText(group.notes),
+    });
+  }
+
+  function cancelEditingShipmentGroup() {
+    setEditingShipmentGroupId("");
+    setEditingShipmentGroupForm({ ...EMPTY_SHIPMENT_FORM });
+  }
+
+  function saveEditedShipmentGroup(groupId) {
+    if (!userCanEdit) return;
+    const existingGroup = shipmentGroups.find((item) => item.id === groupId);
+    if (!existingGroup) return;
+
+    const nextGroup = {
+      ...existingGroup,
+      label: safeText(editingShipmentGroupForm.label) || existingGroup.label,
+      method: safeText(editingShipmentGroupForm.method) || existingGroup.method,
+      packageCount: parseNumber(editingShipmentGroupForm.packageCount),
+      packageType: safeText(editingShipmentGroupForm.packageType || "Skids"),
+      totalCost: parseCurrency(editingShipmentGroupForm.totalCost),
+      billAmount: parseCurrency(editingShipmentGroupForm.billAmount),
+      notes: safeText(editingShipmentGroupForm.notes),
+    };
+
+    setShipmentGroups((current) =>
+      current.map((group) => (group.id === groupId ? nextGroup : group))
+    );
+    cancelEditingShipmentGroup();
+    recordActivity(
+      "Edited shipment group",
+      "Shipping",
+      `${nextGroup.label} on ${nextGroup.shipDate} was updated.`,
+      { groupId, shipDate: nextGroup.shipDate, method: nextGroup.method }
+    );
+  }
+
   function deleteShipmentGroup(groupId) {
     if (!userCanEdit) return;
     const group = shipmentGroups.find((item) => item.id === groupId);
     setShipmentGroups((current) => current.filter((group) => group.id !== groupId));
+    if (editingShipmentGroupId === groupId) {
+      cancelEditingShipmentGroup();
+    }
     if (group?.attachments?.length) {
       deleteStoredAttachments(group.attachments);
     }
@@ -6354,29 +6406,94 @@ function SchedulerApp() {
               <div className="space-y-3">
                 {shipmentGroupsForDay.map((group) => {
                   const items = shipmentItemsByGroupId.get(group.id) || [];
+                  const isEditingGroup = editingShipmentGroupId === group.id;
                   return (
                     <div key={group.id} className="rounded-2xl border border-stone-300 bg-white p-4">
                       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                         <div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <div className="text-sm font-semibold">{group.label}</div>
-                            <span className="rounded-full bg-emerald-900 px-2 py-1 text-[11px] font-medium text-white">
-                              {group.method}
-                            </span>
-                          </div>
-                          <div className="mt-1 text-xs text-stone-600">
-                            {items.length} jobs - {formatCurrency(group.totalCost)} - created {formatDateTime(group.createdAt)}
-                            {group.createdBy ? ` by ${group.createdBy}` : ""}
-                          </div>
-                          <div className="mt-1 text-xs text-stone-600">
-                            Bill {formatCurrency(group.billAmount)}
-                          </div>
-                          {!!group.packageCount && (
-                            <div className="mt-1 text-xs text-stone-600">
-                              {group.packageCount} {safeText(group.packageType || "Skids").toLowerCase()}
+                          {isEditingGroup ? (
+                            <div className="grid gap-3 md:grid-cols-2">
+                              <Field
+                                label="Label"
+                                value={editingShipmentGroupForm.label}
+                                onChange={(value) => setEditingShipmentGroupForm((current) => ({ ...current, label: value }))}
+                                placeholder="Shipment label"
+                              />
+                              <div>
+                                <div className="mb-2 text-sm font-medium text-stone-800">Method</div>
+                                <select
+                                  value={editingShipmentGroupForm.method}
+                                  onChange={(event) =>
+                                    setEditingShipmentGroupForm((current) => ({ ...current, method: event.target.value }))
+                                  }
+                                  className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                                >
+                                  {shipmentMethods.map((method) => (
+                                    <option key={method} value={method}>
+                                      {method}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <Field
+                                label="Package count"
+                                value={editingShipmentGroupForm.packageCount}
+                                onChange={(value) => setEditingShipmentGroupForm((current) => ({ ...current, packageCount: value }))}
+                                placeholder="3"
+                              />
+                              <Field
+                                label="Package type"
+                                value={editingShipmentGroupForm.packageType}
+                                onChange={(value) => setEditingShipmentGroupForm((current) => ({ ...current, packageType: value }))}
+                                placeholder="Skids"
+                              />
+                              <Field
+                                label="Total cost"
+                                value={editingShipmentGroupForm.totalCost}
+                                onChange={(value) => setEditingShipmentGroupForm((current) => ({ ...current, totalCost: value }))}
+                                placeholder="141.17"
+                              />
+                              <Field
+                                label="Bill customer"
+                                value={editingShipmentGroupForm.billAmount}
+                                onChange={(value) => setEditingShipmentGroupForm((current) => ({ ...current, billAmount: value }))}
+                                placeholder="185.00"
+                              />
+                              <div className="md:col-span-2">
+                                <div className="mb-2 text-sm font-medium text-stone-800">Notes</div>
+                                <textarea
+                                  value={editingShipmentGroupForm.notes}
+                                  onChange={(event) =>
+                                    setEditingShipmentGroupForm((current) => ({ ...current, notes: event.target.value }))
+                                  }
+                                  placeholder="Optional shipment notes"
+                                  className="h-24 w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                                />
+                              </div>
                             </div>
+                          ) : (
+                            <>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <div className="text-sm font-semibold">{group.label}</div>
+                                <span className="rounded-full bg-emerald-900 px-2 py-1 text-[11px] font-medium text-white">
+                                  {group.method}
+                                </span>
+                              </div>
+                              <div className="mt-1 text-xs text-stone-600">
+                                {items.length} jobs - {formatCurrency(group.totalCost)} - created {formatDateTime(group.createdAt)}
+                                {group.createdBy ? ` by ${group.createdBy}` : ""}
+                              </div>
+                              <div className="mt-1 text-xs text-stone-600">
+                                Bill {formatCurrency(group.billAmount)}
+                              </div>
+                              {!!group.packageCount && (
+                                <div className="mt-1 text-xs text-stone-600">
+                                  {group.packageCount} {safeText(group.packageType || "Skids").toLowerCase()}
+                                </div>
+                              )}
+                              {group.notes && <div className="mt-2 whitespace-pre-wrap text-sm text-stone-800">{group.notes}</div>}
+                            </>
                           )}
-                          {group.notes && <div className="mt-2 text-sm text-stone-800">{group.notes}</div>}
                           <div className="mt-3">
                             <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Documents</div>
                             <AttachmentList
@@ -6399,12 +6516,37 @@ function SchedulerApp() {
                             />
                           </label>
                         </div>
-                        <button
-                          onClick={() => deleteShipmentGroup(group.id)}
-                          className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700"
-                        >
-                          Delete group
-                        </button>
+                        <div className="flex flex-wrap gap-2">
+                          {isEditingGroup ? (
+                            <>
+                              <button
+                                onClick={() => saveEditedShipmentGroup(group.id)}
+                                className="rounded-2xl bg-emerald-900 px-3 py-2 text-sm text-white"
+                              >
+                                Save changes
+                              </button>
+                              <button
+                                onClick={cancelEditingShipmentGroup}
+                                className="rounded-2xl border border-stone-300 px-3 py-2 text-sm text-stone-800"
+                              >
+                                Cancel
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              onClick={() => beginEditingShipmentGroup(group)}
+                              className="rounded-2xl border border-stone-300 px-3 py-2 text-sm text-stone-800"
+                            >
+                              Edit group
+                            </button>
+                          )}
+                          <button
+                            onClick={() => deleteShipmentGroup(group.id)}
+                            className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700"
+                          >
+                            Delete group
+                          </button>
+                        </div>
                       </div>
                       <div className="mt-3 grid gap-2 md:grid-cols-2">
                         {items.map((item) => (
