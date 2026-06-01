@@ -697,21 +697,30 @@ function normalizeShipmentEmailGroups(groups) {
     : [];
 }
 
-function normalizePressOperators(operators) {
+function normalizePressOperators(operators, legacyDuties = {}) {
   const source = operators && typeof operators === "object" ? operators : {};
+  const legacySource = legacyDuties && typeof legacyDuties === "object" ? legacyDuties : {};
   return Object.fromEntries(
-    Object.entries(source)
-      .map(([key, value]) => [safeText(key), safeText(value)])
-      .filter(([key, value]) => key && value)
-  );
-}
-
-function normalizePressDuties(duties) {
-  const source = duties && typeof duties === "object" ? duties : {};
-  return Object.fromEntries(
-    Object.entries(source)
-      .map(([key, value]) => [safeText(key), safeText(value)])
-      .filter(([key, value]) => key && value)
+    Object.entries({ ...legacySource, ...source })
+      .map(([key, value]) => {
+        const normalizedKey = safeText(key);
+        if (!normalizedKey) return null;
+        const sourceValue = source[key];
+        const legacyValue = legacySource[key];
+        const operatorEntry =
+          sourceValue && typeof sourceValue === "object"
+            ? {
+                operator1: safeText(sourceValue.operator1),
+                operator2: safeText(sourceValue.operator2),
+              }
+            : {
+                operator1: safeText(sourceValue),
+                operator2: safeText(legacyValue),
+              };
+        if (!operatorEntry.operator1 && !operatorEntry.operator2) return null;
+        return [normalizedKey, operatorEntry];
+      })
+      .filter(Boolean)
   );
 }
 
@@ -720,7 +729,6 @@ function defaultSharedSnapshot() {
     jobs: [],
     assignments: [],
     pressOperators: {},
-    pressDuties: {},
     requests: [],
     pullPaperRequests: [],
     notes: [],
@@ -742,8 +750,7 @@ function normalizeSharedSnapshot(snapshot) {
   return {
     jobs: normalizeJobs(source.jobs),
     assignments: normalizeAssignments(source.assignments),
-    pressOperators: normalizePressOperators(source.pressOperators),
-    pressDuties: normalizePressDuties(source.pressDuties),
+    pressOperators: normalizePressOperators(source.pressOperators, source.pressDuties),
     requests: normalizeRequests(source.requests),
     pullPaperRequests: normalizePullPaperRequests(source.pullPaperRequests),
     notes: normalizeNotes(source.notes),
@@ -765,7 +772,6 @@ function buildSharedSnapshot(state) {
     jobs: state.jobs,
     assignments: state.assignments,
     pressOperators: state.pressOperators,
-    pressDuties: state.pressDuties,
     requests: state.requests,
     pullPaperRequests: state.pullPaperRequests,
     notes: state.notes,
@@ -1123,7 +1129,6 @@ function SchedulerApp() {
   const [jobs, setJobs] = useState([]);
   const [assignments, setAssignments] = useState([]);
   const [pressOperators, setPressOperators] = useState({});
-  const [pressDuties, setPressDuties] = useState({});
   const [requests, setRequests] = useState([]);
   const [pullPaperRequests, setPullPaperRequests] = useState([]);
   const [notes, setNotes] = useState([]);
@@ -1201,7 +1206,6 @@ function SchedulerApp() {
     setJobs(normalized.jobs);
     setAssignments(normalized.assignments);
     setPressOperators(normalized.pressOperators);
-    setPressDuties(normalized.pressDuties);
     setRequests(normalized.requests);
     setPullPaperRequests(normalized.pullPaperRequests);
     setNotes(normalized.notes);
@@ -1369,7 +1373,6 @@ function SchedulerApp() {
       jobs,
       assignments,
       pressOperators,
-      pressDuties,
       requests,
       pullPaperRequests,
       notes,
@@ -1429,7 +1432,7 @@ function SchedulerApp() {
     return () => {
       window.clearTimeout(saveTimerRef.current);
     };
-  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressDuties, pressOperators, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, shipmentRateRules, suppliesRequests, users, weekStart, workspaceMode]);
+  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressOperators, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, shipmentRateRules, suppliesRequests, users, weekStart, workspaceMode]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -2827,16 +2830,27 @@ function SchedulerApp() {
     );
   }
 
-  function getPressOperator(dayKey, press) {
-    return pressOperators[pressOperatorKey(dayKey, press)] || "";
+  function getPressOperator(dayKey, press, slot = "operator1") {
+    const entry = pressOperators[pressOperatorKey(dayKey, press)];
+    if (entry && typeof entry === "object") return safeText(entry[slot]);
+    return slot === "operator1" ? safeText(entry) : "";
   }
 
-  function updatePressOperator(dayKey, press, value) {
+  function updatePressOperator(dayKey, press, slot, value) {
     if (!userCanEdit) return;
     const key = pressOperatorKey(dayKey, press);
     const nextValue = safeText(value);
     setPressOperators((current) => {
-      if (nextValue) return { ...current, [key]: nextValue };
+      const currentEntry = current[key] && typeof current[key] === "object"
+        ? current[key]
+        : { operator1: safeText(current[key]), operator2: "" };
+      const nextEntry = {
+        operator1: safeText(slot === "operator1" ? nextValue : currentEntry.operator1),
+        operator2: safeText(slot === "operator2" ? nextValue : currentEntry.operator2),
+      };
+      if (nextEntry.operator1 || nextEntry.operator2) {
+        return { ...current, [key]: nextEntry };
+      }
       if (!(key in current)) return current;
       const next = { ...current };
       delete next[key];
@@ -2844,50 +2858,19 @@ function SchedulerApp() {
     });
   }
 
-  function commitPressOperator(dayKey, press, previousValue, value) {
+  function commitPressOperator(dayKey, press, slot, previousValue, value) {
     if (!currentUser || !userCanEdit) return;
     const previous = safeText(previousValue);
     const nextValue = safeText(value);
     if (previous === nextValue) return;
+    const slotLabel = slot === "operator2" ? "Operator 2" : "Operator 1";
     recordActivity(
-      nextValue ? "Updated press operator" : "Cleared press operator",
+      nextValue ? `Updated ${slotLabel.toLowerCase()}` : `Cleared ${slotLabel.toLowerCase()}`,
       "Scheduler",
       nextValue
-        ? `${nextValue} is assigned to Press ${press} on ${dayKey}.`
-        : `The operator was cleared from Press ${press} on ${dayKey}.`,
-      { dayKey, press, operator: nextValue }
-    );
-  }
-
-  function getPressDuty(dayKey, press) {
-    return pressDuties[pressOperatorKey(dayKey, press)] || "";
-  }
-
-  function updatePressDuty(dayKey, press, value) {
-    if (!userCanEdit) return;
-    const key = pressOperatorKey(dayKey, press);
-    const nextValue = safeText(value);
-    setPressDuties((current) => {
-      if (nextValue) return { ...current, [key]: nextValue };
-      if (!(key in current)) return current;
-      const next = { ...current };
-      delete next[key];
-      return next;
-    });
-  }
-
-  function commitPressDuty(dayKey, press, previousValue, value) {
-    if (!currentUser || !userCanEdit) return;
-    const previous = safeText(previousValue);
-    const nextValue = safeText(value);
-    if (previous === nextValue) return;
-    recordActivity(
-      nextValue ? "Updated press duty" : "Cleared press duty",
-      "Scheduler",
-      nextValue
-        ? `${formatPressLabel(press)} on ${dayKey} is set to ${nextValue}.`
-        : `The duty was cleared from ${formatPressLabel(press)} on ${dayKey}.`,
-      { dayKey, press, duty: nextValue }
+        ? `${slotLabel} for Press ${press} on ${dayKey} is ${nextValue}.`
+        : `${slotLabel} was cleared from Press ${press} on ${dayKey}.`,
+      { dayKey, press, slot, operator: nextValue }
     );
   }
 
@@ -5015,8 +4998,8 @@ function SchedulerApp() {
                       {weekColumns.map((day) => {
                         const laneJobs = board[day.key]?.[press] || [];
                         const totalHours = laneJobs.reduce((sum, item) => sum + (item.job?.estPressTime || 0), 0);
-                        const operatorName = getPressOperator(day.key, press);
-                        const dutyName = getPressDuty(day.key, press);
+                        const operatorOneName = getPressOperator(day.key, press, "operator1");
+                        const operatorTwoName = getPressOperator(day.key, press, "operator2");
                         return (
                           <div
                             key={`${press}-${day.key}`}
@@ -5032,19 +5015,19 @@ function SchedulerApp() {
                               <div className="flex flex-wrap items-center gap-2">
                                 <input
                                   type="text"
-                                  value={operatorName}
-                                  onChange={(event) => updatePressOperator(day.key, press, event.target.value)}
-                                  onBlur={(event) => commitPressOperator(day.key, press, operatorName, event.target.value)}
-                                  placeholder="Operator"
+                                  value={operatorOneName}
+                                  onChange={(event) => updatePressOperator(day.key, press, "operator1", event.target.value)}
+                                  onBlur={(event) => commitPressOperator(day.key, press, "operator1", operatorOneName, event.target.value)}
+                                  placeholder="Operator 1"
                                   disabled={!userCanEdit}
                                   className="min-w-[104px] border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800 outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
                                 />
                                 <input
                                   type="text"
-                                  value={dutyName}
-                                  onChange={(event) => updatePressDuty(day.key, press, event.target.value)}
-                                  onBlur={(event) => commitPressDuty(day.key, press, dutyName, event.target.value)}
-                                  placeholder="Duty"
+                                  value={operatorTwoName}
+                                  onChange={(event) => updatePressOperator(day.key, press, "operator2", event.target.value)}
+                                  onBlur={(event) => commitPressOperator(day.key, press, "operator2", operatorTwoName, event.target.value)}
+                                  placeholder="Operator 2"
                                   disabled={!userCanEdit}
                                   className="min-w-[104px] border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800 outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
                                 />
