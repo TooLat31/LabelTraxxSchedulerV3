@@ -13,6 +13,7 @@ const SHARED_SAVE_DEBOUNCE_MS = 700;
 const SHARED_REFRESH_INTERVAL_MS = 15000;
 const SHARED_REMOTE_GUARD_MS = SHARED_SAVE_DEBOUNCE_MS + 2000;
 const SHARED_PENDING_REMOTE_BLOCK_MS = 45000;
+const PRESENCE_STALE_MS = 60000;
 const ATTACHMENT_BUCKET = "labeltraxx-attachments";
 const ACTIVITY_LOG_LIMIT = 300;
 const DEMO_QUERY_PARAM = "demo";
@@ -1204,12 +1205,15 @@ function SchedulerApp() {
   const [pickedUpItem, setPickedUpItem] = useState(null);
   const [syncStatus, setSyncStatus] = useState(isSupabaseConfigured ? "Connecting..." : "Local only");
   const [lastSyncAt, setLastSyncAt] = useState("");
+  const [activePresenceUsers, setActivePresenceUsers] = useState([]);
   const jobDetailsRef = useRef(null);
   const lastSharedSnapshotRef = useRef("");
   const pendingSharedSnapshotRef = useRef("");
   const pendingSharedSnapshotAtRef = useRef(0);
   const lastLocalSharedChangeRef = useRef(0);
   const saveTimerRef = useRef(null);
+  const presenceChannelRef = useRef(null);
+  const presenceClientIdRef = useRef(makeId("presence"));
   const deferredSearch = useDeferredValue(search);
   const deferredUnscheduledSearch = useDeferredValue(unscheduledSearch);
   const deferredLocationSearch = useDeferredValue(locationSearch);
@@ -2200,6 +2204,108 @@ function SchedulerApp() {
     [jobMap, selectedJobId]
   );
   const selectedJobFinishMeta = selectedJob ? finishedMetaByJobId.get(selectedJob.id) : null;
+  const selectedJobPresenceLabel = selectedJob ? `${selectedJob.customerName} ${selectedJob.number}`.trim() : "";
+
+  useEffect(() => {
+    if (!isReady || workspaceMode === "demo" || !isSupabaseConfigured || !supabase || !currentUser) {
+      setActivePresenceUsers([]);
+      return undefined;
+    }
+
+    const channel = supabase.channel("labeltraxx-user-presence", {
+      config: {
+        presence: {
+          key: presenceClientIdRef.current,
+        },
+      },
+    });
+
+    const syncPresenceUsers = () => {
+      const now = Date.now();
+      const presenceState = channel.presenceState();
+      const users = Object.entries(presenceState)
+        .flatMap(([presenceKey, presences]) =>
+          (Array.isArray(presences) ? presences : []).map((presence) => ({
+            clientId: safeText(presence.clientId || presenceKey),
+            username: safeText(presence.username),
+            tab: safeText(presence.tab || "Scheduler"),
+            action: safeText(presence.action || "viewing"),
+            jobLabel: safeText(presence.jobLabel),
+            updatedAt: safeText(presence.updatedAt),
+          }))
+        )
+        .filter((presence) => presence.username)
+        .filter((presence) => {
+          const updatedAt = presence.updatedAt ? new Date(presence.updatedAt).getTime() : now;
+          return Number.isFinite(updatedAt) && now - updatedAt <= PRESENCE_STALE_MS;
+        })
+        .sort((left, right) => {
+          const leftSelf = left.clientId === presenceClientIdRef.current ? 0 : 1;
+          const rightSelf = right.clientId === presenceClientIdRef.current ? 0 : 1;
+          return leftSelf - rightSelf || left.username.localeCompare(right.username) || left.tab.localeCompare(right.tab);
+        });
+      setActivePresenceUsers(users);
+    };
+
+    presenceChannelRef.current = channel;
+    channel
+      .on("presence", { event: "sync" }, syncPresenceUsers)
+      .on("presence", { event: "join" }, syncPresenceUsers)
+      .on("presence", { event: "leave" }, syncPresenceUsers)
+      .subscribe((status) => {
+        if (status !== "SUBSCRIBED") return;
+        channel.track({
+          clientId: presenceClientIdRef.current,
+          username: currentUser.username,
+          tab: activeTab,
+          action: "viewing",
+          jobLabel: "",
+          updatedAt: new Date().toISOString(),
+        });
+      });
+
+    return () => {
+      channel.untrack().catch(() => {});
+      supabase.removeChannel(channel);
+      if (presenceChannelRef.current === channel) {
+        presenceChannelRef.current = null;
+      }
+      setActivePresenceUsers([]);
+    };
+  }, [currentUser?.username, isReady, workspaceMode]);
+
+  useEffect(() => {
+    if (!isReady || workspaceMode === "demo" || !currentUser) return;
+    const channel = presenceChannelRef.current;
+    if (!channel) return;
+    const isMoving = activeTab === "Scheduler" && !!pickedUpItem;
+    const isViewingSchedulerJob = activeTab === "Scheduler" && !!selectedJobPresenceLabel;
+    channel.track({
+      clientId: presenceClientIdRef.current,
+      username: currentUser.username,
+      tab: activeTab,
+      action: isMoving ? "moving" : isViewingSchedulerJob ? "viewing job" : "viewing",
+      jobLabel: isMoving ? safeText(pickedUpItem.label) : isViewingSchedulerJob ? selectedJobPresenceLabel : "",
+      updatedAt: new Date().toISOString(),
+    });
+  }, [activeTab, currentUser?.username, isReady, pickedUpItem, selectedJobPresenceLabel, workspaceMode]);
+
+  const otherPresenceUsers = useMemo(
+    () => activePresenceUsers.filter((presence) => presence.clientId !== presenceClientIdRef.current),
+    [activePresenceUsers]
+  );
+
+  const presenceByTab = useMemo(() => {
+    const map = new Map();
+    otherPresenceUsers.forEach((presence) => {
+      const users = map.get(presence.tab) || [];
+      if (!users.some((username) => comparableUsername(username) === comparableUsername(presence.username))) {
+        users.push(presence.username);
+      }
+      map.set(presence.tab, users);
+    });
+    return map;
+  }, [otherPresenceUsers]);
 
   const jobLocationResults = useMemo(() => {
     if (!normalizedLocationSearch) return [];
@@ -4461,6 +4567,13 @@ function SchedulerApp() {
     "Supplies Request": openSuppliesRequests.length,
   };
 
+  const formatPresenceText = (presence) => {
+    const name = presence.clientId === presenceClientIdRef.current ? "You" : presence.username;
+    if (presence.action === "moving") return `${name} moving ${presence.jobLabel || "a job"}`;
+    if (presence.action === "viewing job") return `${name} viewing ${presence.jobLabel || "a job"}`;
+    return `${name} in ${presence.tab}`;
+  };
+
   return (
     <div className="min-h-screen bg-stone-100 text-stone-900">
       <div className="mx-auto max-w-[1900px] p-4 md:p-6">
@@ -4480,30 +4593,66 @@ function SchedulerApp() {
             <div className="flex flex-col gap-3 xl:items-end">
               <div className="w-full overflow-x-auto pb-1 xl:max-w-[72vw]">
                 <div className="flex min-w-max gap-2">
-                  {tabs.map((tab) => (
-                    <button
-                      key={tab}
-                      onClick={() => setActiveTab(tab)}
-                      className={`rounded-2xl px-4 py-2 text-sm font-medium transition ${
-                        activeTab === tab
-                          ? "bg-emerald-900 text-stone-50 shadow-sm"
-                          : "border border-stone-300 bg-stone-50 text-stone-700 hover:bg-stone-100"
-                      }`}
-                    >
-                      <span>{tab}</span>
-                      {tabBadges[tab] > 0 && (
-                        <span
-                          className={`ml-2 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                            activeTab === tab ? "bg-white/15 text-stone-50" : "bg-stone-200 text-stone-800"
-                          }`}
-                        >
-                          {tabBadges[tab]}
-                        </span>
-                      )}
-                    </button>
-                  ))}
+                  {tabs.map((tab) => {
+                    const tabPresence = presenceByTab.get(tab) || [];
+                    return (
+                      <button
+                        key={tab}
+                        onClick={() => setActiveTab(tab)}
+                        className={`rounded-2xl px-4 py-2 text-sm font-medium transition ${
+                          activeTab === tab
+                            ? "bg-emerald-900 text-stone-50 shadow-sm"
+                            : "border border-stone-300 bg-stone-50 text-stone-700 hover:bg-stone-100"
+                        }`}
+                      >
+                        <span>{tab}</span>
+                        {tabBadges[tab] > 0 && (
+                          <span
+                            className={`ml-2 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                              activeTab === tab ? "bg-white/15 text-stone-50" : "bg-stone-200 text-stone-800"
+                            }`}
+                          >
+                            {tabBadges[tab]}
+                          </span>
+                        )}
+                        {tabPresence.length > 0 && (
+                          <span
+                            className={`ml-2 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                              activeTab === tab ? "bg-sky-200 text-sky-950" : "bg-sky-100 text-sky-900"
+                            }`}
+                            title={tabPresence.join(", ")}
+                          >
+                            {tabPresence.length === 1 ? tabPresence[0] : `${tabPresence.length} active`}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
+              {activePresenceUsers.length > 0 && (
+                <div className="flex max-w-full flex-wrap justify-start gap-2 text-xs xl:justify-end">
+                  {activePresenceUsers.slice(0, 6).map((presence) => (
+                    <span
+                      key={`${presence.clientId}-${presence.tab}`}
+                      className={`rounded-full border px-3 py-1 ${
+                        presence.clientId === presenceClientIdRef.current
+                          ? "border-stone-300 bg-white text-stone-700"
+                          : presence.action === "moving"
+                            ? "border-sky-200 bg-sky-50 text-sky-900"
+                            : "border-stone-300 bg-stone-50 text-stone-700"
+                      }`}
+                    >
+                      {formatPresenceText(presence)}
+                    </span>
+                  ))}
+                  {activePresenceUsers.length > 6 && (
+                    <span className="rounded-full border border-stone-300 bg-stone-50 px-3 py-1 text-stone-700">
+                      +{activePresenceUsers.length - 6} more
+                    </span>
+                  )}
+                </div>
+              )}
               <div className="flex items-center gap-2 text-sm">
                 <span className={`rounded-full px-3 py-2 ${syncTone(syncStatus)}`}>
                   {syncStatus}
