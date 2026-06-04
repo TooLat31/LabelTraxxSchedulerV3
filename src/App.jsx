@@ -14,11 +14,13 @@ const SHARED_REFRESH_INTERVAL_MS = 15000;
 const SHARED_REMOTE_GUARD_MS = SHARED_SAVE_DEBOUNCE_MS + 2000;
 const SHARED_PENDING_REMOTE_BLOCK_MS = 45000;
 const PRESENCE_STALE_MS = 60000;
+const PRESENCE_HEARTBEAT_MS = 25000;
 const ATTACHMENT_BUCKET = "labeltraxx-attachments";
 const ACTIVITY_LOG_LIMIT = 300;
 const DEMO_QUERY_PARAM = "demo";
 const BASE_TABS = ["Today", "Scheduler", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails", "Activity Log"];
 const ACCESS_MODE_OPTIONS = ["edit", "view"];
+const TAB_ACCESS_OPTIONS = ["none", "view", "edit"];
 const ATTACHMENT_ACCEPT =
   ".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.png,.jpg,.jpeg,.zip,.msg,.eml";
 const PULL_PAPER_TARGETS = ["Press 5.1", "Press 6.1", "Press 2.1", "Press 1.1", "Digital"];
@@ -85,12 +87,16 @@ const EMPTY_REGISTER_FORM = {
   password: "",
 };
 
+const DEFAULT_USER_FORM_TABS = BASE_TABS.filter((tab) => !["New Request", "Open Requests"].includes(tab));
+const DEFAULT_USER_FORM_TAB_ACCESS = Object.fromEntries(DEFAULT_USER_FORM_TABS.map((tab) => [tab, "edit"]));
+
 const EMPTY_USER_FORM = {
   username: "",
   password: "",
   accessMode: "edit",
   canManageUsers: false,
-  tabs: BASE_TABS.filter((tab) => !["New Request", "Open Requests"].includes(tab)),
+  tabs: DEFAULT_USER_FORM_TABS,
+  tabAccess: DEFAULT_USER_FORM_TAB_ACCESS,
 };
 
 const EMPTY_SHIPMENT_FORM = {
@@ -291,6 +297,11 @@ function normalizeAccessMode(mode, role, isAdmin = false) {
   return normalizeRole(role, isAdmin) === "Operator" ? "view" : "edit";
 }
 
+function normalizeTabAccessValue(value) {
+  const normalized = safeText(value).toLowerCase();
+  return TAB_ACCESS_OPTIONS.includes(normalized) ? normalized : "";
+}
+
 function normalizeUserTabs(tabs, role, isAdmin = false, canManageUsers = false) {
   const next = Array.isArray(tabs)
     ? tabs
@@ -301,6 +312,47 @@ function normalizeUserTabs(tabs, role, isAdmin = false, canManageUsers = false) 
   const filtered = canManageUsers ? fallback : fallback.filter((tab) => tab !== "User Admin");
   if (canManageUsers && !filtered.includes("User Admin")) filtered.push("User Admin");
   return filtered;
+}
+
+function getPermissionTabs(canManageUsers = false) {
+  return canManageUsers ? [...BASE_TABS, "User Admin"] : BASE_TABS;
+}
+
+function getTabsFromTabAccess(tabAccess, canManageUsers = false) {
+  return getPermissionTabs(canManageUsers).filter((tab) => {
+    const mode = normalizeTabAccessValue(tabAccess?.[tab]);
+    return mode && mode !== "none";
+  });
+}
+
+function deriveAccessModeFromTabAccess(tabAccess, fallback = "view") {
+  const editableTabs = BASE_TABS.filter((tab) => normalizeTabAccessValue(tabAccess?.[tab]) === "edit");
+  if (editableTabs.length) return "edit";
+  return normalizeTabAccessValue(fallback) === "edit" ? "edit" : "view";
+}
+
+function normalizeUserTabAccess(tabAccess, tabs, accessMode, role, isAdmin = false, canManageUsers = false) {
+  const canManage = !!canManageUsers || normalizeRole(role, isAdmin) === "Management";
+  const source = tabAccess && typeof tabAccess === "object" ? tabAccess : {};
+  const hasExplicitAccess = Object.keys(source).some((tab) => [...BASE_TABS, "User Admin"].includes(tab));
+  const fallbackTabs = normalizeUserTabs(tabs, role, isAdmin, canManage);
+  const fallbackMode = normalizeAccessMode(accessMode, role, isAdmin || canManage);
+
+  return [...BASE_TABS, "User Admin"].reduce((next, tab) => {
+    const explicitMode = normalizeTabAccessValue(source[tab]);
+    const mode = hasExplicitAccess
+      ? explicitMode || "none"
+      : fallbackTabs.includes(tab)
+        ? fallbackMode
+        : "none";
+
+    if (tab === "User Admin") {
+      next[tab] = canManage ? "edit" : "none";
+    } else {
+      next[tab] = mode;
+    }
+    return next;
+  }, {});
 }
 
 function normalizeRole(role, isAdmin) {
@@ -323,20 +375,32 @@ function getUserAccessMode(user) {
 }
 
 function canEdit(user) {
-  return getUserAccessMode(user) === "edit";
+  if (!user) return false;
+  return getPermissionTabs(user.canManageUsers).some((tab) => canEditTab(user, tab));
 }
 
 function getVisibleTabs(user) {
   if (!user) return ["Scheduler"];
-  return normalizeUserTabs(user.tabs, user.role, user.isAdmin, user.canManageUsers);
+  const tabAccess = normalizeUserTabAccess(user.tabAccess, user.tabs, user.accessMode, user.role, user.isAdmin, user.canManageUsers);
+  return getTabsFromTabAccess(tabAccess, user.canManageUsers);
 }
 
 function canMoveJobs(user) {
-  return canEdit(user) && canAccessTab(user, "Scheduler");
+  return canEditTab(user, "Scheduler");
 }
 
 function canAccessTab(user, tab) {
   return getVisibleTabs(user).includes(tab);
+}
+
+function getUserTabAccess(user, tab) {
+  if (!user) return "none";
+  const tabAccess = normalizeUserTabAccess(user.tabAccess, user.tabs, user.accessMode, user.role, user.isAdmin, user.canManageUsers);
+  return normalizeTabAccessValue(tabAccess[tab]) || "none";
+}
+
+function canEditTab(user, tab) {
+  return getUserTabAccess(user, tab) === "edit";
 }
 
 function buildDefaultAdmin() {
@@ -347,6 +411,7 @@ function buildDefaultAdmin() {
     role: "Management",
     accessMode: "edit",
     tabs: [...BASE_TABS, "User Admin"],
+    tabAccess: Object.fromEntries([...BASE_TABS, "User Admin"].map((tab) => [tab, "edit"])),
     canManageUsers: true,
     isAdmin: true,
     createdAt: new Date().toISOString(),
@@ -357,23 +422,32 @@ function buildDefaultAdmin() {
 function normalizeUsers(users) {
   const normalized = Array.isArray(users)
     ? users
-        .map((user, index) => ({
-          id: user.id || `user-${index + 1}`,
-          username: safeText(user.username),
-          password: safeText(user.password),
-          role: normalizeRole(user.role, user.isAdmin || user.canManageUsers),
-          accessMode: normalizeAccessMode(user.accessMode, user.role, user.isAdmin || user.canManageUsers),
-          canManageUsers: !!user.canManageUsers || normalizeRole(user.role, user.isAdmin) === "Management",
-          tabs: normalizeUserTabs(
+        .map((user, index) => {
+          const role = normalizeRole(user.role, user.isAdmin || user.canManageUsers);
+          const canManageUsers = !!user.canManageUsers || role === "Management";
+          const tabAccess = normalizeUserTabAccess(
+            user.tabAccess,
             user.tabs,
-            user.role,
-            user.isAdmin || user.canManageUsers,
-            !!user.canManageUsers || normalizeRole(user.role, user.isAdmin) === "Management"
-          ),
-          isAdmin: !!user.canManageUsers || normalizeRole(user.role, user.isAdmin) === "Management",
-          createdAt: user.createdAt || new Date().toISOString(),
-          createdBy: user.createdBy || "system",
-        }))
+            user.accessMode,
+            role,
+            user.isAdmin || canManageUsers,
+            canManageUsers
+          );
+          const accessMode = deriveAccessModeFromTabAccess(tabAccess, normalizeAccessMode(user.accessMode, role, user.isAdmin || canManageUsers));
+          return {
+            id: user.id || `user-${index + 1}`,
+            username: safeText(user.username),
+            password: safeText(user.password),
+            role,
+            accessMode,
+            canManageUsers,
+            tabs: getTabsFromTabAccess(tabAccess, canManageUsers),
+            tabAccess,
+            isAdmin: canManageUsers,
+            createdAt: user.createdAt || new Date().toISOString(),
+            createdBy: user.createdBy || "system",
+          };
+        })
         .filter((user) => user.username)
     : [];
 
@@ -1540,8 +1614,8 @@ function SchedulerApp() {
   );
 
   const currentUserRole = useMemo(() => getUserRole(currentUser), [currentUser]);
-  const currentUserAccessMode = useMemo(() => getUserAccessMode(currentUser), [currentUser]);
-  const userCanEdit = useMemo(() => canEdit(currentUser), [currentUser]);
+  const currentUserAccessMode = useMemo(() => getUserTabAccess(currentUser, activeTab), [activeTab, currentUser]);
+  const userCanEdit = useMemo(() => canEditTab(currentUser, activeTab), [activeTab, currentUser]);
   const userCanManageUsers = useMemo(() => hasManagementAccess(currentUser), [currentUser]);
   const userCanMoveJobs = useMemo(() => canMoveJobs(currentUser), [currentUser]);
 
@@ -2261,7 +2335,7 @@ function SchedulerApp() {
           action: "viewing",
           jobLabel: "",
           updatedAt: new Date().toISOString(),
-        });
+        }).catch(() => {});
       });
 
     return () => {
@@ -2280,19 +2354,48 @@ function SchedulerApp() {
     if (!channel) return;
     const isMoving = activeTab === "Scheduler" && !!pickedUpItem;
     const isViewingSchedulerJob = activeTab === "Scheduler" && !!selectedJobPresenceLabel;
-    channel.track({
+    const publishPresence = () => {
+      channel.track({
+        clientId: presenceClientIdRef.current,
+        username: currentUser.username,
+        tab: activeTab,
+        action: isMoving ? "moving" : isViewingSchedulerJob ? "viewing job" : "viewing",
+        jobLabel: isMoving ? safeText(pickedUpItem.label) : isViewingSchedulerJob ? selectedJobPresenceLabel : "",
+        updatedAt: new Date().toISOString(),
+      }).catch(() => {});
+    };
+    publishPresence();
+    const intervalId = window.setInterval(publishPresence, PRESENCE_HEARTBEAT_MS);
+    return () => window.clearInterval(intervalId);
+  }, [activeTab, currentUser?.username, isReady, pickedUpItem, selectedJobPresenceLabel, workspaceMode]);
+
+  const localPresenceUser = useMemo(() => {
+    if (!currentUser || workspaceMode === "demo") return null;
+    const isMoving = activeTab === "Scheduler" && !!pickedUpItem;
+    const isViewingSchedulerJob = activeTab === "Scheduler" && !!selectedJobPresenceLabel;
+    return {
       clientId: presenceClientIdRef.current,
       username: currentUser.username,
       tab: activeTab,
       action: isMoving ? "moving" : isViewingSchedulerJob ? "viewing job" : "viewing",
       jobLabel: isMoving ? safeText(pickedUpItem.label) : isViewingSchedulerJob ? selectedJobPresenceLabel : "",
       updatedAt: new Date().toISOString(),
+    };
+  }, [activeTab, currentUser?.username, pickedUpItem, selectedJobPresenceLabel, workspaceMode]);
+
+  const displayPresenceUsers = useMemo(() => {
+    const usersByClientId = new Map(activePresenceUsers.map((presence) => [presence.clientId, presence]));
+    if (localPresenceUser) usersByClientId.set(localPresenceUser.clientId, localPresenceUser);
+    return Array.from(usersByClientId.values()).sort((left, right) => {
+      const leftSelf = left.clientId === presenceClientIdRef.current ? 0 : 1;
+      const rightSelf = right.clientId === presenceClientIdRef.current ? 0 : 1;
+      return leftSelf - rightSelf || left.username.localeCompare(right.username) || left.tab.localeCompare(right.tab);
     });
-  }, [activeTab, currentUser?.username, isReady, pickedUpItem, selectedJobPresenceLabel, workspaceMode]);
+  }, [activePresenceUsers, localPresenceUser]);
 
   const otherPresenceUsers = useMemo(
-    () => activePresenceUsers.filter((presence) => presence.clientId !== presenceClientIdRef.current),
-    [activePresenceUsers]
+    () => displayPresenceUsers.filter((presence) => presence.clientId !== presenceClientIdRef.current),
+    [displayPresenceUsers]
   );
 
   const presenceByTab = useMemo(() => {
@@ -4026,24 +4129,17 @@ function SchedulerApp() {
     setNotes((current) => current.filter((note) => note.id !== noteId));
   }
 
-  function toggleUserTab(userId, tab) {
+  function updateUserTabPermission(userId, tab, permission) {
     if (!userCanManageUsers) return;
     const user = users.find((item) => item.id === userId);
-    setUsers((current) =>
-      current.map((user) => {
-        if (user.id !== userId) return user;
-        const nextTabs = user.tabs.includes(tab)
-          ? user.tabs.filter((value) => value !== tab)
-          : [...user.tabs, tab];
-        return { ...user, tabs: normalizeUserTabs(nextTabs, user.role, user.isAdmin, user.canManageUsers) };
-      })
-    );
-    if (user) {
-      recordActivity("Changed tab visibility", "Users", `${tab} visibility was updated for ${user.username}.`, {
-        userId,
-        tab,
-      });
-    }
+    if (!user) return;
+    const currentTabAccess = normalizeUserTabAccess(user.tabAccess, user.tabs, user.accessMode, user.role, user.isAdmin, user.canManageUsers);
+    updateUserAccess(userId, {
+      tabAccess: {
+        ...currentTabAccess,
+        [tab]: normalizeTabAccessValue(permission) || "none",
+      },
+    });
   }
 
   function updateUserAccess(userId, updates) {
@@ -4064,21 +4160,38 @@ function SchedulerApp() {
           ? !!updates.canManageUsers
           : user.canManageUsers;
         const nextRole = nextCanManageUsers ? "Management" : user.role === "Management" ? "Warehouse/Shipper" : user.role;
+        const baseTabAccess = normalizeUserTabAccess(
+          user.tabAccess,
+          user.tabs,
+          user.accessMode,
+          nextRole,
+          nextCanManageUsers,
+          nextCanManageUsers
+        );
+        const requestedTabAccess = Object.prototype.hasOwnProperty.call(updates, "tabAccess")
+          ? updates.tabAccess
+          : baseTabAccess;
+        const nextTabAccess = normalizeUserTabAccess(
+          requestedTabAccess,
+          Object.prototype.hasOwnProperty.call(updates, "tabs") ? updates.tabs : user.tabs,
+          Object.prototype.hasOwnProperty.call(updates, "accessMode") ? updates.accessMode : user.accessMode,
+          nextRole,
+          nextCanManageUsers,
+          nextCanManageUsers
+        );
+        const nextAccessMode = deriveAccessModeFromTabAccess(
+          nextTabAccess,
+          Object.prototype.hasOwnProperty.call(updates, "accessMode") ? updates.accessMode : user.accessMode
+        );
         return {
           ...user,
           ...updates,
           role: nextRole,
           isAdmin: nextCanManageUsers,
           canManageUsers: nextCanManageUsers,
-          accessMode: Object.prototype.hasOwnProperty.call(updates, "accessMode")
-            ? normalizeAccessMode(updates.accessMode, nextRole, nextCanManageUsers)
-            : user.accessMode,
-          tabs: normalizeUserTabs(
-            Object.prototype.hasOwnProperty.call(updates, "tabs") ? updates.tabs : user.tabs,
-            nextRole,
-            nextCanManageUsers,
-            nextCanManageUsers
-          ),
+          accessMode: nextAccessMode,
+          tabs: getTabsFromTabAccess(nextTabAccess, nextCanManageUsers),
+          tabAccess: nextTabAccess,
         };
       });
     });
@@ -4310,22 +4423,32 @@ function SchedulerApp() {
       window.alert("That username already exists.");
       return;
     }
+    const role = userForm.canManageUsers ? "Management" : "Warehouse/Shipper";
+    const tabAccess = normalizeUserTabAccess(
+      userForm.tabAccess,
+      userForm.tabs,
+      userForm.accessMode,
+      role,
+      userForm.canManageUsers,
+      userForm.canManageUsers
+    );
     setUsers((current) => [
       ...current,
       {
         id: makeId("user"),
         username,
         password,
-        role: userForm.canManageUsers ? "Management" : "Warehouse/Shipper",
-        accessMode: normalizeAccessMode(userForm.accessMode, userForm.canManageUsers ? "Management" : "Warehouse/Shipper", userForm.canManageUsers),
-        tabs: normalizeUserTabs(userForm.tabs, userForm.canManageUsers ? "Management" : "Warehouse/Shipper", userForm.canManageUsers, userForm.canManageUsers),
+        role,
+        accessMode: deriveAccessModeFromTabAccess(tabAccess, userForm.accessMode),
+        tabs: getTabsFromTabAccess(tabAccess, userForm.canManageUsers),
+        tabAccess,
         canManageUsers: !!userForm.canManageUsers,
         isAdmin: !!userForm.canManageUsers,
         createdAt: new Date().toISOString(),
         createdBy: currentUser.username,
       },
     ]);
-    setUserForm({ ...EMPTY_USER_FORM, tabs: [...EMPTY_USER_FORM.tabs] });
+    setUserForm({ ...EMPTY_USER_FORM, tabs: [...EMPTY_USER_FORM.tabs], tabAccess: { ...EMPTY_USER_FORM.tabAccess } });
     recordActivity("Created user", "Users", `${username} was added as a new user.`);
   }
 
@@ -4501,6 +4624,7 @@ function SchedulerApp() {
         role: "Warehouse/Shipper",
         accessMode: "edit",
         tabs: normalizeUserTabs(EMPTY_USER_FORM.tabs, "Warehouse/Shipper", false, false),
+        tabAccess: normalizeUserTabAccess(EMPTY_USER_FORM.tabAccess, EMPTY_USER_FORM.tabs, "edit", "Warehouse/Shipper", false, false),
         canManageUsers: false,
         isAdmin: false,
         createdAt: new Date().toISOString(),
@@ -4630,9 +4754,9 @@ function SchedulerApp() {
                   })}
                 </div>
               </div>
-              {activePresenceUsers.length > 0 && (
+              {displayPresenceUsers.length > 0 && (
                 <div className="flex max-w-full flex-wrap justify-start gap-2 text-xs xl:justify-end">
-                  {activePresenceUsers.slice(0, 6).map((presence) => (
+                  {displayPresenceUsers.slice(0, 6).map((presence) => (
                     <span
                       key={`${presence.clientId}-${presence.tab}`}
                       className={`rounded-full border px-3 py-1 ${
@@ -4646,9 +4770,9 @@ function SchedulerApp() {
                       {formatPresenceText(presence)}
                     </span>
                   ))}
-                  {activePresenceUsers.length > 6 && (
+                  {displayPresenceUsers.length > 6 && (
                     <span className="rounded-full border border-stone-300 bg-stone-50 px-3 py-1 text-stone-700">
-                      +{activePresenceUsers.length - 6} more
+                      +{displayPresenceUsers.length - 6} more
                     </span>
                   )}
                 </div>
@@ -4659,7 +4783,7 @@ function SchedulerApp() {
                   {lastSyncAt ? ` • ${formatDateTime(lastSyncAt)}` : ""}
                 </span>
                 <span className="rounded-full bg-stone-200 px-3 py-2 text-stone-800">
-                  {currentUserRole} / {currentUserAccessMode === "edit" ? "Edit" : "View only"}: {currentUser.username}
+                  {currentUserRole} / {activeTab} {currentUserAccessMode === "edit" ? "Edit" : "View only"}: {currentUser.username}
                 </span>
                 {workspaceMode === "demo" && (
                   <button
@@ -6986,7 +7110,7 @@ function SchedulerApp() {
             <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
               <div className="mb-5">
                 <div className="text-sm font-semibold">Add user</div>
-                <div className="text-xs text-stone-600">Management can create logins, choose edit or view-only access, and decide which tabs each user can see.</div>
+                <div className="text-xs text-stone-600">Management can create logins and choose Edit, View only, or No access for each tab.</div>
               </div>
               <form onSubmit={createUser} className="grid gap-4">
                 <Field
@@ -7001,20 +7125,6 @@ function SchedulerApp() {
                   onChange={(value) => setUserForm((current) => ({ ...current, password: value }))}
                   placeholder="Set a password"
                 />
-                <div>
-                  <div className="mb-2 text-sm font-medium text-stone-800">Access</div>
-                  <select
-                    value={userForm.accessMode}
-                    onChange={(event) => setUserForm((current) => ({ ...current, accessMode: event.target.value }))}
-                    className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
-                  >
-                    {ACCESS_MODE_OPTIONS.map((mode) => (
-                      <option key={mode} value={mode}>
-                        {mode === "edit" ? "Edit" : "View only"}
-                      </option>
-                    ))}
-                  </select>
-                </div>
                 <label className="flex items-center gap-3 rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800">
                   <input
                     type="checkbox"
@@ -7025,25 +7135,41 @@ function SchedulerApp() {
                   <span>Allow user admin access</span>
                 </label>
                 <div>
-                  <div className="mb-2 text-sm font-medium text-stone-800">Visible tabs</div>
-                  <div className="grid gap-2 md:grid-cols-2">
+                  <div className="mb-2 text-sm font-medium text-stone-800">Tab permissions</div>
+                  <div className="grid gap-2">
                     {[...BASE_TABS, "User Admin"].map((tab) => (
-                      <label key={tab} className="flex items-center gap-3 rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800">
-                        <input
-                          type="checkbox"
-                          checked={userForm.canManageUsers && tab === "User Admin" ? true : userForm.tabs.includes(tab)}
+                      <label key={tab} className="grid gap-2 rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800 sm:grid-cols-[1fr_150px] sm:items-center">
+                        <span>{tab}</span>
+                        <select
+                          value={
+                            tab === "User Admin"
+                              ? userForm.canManageUsers
+                                ? "edit"
+                                : "none"
+                              : normalizeTabAccessValue(userForm.tabAccess?.[tab]) || "none"
+                          }
                           disabled={tab === "User Admin"}
-                          onChange={() =>
+                          onChange={(event) =>
                             setUserForm((current) => {
-                              const nextTabs = current.tabs.includes(tab)
-                                ? current.tabs.filter((value) => value !== tab)
-                                : [...current.tabs, tab];
-                              return { ...current, tabs: normalizeUserTabs(nextTabs, "Warehouse/Shipper", false, current.canManageUsers) };
+                              const nextTabAccess = {
+                                ...current.tabAccess,
+                                [tab]: event.target.value,
+                              };
+                              return {
+                                ...current,
+                                tabAccess: nextTabAccess,
+                                tabs: getTabsFromTabAccess(nextTabAccess, current.canManageUsers),
+                              };
                             })
                           }
-                          className="h-4 w-4"
-                        />
-                        <span>{tab}</span>
+                          className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800 disabled:bg-stone-100 disabled:text-stone-500"
+                        >
+                          {TAB_ACCESS_OPTIONS.map((mode) => (
+                            <option key={mode} value={mode}>
+                              {mode === "edit" ? "Edit" : mode === "view" ? "View only" : "No access"}
+                            </option>
+                          ))}
+                        </select>
                       </label>
                     ))}
                   </div>
@@ -7103,10 +7229,14 @@ function SchedulerApp() {
               <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
                 <div className="mb-5">
                   <div className="text-sm font-semibold">Manage users</div>
-                  <div className="text-xs text-stone-600">Rename users, reset passwords, choose edit or view-only, delete accounts, and control which tabs each account can see.</div>
+                  <div className="text-xs text-stone-600">Rename users, reset passwords, delete accounts, and control edit/view permissions per tab.</div>
                 </div>
                 <div className="space-y-3">
-                  {users.map((user) => (
+                  {users.map((user) => {
+                    const userTabAccess = normalizeUserTabAccess(user.tabAccess, user.tabs, user.accessMode, user.role, user.isAdmin, user.canManageUsers);
+                    const editTabCount = BASE_TABS.filter((tab) => userTabAccess[tab] === "edit").length;
+                    const viewTabCount = BASE_TABS.filter((tab) => userTabAccess[tab] === "view").length;
+                    return (
                     <div key={user.id} className="rounded-2xl border border-stone-300 bg-white p-4">
                       <div className="space-y-4">
                         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
@@ -7114,7 +7244,7 @@ function SchedulerApp() {
                             <div className="flex flex-wrap items-center gap-2">
                               <div className="text-sm font-semibold">{user.username}</div>
                               <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${hasManagementAccess(user) ? "bg-emerald-900 text-white" : "bg-stone-200 text-stone-800"}`}>
-                                {hasManagementAccess(user) ? "User Admin" : user.accessMode === "edit" ? "Edit" : "View only"}
+                                {hasManagementAccess(user) ? "User Admin" : `${editTabCount} edit / ${viewTabCount} view`}
                               </span>
                             </div>
                             <div className="mt-1 text-xs text-stone-600">
@@ -7166,21 +7296,7 @@ function SchedulerApp() {
                           </div>
                         </div>
 
-                        <div className="grid gap-3 md:grid-cols-[180px_1fr]">
-                          <div>
-                            <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Access</div>
-                            <select
-                              value={user.accessMode}
-                              onChange={(event) => updateUserAccess(user.id, { accessMode: event.target.value })}
-                              className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
-                            >
-                              {ACCESS_MODE_OPTIONS.map((mode) => (
-                                <option key={mode} value={mode}>
-                                  {mode === "edit" ? "Edit" : "View only"}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
+                        <div className="grid gap-3">
                           <label className="flex items-center gap-3 rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm text-stone-800">
                             <input
                               type="checkbox"
@@ -7193,25 +7309,37 @@ function SchedulerApp() {
                         </div>
 
                         <div>
-                          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Visible tabs</div>
+                          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Tab permissions</div>
                           <div className="grid gap-2 md:grid-cols-2">
                             {[...BASE_TABS, "User Admin"].map((tab) => (
-                              <label key={tab} className="flex items-center gap-3 rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm text-stone-800">
-                                <input
-                                  type="checkbox"
-                                  checked={user.tabs.includes(tab)}
-                                  disabled={tab === "User Admin"}
-                                  onChange={() => toggleUserTab(user.id, tab)}
-                                  className="h-4 w-4"
-                                />
+                              <label key={tab} className="grid gap-2 rounded-2xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm text-stone-800 sm:grid-cols-[1fr_140px] sm:items-center">
                                 <span>{tab}</span>
+                                <select
+                                  value={
+                                    tab === "User Admin"
+                                      ? user.canManageUsers
+                                        ? "edit"
+                                        : "none"
+                                      : normalizeTabAccessValue(userTabAccess[tab]) || "none"
+                                  }
+                                  disabled={tab === "User Admin"}
+                                  onChange={(event) => updateUserTabPermission(user.id, tab, event.target.value)}
+                                  className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800 disabled:bg-stone-100 disabled:text-stone-500"
+                                >
+                                  {TAB_ACCESS_OPTIONS.map((mode) => (
+                                    <option key={mode} value={mode}>
+                                      {mode === "edit" ? "Edit" : mode === "view" ? "View only" : "No access"}
+                                    </option>
+                                  ))}
+                                </select>
                               </label>
                             ))}
                           </div>
                         </div>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </div>
