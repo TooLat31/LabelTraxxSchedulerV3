@@ -708,6 +708,27 @@ function normalizeAssignments(assignments) {
     : [];
 }
 
+function normalizeScheduleLocks(locks) {
+  const source = locks && typeof locks === "object" ? locks : {};
+  return Object.fromEntries(
+    Object.entries(source)
+      .map(([key, lock]) => {
+        const weekStartKey = safeText(lock?.weekStartKey || key);
+        const lockedBy = safeText(lock?.lockedBy);
+        if (!weekStartKey || !lockedBy) return null;
+        return [
+          weekStartKey,
+          {
+            weekStartKey,
+            lockedBy,
+            lockedAt: lock?.lockedAt || new Date().toISOString(),
+          },
+        ];
+      })
+      .filter(Boolean)
+  );
+}
+
 function normalizeShipmentGroups(groups) {
   return Array.isArray(groups)
     ? groups.map((group) => ({
@@ -806,6 +827,7 @@ function defaultSharedSnapshot() {
   return {
     jobs: [],
     assignments: [],
+    scheduleLocks: {},
     pressOperators: {},
     requests: [],
     pullPaperRequests: [],
@@ -827,6 +849,7 @@ function normalizeSharedSnapshot(snapshot) {
   return {
     jobs: normalizeJobs(source.jobs),
     assignments: normalizeAssignments(source.assignments),
+    scheduleLocks: normalizeScheduleLocks(source.scheduleLocks),
     pressOperators: normalizePressOperators(source.pressOperators, source.pressDuties),
     requests: normalizeRequests(source.requests),
     pullPaperRequests: normalizePullPaperRequests(source.pullPaperRequests),
@@ -847,6 +870,7 @@ function buildSharedSnapshot(state) {
   return {
     jobs: state.jobs,
     assignments: state.assignments,
+    scheduleLocks: state.scheduleLocks,
     pressOperators: state.pressOperators,
     requests: state.requests,
     pullPaperRequests: state.pullPaperRequests,
@@ -1214,6 +1238,7 @@ function SchedulerApp() {
   const [workspaceMode, setWorkspaceMode] = useState(() => (isDemoWorkspaceRequested() ? "demo" : "live"));
   const [jobs, setJobs] = useState([]);
   const [assignments, setAssignments] = useState([]);
+  const [scheduleLocks, setScheduleLocks] = useState({});
   const [pressOperators, setPressOperators] = useState({});
   const [requests, setRequests] = useState([]);
   const [pullPaperRequests, setPullPaperRequests] = useState([]);
@@ -1296,6 +1321,7 @@ function SchedulerApp() {
     const normalized = normalizeSharedSnapshot(snapshot);
     setJobs(normalized.jobs);
     setAssignments(normalized.assignments);
+    setScheduleLocks(normalized.scheduleLocks);
     setPressOperators(normalized.pressOperators);
     setRequests(normalized.requests);
     setPullPaperRequests(normalized.pullPaperRequests);
@@ -1506,6 +1532,7 @@ function SchedulerApp() {
     const sharedSnapshot = buildSharedSnapshot({
       jobs,
       assignments,
+      scheduleLocks,
       pressOperators,
       requests,
       pullPaperRequests,
@@ -1586,7 +1613,7 @@ function SchedulerApp() {
     return () => {
       window.clearTimeout(saveTimerRef.current);
     };
-  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressOperators, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, shipmentRateRules, suppliesRequests, users, workspaceMode]);
+  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressOperators, pullPaperRequests, registrationRequests, requests, scheduleLocks, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, shipmentRateRules, suppliesRequests, users, workspaceMode]);
 
   useEffect(() => {
     try {
@@ -1613,11 +1640,24 @@ function SchedulerApp() {
     [currentUsername, users]
   );
 
+  const weekStartKey = useMemo(() => isoDate(weekStart), [weekStart]);
+  const currentWeekLock = useMemo(() => scheduleLocks[weekStartKey] || null, [scheduleLocks, weekStartKey]);
+  const userOwnsCurrentWeekLock = useMemo(
+    () =>
+      !!currentWeekLock &&
+      comparableUsername(currentWeekLock.lockedBy) === comparableUsername(currentUser?.username),
+    [currentUser?.username, currentWeekLock]
+  );
+  const currentWeekLockedByOther = !!currentWeekLock && !userOwnsCurrentWeekLock;
   const currentUserRole = useMemo(() => getUserRole(currentUser), [currentUser]);
-  const currentUserAccessMode = useMemo(() => getUserTabAccess(currentUser, activeTab), [activeTab, currentUser]);
-  const userCanEdit = useMemo(() => canEditTab(currentUser, activeTab), [activeTab, currentUser]);
+  const baseCurrentUserAccessMode = useMemo(() => getUserTabAccess(currentUser, activeTab), [activeTab, currentUser]);
+  const baseUserCanEdit = useMemo(() => canEditTab(currentUser, activeTab), [activeTab, currentUser]);
   const userCanManageUsers = useMemo(() => hasManagementAccess(currentUser), [currentUser]);
-  const userCanMoveJobs = useMemo(() => canMoveJobs(currentUser), [currentUser]);
+  const currentUserCanEditSchedulerTab = useMemo(() => canEditTab(currentUser, "Scheduler"), [currentUser]);
+  const userCanEdit = activeTab === "Scheduler" ? baseUserCanEdit && !currentWeekLockedByOther : baseUserCanEdit;
+  const currentUserAccessMode = activeTab === "Scheduler" && currentWeekLockedByOther ? "view" : baseCurrentUserAccessMode;
+  const userCanMoveJobs = currentUserCanEditSchedulerTab && !currentWeekLockedByOther;
+  const userCanUnlockCurrentWeek = !!currentWeekLock && (userOwnsCurrentWeekLock || userCanManageUsers);
 
   function recordActivity(action, scope, description, details = {}) {
     setActivityLog((current) =>
@@ -1664,6 +1704,11 @@ function SchedulerApp() {
     if (canAccessTab(currentUser, activeTab)) return;
     setActiveTab("Scheduler");
   }, [activeTab, currentUser]);
+
+  useEffect(() => {
+    if (userCanMoveJobs) return;
+    setPickedUpItem(null);
+  }, [userCanMoveJobs]);
 
   useEffect(() => {
     if (!isReady || workspaceMode === "demo" || !isSupabaseConfigured || !supabase) return undefined;
@@ -2033,6 +2078,28 @@ function SchedulerApp() {
       press,
       laneOrder: index,
     }));
+  }
+
+  function getScheduleLockForDay(dayKey) {
+    const parsed = new Date(`${dayKey}T12:00:00`);
+    if (Number.isNaN(parsed.getTime())) return null;
+    const lockWeekKey = isoDate(startOfWeek(parsed));
+    return scheduleLocks[lockWeekKey] || null;
+  }
+
+  function userOwnsScheduleLock(lock) {
+    return !!lock && comparableUsername(lock.lockedBy) === comparableUsername(currentUser?.username);
+  }
+
+  function canEditScheduleDay(dayKey) {
+    if (!currentUserCanEditSchedulerTab) return false;
+    const lock = getScheduleLockForDay(dayKey);
+    return !lock || userOwnsScheduleLock(lock);
+  }
+
+  function canEditScheduleChange(...dayKeys) {
+    const uniqueDayKeys = Array.from(new Set(dayKeys.map((dayKey) => safeText(dayKey)).filter(Boolean)));
+    return uniqueDayKeys.every((dayKey) => canEditScheduleDay(dayKey));
   }
 
   function applyLaneAssignmentUpdates(current, updatedAssignments, addedAssignments = []) {
@@ -2633,6 +2700,7 @@ function SchedulerApp() {
   }
 
   function importText(text) {
+    if (!userCanEdit) return;
     const parsed = parseLabelTraxxText(text);
     if (!parsed.length) return;
     const parsedById = new Map(parsed.map((job) => [job.id, job]));
@@ -2706,6 +2774,8 @@ function SchedulerApp() {
 
   function handleUpload(event) {
     const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!userCanEdit) return;
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => importText(String(reader.result || ""));
@@ -2726,6 +2796,12 @@ function SchedulerApp() {
       }
 
       const importedDays = new Set(parsed.importedDayKeys);
+      const lockedImportedDay = Array.from(importedDays).find((dayKey) => !canEditScheduleDay(dayKey));
+      if (lockedImportedDay) {
+        const lock = getScheduleLockForDay(lockedImportedDay);
+        window.alert(`That schedule week is locked by ${lock?.lockedBy || "another user"}. Unlock it before importing Excel.`);
+        return;
+      }
       setJobs(parsed.jobs);
       setAssignments((current) => [
         ...current.filter((assignment) => assignment.status === "finished" || !importedDays.has(assignment.dayKey)),
@@ -2751,7 +2827,7 @@ function SchedulerApp() {
 
   function handleScheduleDrop(event, dayKey, press) {
     event.preventDefault();
-    if (!userCanMoveJobs) return;
+    if (!canEditScheduleDay(dayKey)) return;
     const payload = parseDragPayload(event.dataTransfer.getData("application/json"));
     if (payload?.type === "queue" && payload.jobId) {
       addAssignment(payload.jobId, dayKey, press);
@@ -2773,7 +2849,7 @@ function SchedulerApp() {
   function handleScheduleCardDrop(event, dayKey, press, targetAssignmentId) {
     event.preventDefault();
     event.stopPropagation();
-    if (!userCanMoveJobs) return;
+    if (!canEditScheduleDay(dayKey)) return;
     const payload = parseDragPayload(event.dataTransfer.getData("application/json"));
     if (payload?.type === "queue" && payload.jobId) {
       addAssignment(payload.jobId, dayKey, press, targetAssignmentId);
@@ -2808,6 +2884,7 @@ function SchedulerApp() {
     if (!userCanMoveJobs) return;
     const assignment = assignments.find((item) => item.id === assignmentId);
     if (!assignment) return;
+    if (!canEditScheduleDay(assignment.dayKey)) return;
     const job = assignment.jobId ? jobMap.get(assignment.jobId) : null;
     setPickedUpItem({
       type: "scheduled",
@@ -2818,7 +2895,7 @@ function SchedulerApp() {
   }
 
   function placePickedUpItem(dayKey, press) {
-    if (!userCanMoveJobs || !pickedUpItem) return;
+    if (!canEditScheduleDay(dayKey) || !pickedUpItem) return;
     if (pickedUpItem.type === "queue" && pickedUpItem.jobId) {
       addAssignment(pickedUpItem.jobId, dayKey, press);
       setPickedUpItem(null);
@@ -2844,8 +2921,44 @@ function SchedulerApp() {
     );
   }
 
+  function lockCurrentWeekView() {
+    if (!currentUser || !currentUserCanEditSchedulerTab || currentWeekLock) return;
+    const lockedAt = new Date().toISOString();
+    setScheduleLocks((current) => ({
+      ...current,
+      [weekStartKey]: {
+        weekStartKey,
+        lockedBy: currentUser.username,
+        lockedAt,
+      },
+    }));
+    setPickedUpItem(null);
+    recordActivity(
+      "Locked week view",
+      "Scheduler",
+      `${currentUser.username} locked schedule editing for the week of ${weekStartKey}.`,
+      { weekStartKey, lockedBy: currentUser.username }
+    );
+  }
+
+  function unlockCurrentWeekView() {
+    if (!currentWeekLock || !userCanUnlockCurrentWeek) return;
+    const previousLock = currentWeekLock;
+    setScheduleLocks((current) => {
+      const next = { ...current };
+      delete next[weekStartKey];
+      return next;
+    });
+    recordActivity(
+      "Unlocked week view",
+      "Scheduler",
+      `${currentUser?.username || "A manager"} unlocked schedule editing for the week of ${weekStartKey}.`,
+      { weekStartKey, previousLockedBy: previousLock.lockedBy }
+    );
+  }
+
   function addAssignment(jobId, dayKey, press, beforeAssignmentId = "") {
-    if (!userCanMoveJobs) return false;
+    if (!canEditScheduleDay(dayKey)) return false;
     const job = jobMap.get(jobId);
     if (job && isReleaseJob(job)) return false;
     const exists = assignments.some(
@@ -2897,10 +3010,10 @@ function SchedulerApp() {
 
   function addManualScheduleEntry(event) {
     event.preventDefault();
-    if (!userCanMoveJobs) return;
     const title = safeText(manualScheduleForm.title);
     const dayKey = safeText(manualScheduleForm.dayKey);
     const press = safeText(manualScheduleForm.press);
+    if (!canEditScheduleDay(dayKey)) return;
     if (!title || !dayKey || !PRESS_ORDER.includes(press)) return;
 
     const newAssignment = {
@@ -2932,9 +3045,9 @@ function SchedulerApp() {
   }
 
   function moveAssignment(assignmentId, dayKey, press, beforeAssignmentId = "") {
-    if (!userCanMoveJobs) return false;
     const assignmentToMove = assignments.find((assignment) => assignment.id === assignmentId);
     if (!assignmentToMove) return false;
+    if (!canEditScheduleChange(assignmentToMove.dayKey, dayKey)) return false;
     const movingWithinLane = assignmentToMove.dayKey === dayKey && assignmentToMove.press === press;
     if (assignmentToMove.kind === "press" && assignmentToMove.status === "finished" && !movingWithinLane) return false;
     const duplicate = assignments.some(
@@ -3028,9 +3141,9 @@ function SchedulerApp() {
   }
 
   function moveAssignmentByStep(assignmentId, direction) {
-    if (!userCanMoveJobs) return;
     const assignmentToMove = assignments.find((assignment) => assignment.id === assignmentId);
     if (!assignmentToMove) return;
+    if (!canEditScheduleDay(assignmentToMove.dayKey)) return;
     const laneAssignments = getSortedLaneAssignments(assignments, assignmentToMove.dayKey, assignmentToMove.press);
     const currentIndex = laneAssignments.findIndex((assignment) => assignment.id === assignmentId);
     const targetIndex = currentIndex + direction;
@@ -3062,7 +3175,6 @@ function SchedulerApp() {
   }
 
   function duplicateAssignmentToNextDay(assignmentId) {
-    if (!userCanMoveJobs) return;
     const assignmentToCopy = assignments.find((assignment) => assignment.id === assignmentId);
     if (!assignmentToCopy) return;
     if (assignmentToCopy.kind === "press" && assignmentToCopy.status === "finished") return;
@@ -3071,6 +3183,7 @@ function SchedulerApp() {
     if (currentIndex < 0 || currentIndex >= weekColumns.length - 1) return;
 
     const nextDayKey = weekColumns[currentIndex + 1].key;
+    if (!canEditScheduleChange(assignmentToCopy.dayKey, nextDayKey)) return;
     const exists = assignments.some(
       (assignment) =>
         assignment.id !== assignmentId &&
@@ -3114,9 +3227,9 @@ function SchedulerApp() {
   }
 
   function removeAssignment(assignmentId) {
-    if (!userCanMoveJobs) return;
     const assignment = assignments.find((item) => item.id === assignmentId);
     if (!assignment) return;
+    if (!canEditScheduleDay(assignment.dayKey)) return;
     setAssignments((current) => {
       const next = current.filter((item) => item.id !== assignmentId);
       const updatedLane = normalizeLaneAssignments(
@@ -3143,7 +3256,7 @@ function SchedulerApp() {
   }
 
   function updatePressOperator(dayKey, press, slot, value) {
-    if (!userCanEdit) return;
+    if (!canEditScheduleDay(dayKey)) return;
     const key = pressOperatorKey(dayKey, press);
     const nextValue = safeText(value);
     setPressOperators((current) => {
@@ -3165,7 +3278,7 @@ function SchedulerApp() {
   }
 
   function commitPressOperator(dayKey, press, slot, previousValue, value) {
-    if (!currentUser || !userCanEdit) return;
+    if (!currentUser || !canEditScheduleDay(dayKey)) return;
     const previous = safeText(previousValue);
     const nextValue = safeText(value);
     if (previous === nextValue) return;
@@ -3188,6 +3301,10 @@ function SchedulerApp() {
     const job = jobMap.get(jobId);
     const fallbackDayKey = job?.shipByDate ? isoDate(job.shipByDate) : weekColumns[0]?.key || todayKey();
     const fallbackPress = job?.press && PRESS_ORDER.includes(job.press) ? job.press : "Rewind";
+    const existingScheduleDays = assignments
+      .filter((assignment) => assignment.jobId === jobId && assignment.kind === "press")
+      .map((assignment) => assignment.dayKey);
+    if (!canEditScheduleChange(...(existingScheduleDays.length ? existingScheduleDays : [fallbackDayKey]))) return;
 
     setAssignments((current) => {
       let foundPress = false;
@@ -3241,6 +3358,7 @@ function SchedulerApp() {
         assignment.status === "finished"
     );
     if (!finishedAssignments.length) return;
+    if (!canEditScheduleChange(...finishedAssignments.map((assignment) => assignment.dayKey))) return;
 
     setAssignments((current) =>
       current
@@ -3276,6 +3394,7 @@ function SchedulerApp() {
   function clearBoard() {
     if (!userCanMoveJobs) return;
     if (!assignments.length) return;
+    if (!assignments.every((assignment) => !assignment.dayKey || canEditScheduleDay(assignment.dayKey))) return;
     setAssignments([]);
     recordActivity("Cleared schedule board", "Scheduler", `${assignments.length} scheduled items were cleared from the board.`);
   }
@@ -5044,7 +5163,13 @@ function SchedulerApp() {
                   <div className="grid gap-3">
                     <label className="rounded-2xl border border-dashed border-stone-300 bg-white p-4 text-sm text-stone-700 hover:border-emerald-800">
                       <div className="font-medium text-stone-900">Upload Label Traxx TXT</div>
-                      <input type="file" accept=".txt,.tsv,text/plain" onChange={handleUpload} className="mt-3 block w-full text-xs" />
+                      <input
+                        type="file"
+                        accept=".txt,.tsv,text/plain"
+                        onChange={handleUpload}
+                        disabled={!userCanEdit}
+                        className="mt-3 block w-full text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                      />
                     </label>
 
                     {userCanManageUsers && (
@@ -5056,7 +5181,13 @@ function SchedulerApp() {
                           </div>
                           <span className="rounded-full bg-stone-200 px-2 py-1 text-[11px] text-stone-700">Admin</span>
                         </div>
-                        <input type="file" accept=".xls,.xlsx,.xlsm" onChange={handleScheduleWorkbookUpload} className="mt-3 block w-full text-xs" />
+                        <input
+                          type="file"
+                          accept=".xls,.xlsx,.xlsm"
+                          onChange={handleScheduleWorkbookUpload}
+                          disabled={!userCanMoveJobs}
+                          className="mt-3 block w-full text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                        />
                       </label>
                     )}
 
@@ -5068,7 +5199,11 @@ function SchedulerApp() {
                       <button onClick={exportSchedule} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
                         Export CSV
                       </button>
-                      <button onClick={clearBoard} className="rounded-2xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                      <button
+                        onClick={clearBoard}
+                        disabled={!userCanMoveJobs}
+                        className="rounded-2xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
                         Clear
                       </button>
                       {userCanManageUsers && (
@@ -5279,7 +5414,42 @@ function SchedulerApp() {
                     {formatShortDate(weekColumns[0]?.date)} - {formatShortDate(weekColumns[4]?.date)}
                   </div>
                 </div>
+                <div className={`rounded-2xl border px-3 py-2 text-sm ${
+                  currentWeekLock
+                    ? userOwnsCurrentWeekLock
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-950"
+                      : "border-amber-200 bg-amber-50 text-amber-950"
+                    : "border-stone-300 bg-white text-stone-800"
+                }`}>
+                  <div className="font-semibold">
+                    {currentWeekLock ? `Week locked by ${currentWeekLock.lockedBy}` : "Week editing is open"}
+                  </div>
+                  <div className="mt-1 text-xs">
+                    {currentWeekLock
+                      ? `Locked ${formatDateTime(currentWeekLock.lockedAt)}. Other users are view-only for this week.`
+                      : "Lock this week if you want to be the only one moving jobs and changing lanes."}
+                  </div>
+                </div>
                 <div className="flex flex-wrap items-center gap-2">
+                  {currentWeekLock ? (
+                    <button
+                      type="button"
+                      onClick={unlockCurrentWeekView}
+                      disabled={!userCanUnlockCurrentWeek}
+                      className="rounded-2xl border border-amber-300 bg-white px-3 py-2 text-sm text-amber-950 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {userCanUnlockCurrentWeek ? "Unlock week" : "View only"}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={lockCurrentWeekView}
+                      disabled={!currentUserCanEditSchedulerTab}
+                      className="rounded-2xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-950 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Lock week editing
+                    </button>
+                  )}
                   <button onClick={() => setWeekStart(addDays(weekStart, -7))} className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800">
                     Previous
                   </button>
@@ -5370,13 +5540,14 @@ function SchedulerApp() {
                         const totalHours = laneJobs.reduce((sum, item) => sum + (item.job?.estPressTime || 0), 0);
                         const operatorOneName = getPressOperator(day.key, press, "operator1");
                         const operatorTwoName = getPressOperator(day.key, press, "operator2");
+                        const canEditLane = canEditScheduleDay(day.key);
                         return (
                           <div
                             key={`${press}-${day.key}`}
-                            onDragOver={(event) => event.preventDefault()}
-                            onDrop={(event) => handleScheduleDrop(event, day.key, press)}
-                            onClick={() => placePickedUpItem(day.key, press)}
-                            className={`border-b border-r border-stone-300 bg-white p-0 ${pickedUpItem ? "cursor-copy" : ""} ${pickedUpItem ? "hover:bg-sky-50" : ""}`}
+                            onDragOver={canEditLane ? (event) => event.preventDefault() : undefined}
+                            onDrop={canEditLane ? (event) => handleScheduleDrop(event, day.key, press) : undefined}
+                            onClick={canEditLane ? () => placePickedUpItem(day.key, press) : undefined}
+                            className={`border-b border-r border-stone-300 bg-white p-0 ${pickedUpItem && canEditLane ? "cursor-copy" : ""} ${pickedUpItem && canEditLane ? "hover:bg-sky-50" : ""}`}
                           >
                             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 bg-stone-50 px-2 py-1">
                               <div className="text-[11px] text-stone-600">
@@ -5389,7 +5560,7 @@ function SchedulerApp() {
                                   onChange={(event) => updatePressOperator(day.key, press, "operator1", event.target.value)}
                                   onBlur={(event) => commitPressOperator(day.key, press, "operator1", operatorOneName, event.target.value)}
                                   placeholder="Operator 1"
-                                  disabled={!userCanEdit}
+                                  disabled={!canEditLane}
                                   className="min-w-[104px] border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800 outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
                                 />
                                 <input
@@ -5398,7 +5569,7 @@ function SchedulerApp() {
                                   onChange={(event) => updatePressOperator(day.key, press, "operator2", event.target.value)}
                                   onBlur={(event) => commitPressOperator(day.key, press, "operator2", operatorTwoName, event.target.value)}
                                   placeholder="Operator 2"
-                                  disabled={!userCanEdit}
+                                  disabled={!canEditLane}
                                   className="min-w-[104px] border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800 outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
                                 />
                                 <span className="border border-stone-300 bg-white px-2 py-1 text-[10px] font-medium text-stone-700">
@@ -5416,18 +5587,18 @@ function SchedulerApp() {
                                   density={scheduleCardDensity}
                                   selected={job ? selectedJobId === job.id : false}
                                   onSelect={job ? () => selectJob(job.id) : undefined}
-                                  canMoveUp={userCanMoveJobs && index > 0}
-                                  canMoveDown={userCanMoveJobs && index < laneJobs.length - 1}
-                                  onMoveUp={userCanMoveJobs && index > 0 ? () => moveAssignmentByStep(assignment.id, -1) : undefined}
-                                  onMoveDown={userCanMoveJobs && index < laneJobs.length - 1 ? () => moveAssignmentByStep(assignment.id, 1) : undefined}
-                                  onDropBefore={userCanMoveJobs ? (event) => handleScheduleCardDrop(event, day.key, press, assignment.id) : undefined}
-                                  onUnschedule={userCanMoveJobs ? () => removeAssignment(assignment.id) : undefined}
-                                  onFinish={job && userCanEdit ? () => finishJob(job.id) : undefined}
-                                  onUndoFinish={job && userCanEdit && assignment.status === "finished" ? () => undoFinishJob(job.id) : undefined}
-                                  onDuplicate={userCanMoveJobs ? () => duplicateAssignmentToNextDay(assignment.id) : undefined}
-                                  onMoveNextMonday={userCanMoveJobs ? () => moveAssignmentToNextMonday(assignment.id) : undefined}
-                                  onPickUp={userCanMoveJobs ? () => pickUpScheduledAssignment(assignment.id) : undefined}
-                                  draggable={userCanMoveJobs}
+                                  canMoveUp={canEditLane && index > 0}
+                                  canMoveDown={canEditLane && index < laneJobs.length - 1}
+                                  onMoveUp={canEditLane && index > 0 ? () => moveAssignmentByStep(assignment.id, -1) : undefined}
+                                  onMoveDown={canEditLane && index < laneJobs.length - 1 ? () => moveAssignmentByStep(assignment.id, 1) : undefined}
+                                  onDropBefore={canEditLane ? (event) => handleScheduleCardDrop(event, day.key, press, assignment.id) : undefined}
+                                  onUnschedule={canEditLane ? () => removeAssignment(assignment.id) : undefined}
+                                  onFinish={job && canEditLane ? () => finishJob(job.id) : undefined}
+                                  onUndoFinish={job && canEditLane && assignment.status === "finished" ? () => undoFinishJob(job.id) : undefined}
+                                  onDuplicate={canEditLane ? () => duplicateAssignmentToNextDay(assignment.id) : undefined}
+                                  onMoveNextMonday={canEditLane ? () => moveAssignmentToNextMonday(assignment.id) : undefined}
+                                  onPickUp={canEditLane ? () => pickUpScheduledAssignment(assignment.id) : undefined}
+                                  draggable={canEditLane}
                                 />
                               ))}
                               {!laneJobs.length && (
@@ -7986,30 +8157,36 @@ function PressQueueRow({
       </td>
       <td className="border-r border-stone-200 px-2 py-2">
         <div className="flex flex-wrap gap-1">
-          {weekColumns.map((day) => (
-            <button
-              key={day.key}
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                onQuickAssign?.(day.key);
-              }}
-              className="border border-stone-300 bg-white px-1.5 py-1 text-[10px] text-stone-800"
-            >
-              {day.label.slice(0, 3)}
-            </button>
-          ))}
-          {onQuickAssignNextMonday && nextWeekMondayKey && (
-            <button
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                onQuickAssignNextMonday();
-              }}
-              className="border border-sky-200 bg-sky-50 px-1.5 py-1 text-[10px] text-sky-900"
-            >
-              Next Mon
-            </button>
+          {canMove ? (
+            <>
+              {weekColumns.map((day) => (
+                <button
+                  key={day.key}
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onQuickAssign?.(day.key);
+                  }}
+                  className="border border-stone-300 bg-white px-1.5 py-1 text-[10px] text-stone-800"
+                >
+                  {day.label.slice(0, 3)}
+                </button>
+              ))}
+              {onQuickAssignNextMonday && nextWeekMondayKey && (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onQuickAssignNextMonday();
+                  }}
+                  className="border border-sky-200 bg-sky-50 px-1.5 py-1 text-[10px] text-sky-900"
+                >
+                  Next Mon
+                </button>
+              )}
+            </>
+          ) : (
+            <span className="text-[11px] text-stone-500">View only</span>
           )}
         </div>
       </td>
