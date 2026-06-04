@@ -11,6 +11,7 @@ const LOGIN_SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
 const SHARED_SAVE_DEBOUNCE_MS = 700;
 const SHARED_REFRESH_INTERVAL_MS = 15000;
 const SHARED_REMOTE_GUARD_MS = SHARED_SAVE_DEBOUNCE_MS + 2000;
+const SHARED_PENDING_REMOTE_BLOCK_MS = 45000;
 const ATTACHMENT_BUCKET = "labeltraxx-attachments";
 const ACTIVITY_LOG_LIMIT = 300;
 const DEMO_QUERY_PARAM = "demo";
@@ -1197,6 +1198,7 @@ function SchedulerApp() {
   const jobDetailsRef = useRef(null);
   const lastSharedSnapshotRef = useRef("");
   const pendingSharedSnapshotRef = useRef("");
+  const pendingSharedSnapshotAtRef = useRef(0);
   const lastLocalSharedChangeRef = useRef(0);
   const saveTimerRef = useRef(null);
   const deferredSearch = useDeferredValue(search);
@@ -1228,9 +1230,33 @@ function SchedulerApp() {
     return Date.now() - lastLocalSharedChangeRef.current < SHARED_REMOTE_GUARD_MS;
   }
 
+  function hasPendingLocalSharedSnapshot() {
+    if (!pendingSharedSnapshotRef.current) return false;
+    return Date.now() - pendingSharedSnapshotAtRef.current < SHARED_PENDING_REMOTE_BLOCK_MS;
+  }
+
+  function setPendingSharedSnapshot(digest) {
+    pendingSharedSnapshotRef.current = digest;
+    pendingSharedSnapshotAtRef.current = Date.now();
+  }
+
+  function clearPendingSharedSnapshot(digest = "") {
+    if (digest && pendingSharedSnapshotRef.current !== digest) return;
+    pendingSharedSnapshotRef.current = "";
+    pendingSharedSnapshotAtRef.current = 0;
+  }
+
+  function shouldBlockRemoteSnapshot(digest) {
+    return (
+      digest !== lastSharedSnapshotRef.current &&
+      digest !== pendingSharedSnapshotRef.current &&
+      (hasPendingLocalSharedSnapshot() || hasRecentLocalSharedChanges())
+    );
+  }
+
   async function fetchLatestSharedState({ force = false } = {}) {
     if (!isSupabaseConfigured || !supabase) return null;
-    if (!force && hasRecentLocalSharedChanges()) return null;
+    if (!force && (hasRecentLocalSharedChanges() || hasPendingLocalSharedSnapshot())) return null;
 
     const { data, error } = await supabase
       .from("app_state")
@@ -1243,21 +1269,21 @@ function SchedulerApp() {
 
     const normalized = normalizeSharedSnapshot(data.payload);
     const digest = JSON.stringify(buildSharedSnapshot(normalized));
-    const shouldIgnoreRemote =
-      digest !== lastSharedSnapshotRef.current &&
-      digest !== pendingSharedSnapshotRef.current &&
-      hasRecentLocalSharedChanges();
-
-    if (shouldIgnoreRemote) {
+    if (shouldBlockRemoteSnapshot(digest)) {
       return null;
+    }
+
+    if (digest === pendingSharedSnapshotRef.current) {
+      lastSharedSnapshotRef.current = digest;
+      clearPendingSharedSnapshot(digest);
+      setSyncStatus("Live sync");
+      setLastSyncAt(data.updated_at || new Date().toISOString());
+      return normalized;
     }
 
     if (digest !== lastSharedSnapshotRef.current) {
       applySharedStateSnapshot(data.payload);
       lastSharedSnapshotRef.current = digest;
-      if (digest === pendingSharedSnapshotRef.current) {
-        pendingSharedSnapshotRef.current = "";
-      }
     }
 
     setSyncStatus("Live sync");
@@ -1285,7 +1311,7 @@ function SchedulerApp() {
           const normalized = applySharedStateSnapshot(demoSnapshot);
           const digest = JSON.stringify(buildSharedSnapshot(normalized));
           lastSharedSnapshotRef.current = digest;
-          pendingSharedSnapshotRef.current = "";
+          clearPendingSharedSnapshot();
           if (!isCancelled) {
             setWorkspaceMode("demo");
             setSyncStatus("Demo mode");
@@ -1346,7 +1372,7 @@ function SchedulerApp() {
         const normalized = applySharedStateSnapshot(sharedSnapshot);
         const digest = JSON.stringify(buildSharedSnapshot(normalized));
         lastSharedSnapshotRef.current = digest;
-        pendingSharedSnapshotRef.current = "";
+        clearPendingSharedSnapshot();
         if (isSessionActive) {
           const match = normalized.users.find(
             (user) => comparableUsername(user.username) === comparableUsername(sessionUsername)
@@ -1370,7 +1396,7 @@ function SchedulerApp() {
         const fallback = normalizeSharedSnapshot(fallbackSource);
         applySharedStateSnapshot(fallback);
         lastSharedSnapshotRef.current = JSON.stringify(buildSharedSnapshot(fallback));
-        pendingSharedSnapshotRef.current = "";
+        clearPendingSharedSnapshot();
         setSyncStatus(isSupabaseConfigured ? "Sync error" : "Local only");
       } finally {
         if (!isCancelled) setIsReady(true);
@@ -1388,7 +1414,7 @@ function SchedulerApp() {
     if (!isReady) return;
     if (workspaceMode === "demo") {
       setSyncStatus("Demo mode");
-      pendingSharedSnapshotRef.current = "";
+      clearPendingSharedSnapshot();
       return;
     }
     const sharedSnapshot = buildSharedSnapshot({
@@ -1410,7 +1436,18 @@ function SchedulerApp() {
       weekStart,
     });
     const digest = JSON.stringify(sharedSnapshot);
-    pendingSharedSnapshotRef.current = digest;
+    if (digest === lastSharedSnapshotRef.current) {
+      localStorage.setItem(STORAGE_KEY, digest);
+      clearPendingSharedSnapshot();
+      if (!isSupabaseConfigured || !supabase) {
+        setSyncStatus("Local only");
+      } else {
+        setSyncStatus("Live sync");
+      }
+      return;
+    }
+
+    setPendingSharedSnapshot(digest);
     lastLocalSharedChangeRef.current = Date.now();
     window.clearTimeout(saveTimerRef.current);
     if (isSupabaseConfigured && supabase) {
@@ -1421,9 +1458,7 @@ function SchedulerApp() {
       localStorage.setItem(STORAGE_KEY, digest);
 
       if (digest === lastSharedSnapshotRef.current) {
-        if (pendingSharedSnapshotRef.current === digest) {
-          pendingSharedSnapshotRef.current = "";
-        }
+        clearPendingSharedSnapshot(digest);
         if (!isSupabaseConfigured || !supabase) {
           setSyncStatus("Local only");
         } else {
@@ -1432,9 +1467,9 @@ function SchedulerApp() {
         return;
       }
 
-      lastSharedSnapshotRef.current = digest;
-
       if (!isSupabaseConfigured || !supabase) {
+        lastSharedSnapshotRef.current = digest;
+        clearPendingSharedSnapshot(digest);
         setSyncStatus("Local only");
         return;
       }
@@ -1451,10 +1486,15 @@ function SchedulerApp() {
         return;
       }
 
+      lastSharedSnapshotRef.current = digest;
       if (pendingSharedSnapshotRef.current === digest) {
-        pendingSharedSnapshotRef.current = "";
+        clearPendingSharedSnapshot(digest);
+        setSyncStatus("Live sync");
+      } else if (pendingSharedSnapshotRef.current) {
+        setSyncStatus("Saving...");
+      } else {
+        setSyncStatus("Live sync");
       }
-      setSyncStatus("Live sync");
       setLastSyncAt(new Date().toISOString());
     }, SHARED_SAVE_DEBOUNCE_MS);
 
@@ -1592,17 +1632,21 @@ function SchedulerApp() {
           if (!nextPayload) return;
           const normalized = normalizeSharedSnapshot(nextPayload);
           const digest = JSON.stringify(buildSharedSnapshot(normalized));
-          if (digest === lastSharedSnapshotRef.current || digest === pendingSharedSnapshotRef.current) {
+          if (digest === pendingSharedSnapshotRef.current) {
             lastSharedSnapshotRef.current = digest;
-            if (digest === pendingSharedSnapshotRef.current) {
-              pendingSharedSnapshotRef.current = "";
-            }
+            clearPendingSharedSnapshot(digest);
             setSyncStatus("Live sync");
             setLastSyncAt(payload.new?.updated_at || new Date().toISOString());
             return;
           }
 
-          if (hasRecentLocalSharedChanges()) {
+          if (digest === lastSharedSnapshotRef.current) {
+            setSyncStatus(pendingSharedSnapshotRef.current ? "Saving..." : "Live sync");
+            setLastSyncAt(payload.new?.updated_at || new Date().toISOString());
+            return;
+          }
+
+          if (shouldBlockRemoteSnapshot(digest)) {
             return;
           }
 
