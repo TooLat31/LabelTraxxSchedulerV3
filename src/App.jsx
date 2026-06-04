@@ -6,6 +6,7 @@ import { buildDemoSharedSnapshot, DEMO_DEFAULT_PASSWORD, DEMO_DEFAULT_USERNAME }
 const PRESS_ORDER = ["5.1", "6.1", "1.1", "2.1", "8", "9", "Extra Duties", "Rewind"];
 const STORAGE_KEY = "labeltraxx-scheduler-v4";
 const SESSION_STORAGE_KEY = "labeltraxx-scheduler-session-v1";
+const WEEK_START_STORAGE_KEY = "labeltraxx-scheduler-week-start-v1";
 const SHARED_STATE_ROW_ID = "labeltraxx-shared-state";
 const LOGIN_SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
 const SHARED_SAVE_DEBOUNCE_MS = 700;
@@ -743,7 +744,6 @@ function defaultSharedSnapshot() {
     shipmentMethods: [...DEFAULT_SHIPMENT_METHODS],
     shipmentRateRules: DEFAULT_SHIPMENT_RATE_RULES.map((rule) => ({ ...rule })),
     users: [buildDefaultAdmin()],
-    weekStart: startOfWeek(new Date()).toISOString(),
   };
 }
 
@@ -765,7 +765,6 @@ function normalizeSharedSnapshot(snapshot) {
     shipmentMethods: normalizeShipmentMethods(source.shipmentMethods),
     shipmentRateRules: normalizeShipmentRateRules(source.shipmentRateRules),
     users: normalizeUsers(source.users),
-    weekStart: source.weekStart ? new Date(source.weekStart) : startOfWeek(new Date()),
   };
 }
 
@@ -786,7 +785,6 @@ function buildSharedSnapshot(state) {
     shipmentMethods: state.shipmentMethods,
     shipmentRateRules: state.shipmentRateRules,
     users: state.users,
-    weekStart: state.weekStart.toISOString(),
   };
 }
 
@@ -1027,6 +1025,17 @@ function buildWeekColumns(weekStart) {
   });
 }
 
+function readLocalWeekStart() {
+  try {
+    const saved = localStorage.getItem(WEEK_START_STORAGE_KEY);
+    const parsed = saved ? new Date(saved) : null;
+    if (parsed && !Number.isNaN(parsed.getTime())) return startOfWeek(parsed);
+  } catch {
+    // Ignore blocked local storage and fall back to the current work week.
+  }
+  return startOfWeek(new Date());
+}
+
 function nextMondayFromDate(dateLike) {
   const date = new Date(dateLike);
   const day = date.getDay();
@@ -1144,7 +1153,7 @@ function SchedulerApp() {
   const [shipmentRateRules, setShipmentRateRules] = useState(DEFAULT_SHIPMENT_RATE_RULES.map((rule) => ({ ...rule })));
   const [users, setUsers] = useState([buildDefaultAdmin()]);
   const [currentUsername, setCurrentUsername] = useState("");
-  const [weekStart, setWeekStart] = useState(startOfWeek(new Date()));
+  const [weekStart, setWeekStart] = useState(readLocalWeekStart);
   const [search, setSearch] = useState("");
   const [unscheduledSearch, setUnscheduledSearch] = useState("");
   const [queueStatusFilter, setQueueStatusFilter] = useState("Open");
@@ -1222,7 +1231,6 @@ function SchedulerApp() {
     setShipmentMethods(normalized.shipmentMethods);
     setShipmentRateRules(normalized.shipmentRateRules);
     setUsers(normalized.users);
-    setWeekStart(normalized.weekStart);
     return normalized;
   }
 
@@ -1433,7 +1441,6 @@ function SchedulerApp() {
       shipmentMethods,
       shipmentRateRules,
       users,
-      weekStart,
     });
     const digest = JSON.stringify(sharedSnapshot);
     if (digest === lastSharedSnapshotRef.current) {
@@ -1501,7 +1508,15 @@ function SchedulerApp() {
     return () => {
       window.clearTimeout(saveTimerRef.current);
     };
-  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressOperators, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, shipmentRateRules, suppliesRequests, users, weekStart, workspaceMode]);
+  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressOperators, pullPaperRequests, registrationRequests, requests, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, shipmentRateRules, suppliesRequests, users, workspaceMode]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(WEEK_START_STORAGE_KEY, weekStart.toISOString());
+    } catch {
+      // Week selection is a local convenience; sync can continue without it.
+    }
+  }, [weekStart]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -8086,6 +8101,7 @@ class AppErrorBoundary extends React.Component {
   resetBrowserData = () => {
     localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem(SESSION_STORAGE_KEY);
+    localStorage.removeItem(WEEK_START_STORAGE_KEY);
     window.location.reload();
   };
 
