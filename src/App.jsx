@@ -1240,6 +1240,20 @@ function presenceTimeValue(presence) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function shouldReplacePresence(existing, presence) {
+  if (!existing) return true;
+  const existingPriority = existing.action === "moving" ? 1 : 0;
+  const presencePriority = presence.action === "moving" ? 1 : 0;
+  if (presencePriority !== existingPriority) return presencePriority > existingPriority;
+  const existingActive = presenceTimeValue({ updatedAt: existing.activeAt }) || presenceTimeValue(existing);
+  const presenceActive = presenceTimeValue({ updatedAt: presence.activeAt }) || presenceTimeValue(presence);
+  return presenceActive >= existingActive;
+}
+
+function isInteractiveDragTarget(target) {
+  return !!target?.closest?.("button,input,select,textarea,a,[data-no-card-drag='true']");
+}
+
 function normalizePresenceEntries(entries) {
   const source = entries && typeof entries === "object" ? entries : {};
   const now = Date.now();
@@ -1260,6 +1274,8 @@ function normalizePresenceEntries(entries) {
             tab: safeText(presence?.tab || "Scheduler"),
             action: safeText(presence?.action || "viewing"),
             jobLabel: safeText(presence?.jobLabel),
+            jobId: safeText(presence?.jobId),
+            assignmentId: safeText(presence?.assignmentId),
             updatedAt,
             activeAt: safeText(presence?.activeAt || updatedAt),
           },
@@ -2516,6 +2532,8 @@ function SchedulerApp() {
             tab: safeText(presence.tab || "Scheduler"),
             action: safeText(presence.action || "viewing"),
             jobLabel: safeText(presence.jobLabel),
+            jobId: safeText(presence.jobId),
+            assignmentId: safeText(presence.assignmentId),
             updatedAt: safeText(presence.updatedAt),
             activeAt: safeText(presence.activeAt || presence.updatedAt),
           }))
@@ -2546,6 +2564,8 @@ function SchedulerApp() {
           tab: activeTab,
           action: "viewing",
           jobLabel: "",
+          jobId: "",
+          assignmentId: "",
           updatedAt: new Date().toISOString(),
           activeAt: new Date().toISOString(),
         }).catch(() => {});
@@ -2591,6 +2611,8 @@ function SchedulerApp() {
     if (!channel) return;
     const isMoving = activeTab === "Scheduler" && !!pickedUpItem;
     const isViewingSchedulerJob = activeTab === "Scheduler" && !!selectedJobPresenceLabel;
+    const presenceJobId = isMoving ? safeText(pickedUpItem.jobId) : isViewingSchedulerJob ? safeText(selectedJobId) : "";
+    const presenceAssignmentId = isMoving ? safeText(pickedUpItem.assignmentId) : "";
     const publishPresence = () => {
       if (!canPublishPresence()) {
         channel.untrack().catch(() => {});
@@ -2602,6 +2624,8 @@ function SchedulerApp() {
         tab: activeTab,
         action: isMoving ? "moving" : isViewingSchedulerJob ? "viewing job" : "viewing",
         jobLabel: isMoving ? safeText(pickedUpItem.label) : isViewingSchedulerJob ? selectedJobPresenceLabel : "",
+        jobId: presenceJobId,
+        assignmentId: presenceAssignmentId,
         updatedAt: new Date().toISOString(),
         activeAt: presenceActiveAt,
       };
@@ -2611,23 +2635,27 @@ function SchedulerApp() {
     publishPresence();
     const intervalId = window.setInterval(publishPresence, PRESENCE_HEARTBEAT_MS);
     return () => window.clearInterval(intervalId);
-  }, [activeTab, currentUser?.username, isReady, pickedUpItem, presenceActiveAt, presenceActivityTick, selectedJobPresenceLabel, workspaceMode]);
+  }, [activeTab, currentUser?.username, isReady, pickedUpItem, presenceActiveAt, presenceActivityTick, selectedJobId, selectedJobPresenceLabel, workspaceMode]);
 
   const localPresenceUser = useMemo(() => {
     if (!currentUser || workspaceMode === "demo") return null;
     if (!canPublishPresence()) return null;
     const isMoving = activeTab === "Scheduler" && !!pickedUpItem;
     const isViewingSchedulerJob = activeTab === "Scheduler" && !!selectedJobPresenceLabel;
+    const presenceJobId = isMoving ? safeText(pickedUpItem.jobId) : isViewingSchedulerJob ? safeText(selectedJobId) : "";
+    const presenceAssignmentId = isMoving ? safeText(pickedUpItem.assignmentId) : "";
     return {
       clientId: presenceClientIdRef.current,
       username: currentUser.username,
       tab: activeTab,
       action: isMoving ? "moving" : isViewingSchedulerJob ? "viewing job" : "viewing",
       jobLabel: isMoving ? safeText(pickedUpItem.label) : isViewingSchedulerJob ? selectedJobPresenceLabel : "",
+      jobId: presenceJobId,
+      assignmentId: presenceAssignmentId,
       updatedAt: new Date().toISOString(),
       activeAt: presenceActiveAt,
     };
-  }, [activeTab, currentUser?.username, pickedUpItem, presenceActiveAt, presenceActivityTick, selectedJobPresenceLabel, workspaceMode]);
+  }, [activeTab, currentUser?.username, pickedUpItem, presenceActiveAt, presenceActivityTick, selectedJobId, selectedJobPresenceLabel, workspaceMode]);
 
   const displayPresenceUsers = useMemo(() => {
     const now = Date.now();
@@ -2677,6 +2705,34 @@ function SchedulerApp() {
         users.push(presence.username);
       }
       map.set(presence.tab, users);
+    });
+    return map;
+  }, [otherPresenceUsers]);
+
+  const schedulerPresenceByJobId = useMemo(() => {
+    const map = new Map();
+    otherPresenceUsers.forEach((presence) => {
+      if (presence.tab !== "Scheduler") return;
+      const jobId = safeText(presence.jobId);
+      if (!jobId) return;
+      const existing = map.get(jobId);
+      if (shouldReplacePresence(existing, presence)) {
+        map.set(jobId, presence);
+      }
+    });
+    return map;
+  }, [otherPresenceUsers]);
+
+  const schedulerMovingPresenceByAssignmentId = useMemo(() => {
+    const map = new Map();
+    otherPresenceUsers.forEach((presence) => {
+      if (presence.tab !== "Scheduler" || presence.action !== "moving") return;
+      const assignmentId = safeText(presence.assignmentId);
+      if (!assignmentId) return;
+      const existing = map.get(assignmentId);
+      if (shouldReplacePresence(existing, presence)) {
+        map.set(assignmentId, presence);
+      }
     });
     return map;
   }, [otherPresenceUsers]);
@@ -3077,6 +3133,7 @@ function SchedulerApp() {
     if (!userCanMoveJobs) return;
     const job = jobMap.get(jobId);
     if (!job) return;
+    setSelectedJobId(jobId);
     setPickedUpItem({
       type: "queue",
       jobId,
@@ -3090,6 +3147,7 @@ function SchedulerApp() {
     if (!assignment) return;
     if (!canEditScheduleDay(assignment.dayKey)) return;
     const job = assignment.jobId ? jobMap.get(assignment.jobId) : null;
+    if (job?.id) setSelectedJobId(job.id);
     setPickedUpItem({
       type: "scheduled",
       assignmentId,
@@ -5782,29 +5840,39 @@ function SchedulerApp() {
                               </div>
                             </div>
                             <div className="space-y-0">
-                              {laneJobs.map(({ assignment, job }, index) => (
-                                <CompactScheduleCard
-                                  key={assignment.id}
-                                  job={job}
-                                  assignment={assignment}
-                                  finishMeta={job ? finishedMetaByJobId.get(job.id) : null}
-                                  density={scheduleCardDensity}
-                                  selected={job ? selectedJobId === job.id : false}
-                                  onSelect={job ? () => selectJob(job.id) : undefined}
-                                  canMoveUp={canEditLane && index > 0}
-                                  canMoveDown={canEditLane && index < laneJobs.length - 1}
-                                  onMoveUp={canEditLane && index > 0 ? () => moveAssignmentByStep(assignment.id, -1) : undefined}
-                                  onMoveDown={canEditLane && index < laneJobs.length - 1 ? () => moveAssignmentByStep(assignment.id, 1) : undefined}
-                                  onDropBefore={canEditLane ? (event) => handleScheduleCardDrop(event, day.key, press, assignment.id) : undefined}
-                                  onUnschedule={canEditLane ? () => removeAssignment(assignment.id) : undefined}
-                                  onFinish={job && canEditLane ? () => finishJob(job.id) : undefined}
-                                  onUndoFinish={job && canEditLane && assignment.status === "finished" ? () => undoFinishJob(job.id) : undefined}
-                                  onDuplicate={canEditLane ? () => duplicateAssignmentToNextDay(assignment.id) : undefined}
-                                  onMoveNextMonday={canEditLane ? () => moveAssignmentToNextMonday(assignment.id) : undefined}
-                                  onPickUp={canEditLane ? () => pickUpScheduledAssignment(assignment.id) : undefined}
-                                  draggable={canEditLane}
-                                />
-                              ))}
+                              {laneJobs.map(({ assignment, job }, index) => {
+                                const localMoving =
+                                  pickedUpItem?.type === "scheduled" && pickedUpItem.assignmentId === assignment.id;
+                                const remotePresence =
+                                  schedulerMovingPresenceByAssignmentId.get(assignment.id) ||
+                                  (job ? schedulerPresenceByJobId.get(job.id) : null);
+                                return (
+                                  <CompactScheduleCard
+                                    key={assignment.id}
+                                    job={job}
+                                    assignment={assignment}
+                                    finishMeta={job ? finishedMetaByJobId.get(job.id) : null}
+                                    density={scheduleCardDensity}
+                                    selected={job ? selectedJobId === job.id : false}
+                                    moving={localMoving}
+                                    remotePresence={remotePresence}
+                                    onSelect={job ? () => selectJob(job.id) : undefined}
+                                    canMoveUp={canEditLane && index > 0}
+                                    canMoveDown={canEditLane && index < laneJobs.length - 1}
+                                    onMoveUp={canEditLane && index > 0 ? () => moveAssignmentByStep(assignment.id, -1) : undefined}
+                                    onMoveDown={canEditLane && index < laneJobs.length - 1 ? () => moveAssignmentByStep(assignment.id, 1) : undefined}
+                                    onDropBefore={canEditLane ? (event) => handleScheduleCardDrop(event, day.key, press, assignment.id) : undefined}
+                                    onUnschedule={canEditLane ? () => removeAssignment(assignment.id) : undefined}
+                                    onFinish={job && canEditLane ? () => finishJob(job.id) : undefined}
+                                    onUndoFinish={job && canEditLane && assignment.status === "finished" ? () => undoFinishJob(job.id) : undefined}
+                                    onDuplicate={canEditLane ? () => duplicateAssignmentToNextDay(assignment.id) : undefined}
+                                    onMoveNextMonday={canEditLane ? () => moveAssignmentToNextMonday(assignment.id) : undefined}
+                                    onPickUp={canEditLane ? () => pickUpScheduledAssignment(assignment.id) : undefined}
+                                    onDragComplete={() => setPickedUpItem(null)}
+                                    draggable={canEditLane}
+                                  />
+                                );
+                              })}
                               {!laneJobs.length && (
                                 <div className="min-h-16 border-dashed border-stone-200 p-3 text-center text-[11px] text-stone-500">
                                   Drop here
@@ -8511,6 +8579,8 @@ function CompactScheduleCard({
   finishMeta,
   density = "compact",
   selected = false,
+  moving = false,
+  remotePresence = null,
   onSelect,
   canMoveUp = false,
   canMoveDown = false,
@@ -8524,6 +8594,7 @@ function CompactScheduleCard({
   onMoveNextMonday,
   draggable = false,
   onPickUp,
+  onDragComplete,
 }) {
   const isManual = assignment.kind === "manual";
   const state = isManual ? "note" : assignment.status === "finished" ? "done" : assignment.status;
@@ -8536,11 +8607,19 @@ function CompactScheduleCard({
   const showFinishedStamp = density === "detailed" && !isManual;
   const isCardDraggable = draggable;
   const showReorderControls = canMoveUp || canMoveDown || onMoveUp || onMoveDown;
-  const cardTone = selected
-    ? "border-sky-300 bg-sky-50 ring-1 ring-sky-200"
-    : job?.holdActive
-      ? "border-rose-300 bg-rose-50"
-      : "border-stone-200 bg-white";
+  const remoteIsMoving = remotePresence?.action === "moving";
+  const remotePresenceLabel = remotePresence
+    ? `${remotePresence.username} ${remoteIsMoving ? "moving" : "viewing"}`
+    : "";
+  const cardTone = remotePresence
+    ? "border-violet-400 bg-violet-50 ring-2 ring-violet-200"
+    : moving
+      ? "border-sky-500 bg-sky-100 ring-2 ring-sky-300"
+      : selected
+        ? "border-sky-300 bg-sky-50 ring-1 ring-sky-200"
+        : job?.holdActive
+          ? "border-rose-300 bg-rose-50"
+          : "border-stone-200 bg-white";
   const suppressClickUntilRef = useRef(0);
   const handleSelect = () => {
     if (Date.now() < suppressClickUntilRef.current) return;
@@ -8548,16 +8627,27 @@ function CompactScheduleCard({
   };
   const startScheduledDrag = (event) => {
     if (!isCardDraggable) return;
+    if (isInteractiveDragTarget(event.target)) {
+      event.preventDefault();
+      return;
+    }
     suppressClickUntilRef.current = Date.now() + 250;
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData(
       "application/json",
       makeDragPayload({ type: "scheduled", assignmentId: assignment.id, jobId: job?.id || "" })
     );
+    onPickUp?.();
   };
 
   return (
     <div
+      draggable={isCardDraggable}
+      onDragStart={startScheduledDrag}
+      onDragEnd={() => {
+        suppressClickUntilRef.current = Date.now() + 150;
+        onDragComplete?.();
+      }}
       onClick={handleSelect}
       role={onSelect ? "button" : undefined}
       tabIndex={onSelect ? 0 : undefined}
@@ -8576,7 +8666,7 @@ function CompactScheduleCard({
           : undefined
       }
       onDrop={onDropBefore}
-      className={`border-b p-2 transition-colors ${cardTone} ${onSelect ? "cursor-pointer" : ""}`}
+      className={`border-b p-2 transition-colors ${cardTone} ${isCardDraggable ? "cursor-grab active:cursor-grabbing" : onSelect ? "cursor-pointer" : ""}`}
     >
       <div className="flex items-start justify-between gap-2">
         <div
@@ -8618,17 +8708,22 @@ function CompactScheduleCard({
             <span className="bg-rose-700 px-2 py-1 text-[10px] font-medium text-white">hold</span>
           )}
           {showStateBadge && <span className={`px-2 py-1 text-[10px] font-medium ${statusTone(state)}`}>{state}</span>}
+          {remotePresenceLabel && (
+            <span className="border border-violet-200 bg-violet-100 px-2 py-1 text-[10px] font-semibold text-violet-900">
+              {remotePresenceLabel}
+            </span>
+          )}
+          {moving && (
+            <span className="border border-sky-200 bg-sky-100 px-2 py-1 text-[10px] font-semibold text-sky-900">
+              moving
+            </span>
+          )}
           {isCardDraggable && (
             <span
-              draggable
-              onDragStart={startScheduledDrag}
-              onDragEnd={() => {
-                suppressClickUntilRef.current = Date.now() + 150;
-              }}
               onClick={(event) => event.stopPropagation()}
-              className="cursor-grab border border-stone-300 bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-700"
+              className="border border-stone-300 bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-700"
             >
-              drag
+              drag anywhere
             </span>
           )}
         </div>
