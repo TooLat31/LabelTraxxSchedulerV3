@@ -1371,10 +1371,13 @@ function SchedulerApp() {
   const pendingSharedSnapshotAtRef = useRef(0);
   const lastLocalSharedChangeRef = useRef(0);
   const saveTimerRef = useRef(null);
+  const sharedSaveInFlightRef = useRef(false);
+  const queuedSharedSaveRef = useRef(null);
   const presenceChannelRef = useRef(null);
   const presenceClientIdRef = useRef(makeId("presence"));
   const sharedPresenceEntriesRef = useRef({});
   const presenceWriteInFlightRef = useRef(false);
+  const queuedPresenceEntryRef = useRef(null);
   const deferredSearch = useDeferredValue(search);
   const deferredUnscheduledSearch = useDeferredValue(unscheduledSearch);
   const deferredLocationSearch = useDeferredValue(locationSearch);
@@ -1485,35 +1488,96 @@ function SchedulerApp() {
 
   async function publishSharedPresence(entry) {
     if (!isSupabaseConfigured || !supabase || workspaceMode === "demo") return;
+    queuedPresenceEntryRef.current = entry;
     if (presenceWriteInFlightRef.current) return;
     presenceWriteInFlightRef.current = true;
     try {
-      const { data, error } = await supabase
-        .from("app_state")
-        .select("payload")
-        .eq("id", PRESENCE_STATE_ROW_ID)
-        .maybeSingle();
-      if (error) throw error;
+      while (queuedPresenceEntryRef.current) {
+        const nextEntry = queuedPresenceEntryRef.current;
+        queuedPresenceEntryRef.current = null;
+        const { data, error } = await supabase
+          .from("app_state")
+          .select("payload")
+          .eq("id", PRESENCE_STATE_ROW_ID)
+          .maybeSingle();
+        if (error) throw error;
 
-      const remoteEntries = normalizePresenceEntries(data?.payload?.entries);
-      const mergedEntries = normalizePresenceEntries({
-        ...remoteEntries,
-        ...sharedPresenceEntriesRef.current,
-        [entry.clientId]: entry,
-      });
-      sharedPresenceEntriesRef.current = mergedEntries;
-      setSharedPresenceUsers(Object.values(mergedEntries));
+        const remoteEntries = normalizePresenceEntries(data?.payload?.entries);
+        const mergedEntries = normalizePresenceEntries({
+          ...remoteEntries,
+          ...sharedPresenceEntriesRef.current,
+          [nextEntry.clientId]: nextEntry,
+        });
+        sharedPresenceEntriesRef.current = mergedEntries;
+        setSharedPresenceUsers(Object.values(mergedEntries));
 
-      const { error: upsertError } = await supabase.from("app_state").upsert({
-        id: PRESENCE_STATE_ROW_ID,
-        payload: { entries: mergedEntries },
-        updated_by: safeText(entry.username) || "presence",
-      });
-      if (upsertError) throw upsertError;
+        const { error: upsertError } = await supabase.from("app_state").upsert({
+          id: PRESENCE_STATE_ROW_ID,
+          payload: { entries: mergedEntries },
+          updated_by: safeText(nextEntry.username) || "presence",
+        });
+        if (upsertError) throw upsertError;
+      }
     } catch (error) {
       console.error("Failed to publish shared presence.", error);
     } finally {
       presenceWriteInFlightRef.current = false;
+    }
+  }
+
+  async function persistSharedSnapshot({ snapshot, digest, updatedBy }) {
+    queuedSharedSaveRef.current = { snapshot, digest, updatedBy };
+    if (sharedSaveInFlightRef.current) return;
+    sharedSaveInFlightRef.current = true;
+
+    try {
+      while (queuedSharedSaveRef.current) {
+        const nextSave = queuedSharedSaveRef.current;
+        queuedSharedSaveRef.current = null;
+        localStorage.setItem(STORAGE_KEY, nextSave.digest);
+
+        if (nextSave.digest === lastSharedSnapshotRef.current) {
+          clearPendingSharedSnapshot(nextSave.digest);
+          setSyncStatus(isSupabaseConfigured && supabase ? "Live sync" : "Local only");
+          continue;
+        }
+
+        if (!isSupabaseConfigured || !supabase) {
+          lastSharedSnapshotRef.current = nextSave.digest;
+          clearPendingSharedSnapshot(nextSave.digest);
+          setSyncStatus("Local only");
+          continue;
+        }
+
+        const { error } = await supabase.from("app_state").upsert({
+          id: SHARED_STATE_ROW_ID,
+          payload: nextSave.snapshot,
+          updated_by: nextSave.updatedBy || "system",
+        });
+
+        if (error) {
+          console.error("Failed to save shared scheduler state.", error);
+          setSyncStatus("Sync error");
+          return;
+        }
+
+        if (pendingSharedSnapshotRef.current === nextSave.digest) {
+          lastSharedSnapshotRef.current = nextSave.digest;
+          clearPendingSharedSnapshot(nextSave.digest);
+          setSyncStatus("Live sync");
+        } else if (pendingSharedSnapshotRef.current) {
+          setSyncStatus("Saving...");
+        } else {
+          lastSharedSnapshotRef.current = nextSave.digest;
+          setSyncStatus("Live sync");
+        }
+        setLastSyncAt(new Date().toISOString());
+      }
+    } finally {
+      sharedSaveInFlightRef.current = false;
+      if (queuedSharedSaveRef.current) {
+        persistSharedSnapshot(queuedSharedSaveRef.current);
+      }
     }
   }
 
@@ -1681,47 +1745,11 @@ function SchedulerApp() {
     }
 
     saveTimerRef.current = window.setTimeout(async () => {
-      localStorage.setItem(STORAGE_KEY, digest);
-
-      if (digest === lastSharedSnapshotRef.current) {
-        clearPendingSharedSnapshot(digest);
-        if (!isSupabaseConfigured || !supabase) {
-          setSyncStatus("Local only");
-        } else {
-          setSyncStatus("Live sync");
-        }
-        return;
-      }
-
-      if (!isSupabaseConfigured || !supabase) {
-        lastSharedSnapshotRef.current = digest;
-        clearPendingSharedSnapshot(digest);
-        setSyncStatus("Local only");
-        return;
-      }
-
-      const { error } = await supabase.from("app_state").upsert({
-        id: SHARED_STATE_ROW_ID,
-        payload: sharedSnapshot,
-        updated_by: currentUsername || "system",
+      persistSharedSnapshot({
+        snapshot: sharedSnapshot,
+        digest,
+        updatedBy: currentUsername || "system",
       });
-
-      if (error) {
-        console.error("Failed to save shared scheduler state.", error);
-        setSyncStatus("Sync error");
-        return;
-      }
-
-      lastSharedSnapshotRef.current = digest;
-      if (pendingSharedSnapshotRef.current === digest) {
-        clearPendingSharedSnapshot(digest);
-        setSyncStatus("Live sync");
-      } else if (pendingSharedSnapshotRef.current) {
-        setSyncStatus("Saving...");
-      } else {
-        setSyncStatus("Live sync");
-      }
-      setLastSyncAt(new Date().toISOString());
     }, SHARED_SAVE_DEBOUNCE_MS);
 
     return () => {
