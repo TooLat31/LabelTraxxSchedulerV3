@@ -8,6 +8,7 @@ const STORAGE_KEY = "labeltraxx-scheduler-v4";
 const SESSION_STORAGE_KEY = "labeltraxx-scheduler-session-v1";
 const WEEK_START_STORAGE_KEY = "labeltraxx-scheduler-week-start-v1";
 const SHARED_STATE_ROW_ID = "labeltraxx-shared-state";
+const PRESENCE_STATE_ROW_ID = "labeltraxx-presence-state";
 const LOGIN_SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
 const SHARED_SAVE_DEBOUNCE_MS = 700;
 const SHARED_REFRESH_INTERVAL_MS = 15000;
@@ -15,6 +16,7 @@ const SHARED_REMOTE_GUARD_MS = SHARED_SAVE_DEBOUNCE_MS + 2000;
 const SHARED_PENDING_REMOTE_BLOCK_MS = 45000;
 const PRESENCE_STALE_MS = 35000;
 const PRESENCE_HEARTBEAT_MS = 10000;
+const PRESENCE_SHARED_REFRESH_MS = 5000;
 const ATTACHMENT_BUCKET = "labeltraxx-attachments";
 const ACTIVITY_LOG_LIMIT = 300;
 const DEMO_QUERY_PARAM = "demo";
@@ -1238,6 +1240,35 @@ function presenceTimeValue(presence) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function normalizePresenceEntries(entries) {
+  const source = entries && typeof entries === "object" ? entries : {};
+  const now = Date.now();
+  return Object.fromEntries(
+    Object.entries(source)
+      .map(([key, presence]) => {
+        const clientId = safeText(presence?.clientId || key);
+        const username = safeText(presence?.username);
+        const updatedAt = safeText(presence?.updatedAt);
+        if (!clientId || !username || !updatedAt) return null;
+        const updatedAtValue = presenceTimeValue({ updatedAt });
+        if (!updatedAtValue || now - updatedAtValue > PRESENCE_STALE_MS) return null;
+        return [
+          clientId,
+          {
+            clientId,
+            username,
+            tab: safeText(presence?.tab || "Scheduler"),
+            action: safeText(presence?.action || "viewing"),
+            jobLabel: safeText(presence?.jobLabel),
+            updatedAt,
+            activeAt: safeText(presence?.activeAt || updatedAt),
+          },
+        ];
+      })
+      .filter(Boolean)
+  );
+}
+
 function canPublishPresence() {
   if (typeof document === "undefined") return true;
   return document.visibilityState === "visible";
@@ -1315,6 +1346,7 @@ function SchedulerApp() {
   const [syncStatus, setSyncStatus] = useState(isSupabaseConfigured ? "Connecting..." : "Local only");
   const [lastSyncAt, setLastSyncAt] = useState("");
   const [activePresenceUsers, setActivePresenceUsers] = useState([]);
+  const [sharedPresenceUsers, setSharedPresenceUsers] = useState([]);
   const [presenceActivityTick, setPresenceActivityTick] = useState(0);
   const [presenceActiveAt, setPresenceActiveAt] = useState(() => new Date().toISOString());
   const jobDetailsRef = useRef(null);
@@ -1325,6 +1357,8 @@ function SchedulerApp() {
   const saveTimerRef = useRef(null);
   const presenceChannelRef = useRef(null);
   const presenceClientIdRef = useRef(makeId("presence"));
+  const sharedPresenceEntriesRef = useRef({});
+  const presenceWriteInFlightRef = useRef(false);
   const deferredSearch = useDeferredValue(search);
   const deferredUnscheduledSearch = useDeferredValue(unscheduledSearch);
   const deferredLocationSearch = useDeferredValue(locationSearch);
@@ -1413,6 +1447,58 @@ function SchedulerApp() {
     setSyncStatus("Live sync");
     setLastSyncAt(data.updated_at || new Date().toISOString());
     return normalized;
+  }
+
+  function applySharedPresencePayload(payload) {
+    const entries = normalizePresenceEntries(payload?.entries);
+    sharedPresenceEntriesRef.current = entries;
+    setSharedPresenceUsers(Object.values(entries));
+    return entries;
+  }
+
+  async function fetchSharedPresenceState() {
+    if (!isSupabaseConfigured || !supabase || workspaceMode === "demo") return {};
+    const { data, error } = await supabase
+      .from("app_state")
+      .select("payload")
+      .eq("id", PRESENCE_STATE_ROW_ID)
+      .maybeSingle();
+    if (error) throw error;
+    return applySharedPresencePayload(data?.payload || {});
+  }
+
+  async function publishSharedPresence(entry) {
+    if (!isSupabaseConfigured || !supabase || workspaceMode === "demo") return;
+    if (presenceWriteInFlightRef.current) return;
+    presenceWriteInFlightRef.current = true;
+    try {
+      const { data, error } = await supabase
+        .from("app_state")
+        .select("payload")
+        .eq("id", PRESENCE_STATE_ROW_ID)
+        .maybeSingle();
+      if (error) throw error;
+
+      const remoteEntries = normalizePresenceEntries(data?.payload?.entries);
+      const mergedEntries = normalizePresenceEntries({
+        ...remoteEntries,
+        ...sharedPresenceEntriesRef.current,
+        [entry.clientId]: entry,
+      });
+      sharedPresenceEntriesRef.current = mergedEntries;
+      setSharedPresenceUsers(Object.values(mergedEntries));
+
+      const { error: upsertError } = await supabase.from("app_state").upsert({
+        id: PRESENCE_STATE_ROW_ID,
+        payload: { entries: mergedEntries },
+        updated_by: safeText(entry.username) || "presence",
+      });
+      if (upsertError) throw upsertError;
+    } catch (error) {
+      console.error("Failed to publish shared presence.", error);
+    } finally {
+      presenceWriteInFlightRef.current = false;
+    }
   }
 
   useEffect(() => {
@@ -1823,6 +1909,52 @@ function SchedulerApp() {
       supabase.removeChannel(channel);
     };
   }, [isReady, workspaceMode]);
+
+  useEffect(() => {
+    if (!isReady || workspaceMode === "demo" || !isSupabaseConfigured || !supabase || !currentUser) {
+      sharedPresenceEntriesRef.current = {};
+      setSharedPresenceUsers([]);
+      return undefined;
+    }
+
+    let isCancelled = false;
+    const refreshPresence = async () => {
+      try {
+        await fetchSharedPresenceState();
+      } catch (error) {
+        if (!isCancelled) {
+          console.error("Failed to refresh shared presence.", error);
+        }
+      }
+    };
+
+    refreshPresence();
+    const channel = supabase
+      .channel("labeltraxx-shared-presence")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "app_state",
+          filter: `id=eq.${PRESENCE_STATE_ROW_ID}`,
+        },
+        (payload) => {
+          if (payload.new?.payload) {
+            applySharedPresencePayload(payload.new.payload);
+          }
+        }
+      )
+      .subscribe();
+
+    const intervalId = window.setInterval(refreshPresence, PRESENCE_SHARED_REFRESH_MS);
+
+    return () => {
+      isCancelled = true;
+      window.clearInterval(intervalId);
+      supabase.removeChannel(channel);
+    };
+  }, [currentUser?.username, isReady, workspaceMode]);
 
   useEffect(() => {
     if (!jobs.some((job) => job.id === selectedJobId)) setSelectedJobId(null);
@@ -2464,7 +2596,7 @@ function SchedulerApp() {
         channel.untrack().catch(() => {});
         return;
       }
-      channel.track({
+      const presenceEntry = {
         clientId: presenceClientIdRef.current,
         username: currentUser.username,
         tab: activeTab,
@@ -2472,7 +2604,9 @@ function SchedulerApp() {
         jobLabel: isMoving ? safeText(pickedUpItem.label) : isViewingSchedulerJob ? selectedJobPresenceLabel : "",
         updatedAt: new Date().toISOString(),
         activeAt: presenceActiveAt,
-      }).catch(() => {});
+      };
+      channel.track(presenceEntry).catch(() => {});
+      publishSharedPresence(presenceEntry);
     };
     publishPresence();
     const intervalId = window.setInterval(publishPresence, PRESENCE_HEARTBEAT_MS);
@@ -2500,6 +2634,7 @@ function SchedulerApp() {
     const latestByUsername = new Map();
     const candidates = [
       ...activePresenceUsers.filter((presence) => presence.clientId !== presenceClientIdRef.current),
+      ...sharedPresenceUsers.filter((presence) => presence.clientId !== presenceClientIdRef.current),
       ...(localPresenceUser ? [localPresenceUser] : []),
     ];
     candidates
@@ -2524,7 +2659,7 @@ function SchedulerApp() {
       const rightActive = presenceTimeValue({ updatedAt: right.activeAt }) || presenceTimeValue(right);
       return leftSelf - rightSelf || rightActive - leftActive || left.username.localeCompare(right.username);
     });
-  }, [activePresenceUsers, localPresenceUser]);
+  }, [activePresenceUsers, localPresenceUser, sharedPresenceUsers]);
 
   const otherPresenceUsers = useMemo(
     () =>
