@@ -13,8 +13,8 @@ const SHARED_SAVE_DEBOUNCE_MS = 700;
 const SHARED_REFRESH_INTERVAL_MS = 15000;
 const SHARED_REMOTE_GUARD_MS = SHARED_SAVE_DEBOUNCE_MS + 2000;
 const SHARED_PENDING_REMOTE_BLOCK_MS = 45000;
-const PRESENCE_STALE_MS = 60000;
-const PRESENCE_HEARTBEAT_MS = 25000;
+const PRESENCE_STALE_MS = 35000;
+const PRESENCE_HEARTBEAT_MS = 10000;
 const ATTACHMENT_BUCKET = "labeltraxx-attachments";
 const ACTIVITY_LOG_LIMIT = 300;
 const DEMO_QUERY_PARAM = "demo";
@@ -1233,6 +1233,16 @@ function canUserViewRequest(user, request) {
   return comparableUsername(assignedTo) === comparableUsername(username) || comparableUsername(request.createdByAccount) === comparableUsername(username);
 }
 
+function presenceTimeValue(presence) {
+  const value = presence?.updatedAt ? new Date(presence.updatedAt).getTime() : 0;
+  return Number.isFinite(value) ? value : 0;
+}
+
+function canPublishPresence() {
+  if (typeof document === "undefined") return true;
+  return document.visibilityState === "visible";
+}
+
 function SchedulerApp() {
   const [isReady, setIsReady] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState(() => (isDemoWorkspaceRequested() ? "demo" : "live"));
@@ -1305,6 +1315,8 @@ function SchedulerApp() {
   const [syncStatus, setSyncStatus] = useState(isSupabaseConfigured ? "Connecting..." : "Local only");
   const [lastSyncAt, setLastSyncAt] = useState("");
   const [activePresenceUsers, setActivePresenceUsers] = useState([]);
+  const [presenceActivityTick, setPresenceActivityTick] = useState(0);
+  const [presenceActiveAt, setPresenceActiveAt] = useState(() => new Date().toISOString());
   const jobDetailsRef = useRef(null);
   const lastSharedSnapshotRef = useRef("");
   const pendingSharedSnapshotRef = useRef("");
@@ -2373,6 +2385,7 @@ function SchedulerApp() {
             action: safeText(presence.action || "viewing"),
             jobLabel: safeText(presence.jobLabel),
             updatedAt: safeText(presence.updatedAt),
+            activeAt: safeText(presence.activeAt || presence.updatedAt),
           }))
         )
         .filter((presence) => presence.username)
@@ -2402,6 +2415,7 @@ function SchedulerApp() {
           action: "viewing",
           jobLabel: "",
           updatedAt: new Date().toISOString(),
+          activeAt: new Date().toISOString(),
         }).catch(() => {});
       });
 
@@ -2416,12 +2430,40 @@ function SchedulerApp() {
   }, [currentUser?.username, isReady, workspaceMode]);
 
   useEffect(() => {
+    if (!isReady || workspaceMode === "demo" || !currentUser) return undefined;
+    const bumpPresenceActivity = () => {
+      setPresenceActiveAt(new Date().toISOString());
+      setPresenceActivityTick((current) => current + 1);
+    };
+    window.addEventListener("focus", bumpPresenceActivity);
+    document.addEventListener("visibilitychange", bumpPresenceActivity);
+    document.addEventListener("pointerdown", bumpPresenceActivity, true);
+    document.addEventListener("keydown", bumpPresenceActivity, true);
+    return () => {
+      window.removeEventListener("focus", bumpPresenceActivity);
+      document.removeEventListener("visibilitychange", bumpPresenceActivity);
+      document.removeEventListener("pointerdown", bumpPresenceActivity, true);
+      document.removeEventListener("keydown", bumpPresenceActivity, true);
+    };
+  }, [currentUser?.username, isReady, workspaceMode]);
+
+  useEffect(() => {
+    if (!isReady || workspaceMode === "demo" || !currentUser) return;
+    setPresenceActiveAt(new Date().toISOString());
+    setPresenceActivityTick((current) => current + 1);
+  }, [activeTab, currentUser?.username, isReady, workspaceMode]);
+
+  useEffect(() => {
     if (!isReady || workspaceMode === "demo" || !currentUser) return;
     const channel = presenceChannelRef.current;
     if (!channel) return;
     const isMoving = activeTab === "Scheduler" && !!pickedUpItem;
     const isViewingSchedulerJob = activeTab === "Scheduler" && !!selectedJobPresenceLabel;
     const publishPresence = () => {
+      if (!canPublishPresence()) {
+        channel.untrack().catch(() => {});
+        return;
+      }
       channel.track({
         clientId: presenceClientIdRef.current,
         username: currentUser.username,
@@ -2429,15 +2471,17 @@ function SchedulerApp() {
         action: isMoving ? "moving" : isViewingSchedulerJob ? "viewing job" : "viewing",
         jobLabel: isMoving ? safeText(pickedUpItem.label) : isViewingSchedulerJob ? selectedJobPresenceLabel : "",
         updatedAt: new Date().toISOString(),
+        activeAt: presenceActiveAt,
       }).catch(() => {});
     };
     publishPresence();
     const intervalId = window.setInterval(publishPresence, PRESENCE_HEARTBEAT_MS);
     return () => window.clearInterval(intervalId);
-  }, [activeTab, currentUser?.username, isReady, pickedUpItem, selectedJobPresenceLabel, workspaceMode]);
+  }, [activeTab, currentUser?.username, isReady, pickedUpItem, presenceActiveAt, presenceActivityTick, selectedJobPresenceLabel, workspaceMode]);
 
   const localPresenceUser = useMemo(() => {
     if (!currentUser || workspaceMode === "demo") return null;
+    if (!canPublishPresence()) return null;
     const isMoving = activeTab === "Scheduler" && !!pickedUpItem;
     const isViewingSchedulerJob = activeTab === "Scheduler" && !!selectedJobPresenceLabel;
     return {
@@ -2447,22 +2491,47 @@ function SchedulerApp() {
       action: isMoving ? "moving" : isViewingSchedulerJob ? "viewing job" : "viewing",
       jobLabel: isMoving ? safeText(pickedUpItem.label) : isViewingSchedulerJob ? selectedJobPresenceLabel : "",
       updatedAt: new Date().toISOString(),
+      activeAt: presenceActiveAt,
     };
-  }, [activeTab, currentUser?.username, pickedUpItem, selectedJobPresenceLabel, workspaceMode]);
+  }, [activeTab, currentUser?.username, pickedUpItem, presenceActiveAt, presenceActivityTick, selectedJobPresenceLabel, workspaceMode]);
 
   const displayPresenceUsers = useMemo(() => {
-    const usersByClientId = new Map(activePresenceUsers.map((presence) => [presence.clientId, presence]));
-    if (localPresenceUser) usersByClientId.set(localPresenceUser.clientId, localPresenceUser);
-    return Array.from(usersByClientId.values()).sort((left, right) => {
+    const now = Date.now();
+    const latestByUsername = new Map();
+    const candidates = [
+      ...activePresenceUsers.filter((presence) => presence.clientId !== presenceClientIdRef.current),
+      ...(localPresenceUser ? [localPresenceUser] : []),
+    ];
+    candidates
+      .filter((presence) => presence.username)
+      .filter((presence) => {
+        const updatedAt = presenceTimeValue(presence) || now;
+        return now - updatedAt <= PRESENCE_STALE_MS;
+      })
+      .forEach((presence) => {
+        const key = comparableUsername(presence.username);
+        const existing = latestByUsername.get(key);
+        const presenceActiveTime = presenceTimeValue({ updatedAt: presence.activeAt }) || presenceTimeValue(presence);
+        const existingActiveTime = presenceTimeValue({ updatedAt: existing?.activeAt }) || presenceTimeValue(existing);
+        if (!existing || presenceActiveTime > existingActiveTime || (presenceActiveTime === existingActiveTime && presenceTimeValue(presence) >= presenceTimeValue(existing))) {
+          latestByUsername.set(key, presence);
+        }
+      });
+    return Array.from(latestByUsername.values()).sort((left, right) => {
       const leftSelf = left.clientId === presenceClientIdRef.current ? 0 : 1;
       const rightSelf = right.clientId === presenceClientIdRef.current ? 0 : 1;
-      return leftSelf - rightSelf || left.username.localeCompare(right.username) || left.tab.localeCompare(right.tab);
+      const leftActive = presenceTimeValue({ updatedAt: left.activeAt }) || presenceTimeValue(left);
+      const rightActive = presenceTimeValue({ updatedAt: right.activeAt }) || presenceTimeValue(right);
+      return leftSelf - rightSelf || rightActive - leftActive || left.username.localeCompare(right.username);
     });
   }, [activePresenceUsers, localPresenceUser]);
 
   const otherPresenceUsers = useMemo(
-    () => displayPresenceUsers.filter((presence) => presence.clientId !== presenceClientIdRef.current),
-    [displayPresenceUsers]
+    () =>
+      displayPresenceUsers.filter(
+        (presence) => comparableUsername(presence.username) !== comparableUsername(currentUser?.username)
+      ),
+    [currentUser?.username, displayPresenceUsers]
   );
 
   const presenceByTab = useMemo(() => {
