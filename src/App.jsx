@@ -8,6 +8,15 @@ const STORAGE_KEY = "labeltraxx-scheduler-v4";
 const SESSION_STORAGE_KEY = "labeltraxx-scheduler-session-v1";
 const WEEK_START_STORAGE_KEY = "labeltraxx-scheduler-week-start-v1";
 const SHARED_STATE_ROW_ID = "labeltraxx-shared-state";
+const SHARED_STATE_SLICE_ROWS = {
+  jobs: `${SHARED_STATE_ROW_ID}:jobs`,
+  schedule: `${SHARED_STATE_ROW_ID}:schedule`,
+  requests: `${SHARED_STATE_ROW_ID}:requests`,
+  shipments: `${SHARED_STATE_ROW_ID}:shipments`,
+  users: `${SHARED_STATE_ROW_ID}:users`,
+};
+const SHARED_STATE_SLICE_KEYS = Object.keys(SHARED_STATE_SLICE_ROWS);
+const SHARED_STATE_SLICE_ROW_IDS = Object.values(SHARED_STATE_SLICE_ROWS);
 const PRESENCE_STATE_ROW_ID = "labeltraxx-presence-state";
 const LOGIN_SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
 const SHARED_SAVE_DEBOUNCE_MS = 700;
@@ -889,6 +898,100 @@ function buildSharedSnapshot(state) {
   };
 }
 
+function normalizeSharedStateSlice(sliceKey, payload) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  if (sliceKey === "jobs") {
+    return {
+      jobs: normalizeJobs(source.jobs),
+    };
+  }
+  if (sliceKey === "schedule") {
+    return {
+      assignments: normalizeAssignments(source.assignments),
+      scheduleLocks: normalizeScheduleLocks(source.scheduleLocks),
+      pressOperators: normalizePressOperators(source.pressOperators, source.pressDuties),
+    };
+  }
+  if (sliceKey === "requests") {
+    return {
+      requests: normalizeRequests(source.requests),
+      pullPaperRequests: normalizePullPaperRequests(source.pullPaperRequests),
+      notes: normalizeNotes(source.notes),
+      registrationRequests: normalizeRegistrationRequests(source.registrationRequests),
+      suppliesRequests: normalizeSuppliesRequests(source.suppliesRequests),
+    };
+  }
+  if (sliceKey === "shipments") {
+    return {
+      shipmentGroups: normalizeShipmentGroups(source.shipmentGroups),
+      shipmentEmailLogs: normalizeShipmentEmailLogs(source.shipmentEmailLogs),
+      shipmentEmailGroups: normalizeShipmentEmailGroups(source.shipmentEmailGroups),
+      activityLog: normalizeActivityLog(source.activityLog),
+      shipmentMethods: normalizeShipmentMethods(source.shipmentMethods),
+      shipmentRateRules: normalizeShipmentRateRules(source.shipmentRateRules),
+    };
+  }
+  if (sliceKey === "users") {
+    return {
+      users: normalizeUsers(source.users),
+    };
+  }
+  return {};
+}
+
+function buildSharedStateSlices(state) {
+  const snapshot = normalizeSharedSnapshot(buildSharedSnapshot(state));
+  return {
+    jobs: normalizeSharedStateSlice("jobs", snapshot),
+    schedule: normalizeSharedStateSlice("schedule", snapshot),
+    requests: normalizeSharedStateSlice("requests", snapshot),
+    shipments: normalizeSharedStateSlice("shipments", snapshot),
+    users: normalizeSharedStateSlice("users", snapshot),
+  };
+}
+
+function buildSharedStateSliceDigests(slices) {
+  return Object.fromEntries(
+    SHARED_STATE_SLICE_KEYS.map((sliceKey) => [
+      sliceKey,
+      JSON.stringify(normalizeSharedStateSlice(sliceKey, slices?.[sliceKey] || {})),
+    ])
+  );
+}
+
+function mergeSharedStateSlices(baseSnapshot, slices) {
+  const merged = normalizeSharedSnapshot(baseSnapshot || defaultSharedSnapshot());
+  SHARED_STATE_SLICE_KEYS.forEach((sliceKey) => {
+    if (!Object.prototype.hasOwnProperty.call(slices || {}, sliceKey)) return;
+    Object.assign(merged, normalizeSharedStateSlice(sliceKey, slices?.[sliceKey] || {}));
+  });
+  return normalizeSharedSnapshot(merged);
+}
+
+function getSharedStateSliceKeyForRowId(rowId) {
+  const normalizedId = safeText(rowId);
+  return SHARED_STATE_SLICE_KEYS.find((sliceKey) => SHARED_STATE_SLICE_ROWS[sliceKey] === normalizedId) || "";
+}
+
+function rowsToSharedStateSlices(rows) {
+  const slices = {};
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const sliceKey = getSharedStateSliceKeyForRowId(row.id);
+    if (sliceKey) {
+      slices[sliceKey] = normalizeSharedStateSlice(sliceKey, row.payload);
+    }
+  });
+  return slices;
+}
+
+function latestRowUpdatedAt(rows, fallback = "") {
+  const timestamps = (Array.isArray(rows) ? rows : [])
+    .map((row) => safeText(row.updated_at))
+    .filter(Boolean)
+    .sort();
+  return timestamps[timestamps.length - 1] || fallback;
+}
+
 function readFileAsDataUrlAttachment(file, uploadedBy, id = makeId("att")) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1367,9 +1470,13 @@ function SchedulerApp() {
   const [presenceActiveAt, setPresenceActiveAt] = useState(() => new Date().toISOString());
   const jobDetailsRef = useRef(null);
   const lastSharedSnapshotRef = useRef("");
+  const lastSharedSliceDigestsRef = useRef({});
   const pendingSharedSnapshotRef = useRef("");
   const pendingSharedSnapshotAtRef = useRef(0);
+  const pendingSharedSliceDigestsRef = useRef({});
+  const pendingSharedSliceAtsRef = useRef({});
   const lastLocalSharedChangeRef = useRef(0);
+  const lastLocalSharedSliceChangeRef = useRef({});
   const saveTimerRef = useRef(null);
   const sharedSaveInFlightRef = useRef(false);
   const queuedSharedSaveRef = useRef(null);
@@ -1403,6 +1510,104 @@ function SchedulerApp() {
     return normalized;
   }
 
+  function applySharedStateSlice(sliceKey, payload) {
+    const normalized = normalizeSharedStateSlice(sliceKey, payload);
+    if (sliceKey === "jobs") {
+      setJobs(normalized.jobs);
+    } else if (sliceKey === "schedule") {
+      setAssignments(normalized.assignments);
+      setScheduleLocks(normalized.scheduleLocks);
+      setPressOperators(normalized.pressOperators);
+    } else if (sliceKey === "requests") {
+      setRequests(normalized.requests);
+      setPullPaperRequests(normalized.pullPaperRequests);
+      setNotes(normalized.notes);
+      setRegistrationRequests(normalized.registrationRequests);
+      setSuppliesRequests(normalized.suppliesRequests);
+    } else if (sliceKey === "shipments") {
+      setShipmentGroups(normalized.shipmentGroups);
+      setShipmentEmailLogs(normalized.shipmentEmailLogs);
+      setShipmentEmailGroups(normalized.shipmentEmailGroups);
+      setActivityLog(normalized.activityLog);
+      setShipmentMethods(normalized.shipmentMethods);
+      setShipmentRateRules(normalized.shipmentRateRules);
+    } else if (sliceKey === "users") {
+      setUsers(normalized.users);
+    }
+    return normalized;
+  }
+
+  function buildCurrentSharedSnapshot() {
+    return buildSharedSnapshot({
+      jobs,
+      assignments,
+      scheduleLocks,
+      pressOperators,
+      requests,
+      pullPaperRequests,
+      notes,
+      registrationRequests,
+      suppliesRequests,
+      shipmentGroups,
+      shipmentEmailLogs,
+      shipmentEmailGroups,
+      activityLog,
+      shipmentMethods,
+      shipmentRateRules,
+      users,
+    });
+  }
+
+  function rememberSharedStateSnapshot(snapshot) {
+    const normalized = normalizeSharedSnapshot(snapshot);
+    lastSharedSnapshotRef.current = JSON.stringify(buildSharedSnapshot(normalized));
+    lastSharedSliceDigestsRef.current = buildSharedStateSliceDigests(buildSharedStateSlices(normalized));
+    return normalized;
+  }
+
+  function hasRecentLocalSharedSliceChanges(sliceKey) {
+    return Date.now() - (lastLocalSharedSliceChangeRef.current[sliceKey] || 0) < SHARED_REMOTE_GUARD_MS;
+  }
+
+  function hasPendingLocalSharedSlice(sliceKey) {
+    const pendingAt = pendingSharedSliceAtsRef.current[sliceKey] || 0;
+    return !!pendingSharedSliceDigestsRef.current[sliceKey] && Date.now() - pendingAt < SHARED_PENDING_REMOTE_BLOCK_MS;
+  }
+
+  function setPendingSharedSlice(sliceKey, digest) {
+    pendingSharedSliceDigestsRef.current = {
+      ...pendingSharedSliceDigestsRef.current,
+      [sliceKey]: digest,
+    };
+    pendingSharedSliceAtsRef.current = {
+      ...pendingSharedSliceAtsRef.current,
+      [sliceKey]: Date.now(),
+    };
+  }
+
+  function clearPendingSharedSlice(sliceKey, digest = "") {
+    if (digest && pendingSharedSliceDigestsRef.current[sliceKey] !== digest) return;
+    const nextDigests = { ...pendingSharedSliceDigestsRef.current };
+    const nextAts = { ...pendingSharedSliceAtsRef.current };
+    delete nextDigests[sliceKey];
+    delete nextAts[sliceKey];
+    pendingSharedSliceDigestsRef.current = nextDigests;
+    pendingSharedSliceAtsRef.current = nextAts;
+  }
+
+  function clearAllPendingSharedSlices() {
+    pendingSharedSliceDigestsRef.current = {};
+    pendingSharedSliceAtsRef.current = {};
+  }
+
+  function shouldBlockRemoteSharedSlice(sliceKey, digest) {
+    return (
+      digest !== lastSharedSliceDigestsRef.current[sliceKey] &&
+      digest !== pendingSharedSliceDigestsRef.current[sliceKey] &&
+      (hasPendingLocalSharedSlice(sliceKey) || hasRecentLocalSharedSliceChanges(sliceKey))
+    );
+  }
+
   function hasRecentLocalSharedChanges() {
     return Date.now() - lastLocalSharedChangeRef.current < SHARED_REMOTE_GUARD_MS;
   }
@@ -1431,41 +1636,83 @@ function SchedulerApp() {
     );
   }
 
+  async function upsertSharedStateSlices(snapshot, updatedBy = "system", sliceKeys = SHARED_STATE_SLICE_KEYS) {
+    if (!isSupabaseConfigured || !supabase) return {};
+    const normalized = normalizeSharedSnapshot(snapshot);
+    const slices = buildSharedStateSlices(normalized);
+    const rows = sliceKeys.map((sliceKey) => ({
+      id: SHARED_STATE_SLICE_ROWS[sliceKey],
+      payload: slices[sliceKey],
+      updated_by: updatedBy,
+    }));
+    if (!rows.length) return slices;
+    const { error } = await supabase.from("app_state").upsert(rows);
+    if (error) throw error;
+    return slices;
+  }
+
   async function fetchLatestSharedState({ force = false } = {}) {
     if (!isSupabaseConfigured || !supabase) return null;
-    if (!force && (hasRecentLocalSharedChanges() || hasPendingLocalSharedSnapshot())) return null;
 
     const { data, error } = await supabase
       .from("app_state")
-      .select("payload, updated_at")
-      .eq("id", SHARED_STATE_ROW_ID)
-      .maybeSingle();
+      .select("id, payload, updated_at")
+      .in("id", [SHARED_STATE_ROW_ID, ...SHARED_STATE_SLICE_ROW_IDS]);
 
     if (error) throw error;
-    if (!data?.payload) return null;
+    const rows = Array.isArray(data) ? data : [];
+    const legacyRow = rows.find((row) => row.id === SHARED_STATE_ROW_ID);
+    const sliceRows = rows.filter((row) => getSharedStateSliceKeyForRowId(row.id));
 
-    const normalized = normalizeSharedSnapshot(data.payload);
-    const digest = JSON.stringify(buildSharedSnapshot(normalized));
-    if (shouldBlockRemoteSnapshot(digest)) {
+    if (!sliceRows.length && legacyRow?.payload) {
+      const normalizedLegacy = normalizeSharedSnapshot(legacyRow.payload);
+      await upsertSharedStateSlices(normalizedLegacy, "migration");
+      const legacyDigest = JSON.stringify(buildSharedSnapshot(normalizedLegacy));
+      if (shouldBlockRemoteSnapshot(legacyDigest)) return null;
+      const applied = applySharedStateSnapshot(normalizedLegacy);
+      rememberSharedStateSnapshot(applied);
+      clearPendingSharedSnapshot();
+      clearAllPendingSharedSlices();
+      setSyncStatus("Live sync");
+      setLastSyncAt(legacyRow.updated_at || new Date().toISOString());
+      return applied;
+    }
+
+    if (!sliceRows.length) {
       return null;
     }
 
-    if (digest === pendingSharedSnapshotRef.current) {
-      lastSharedSnapshotRef.current = digest;
-      clearPendingSharedSnapshot(digest);
-      setSyncStatus("Live sync");
-      setLastSyncAt(data.updated_at || new Date().toISOString());
-      return normalized;
-    }
+    let didApply = false;
+    sliceRows.forEach((row) => {
+      const sliceKey = getSharedStateSliceKeyForRowId(row.id);
+      if (!sliceKey) return;
+      const normalizedSlice = normalizeSharedStateSlice(sliceKey, row.payload);
+      const digest = JSON.stringify(normalizedSlice);
+      if (pendingSharedSliceDigestsRef.current[sliceKey] === digest) {
+        lastSharedSliceDigestsRef.current = {
+          ...lastSharedSliceDigestsRef.current,
+          [sliceKey]: digest,
+        };
+        clearPendingSharedSlice(sliceKey, digest);
+        return;
+      }
+      if (digest === lastSharedSliceDigestsRef.current[sliceKey]) return;
+      if (shouldBlockRemoteSharedSlice(sliceKey, digest)) return;
+      applySharedStateSlice(sliceKey, normalizedSlice);
+      lastSharedSliceDigestsRef.current = {
+        ...lastSharedSliceDigestsRef.current,
+        [sliceKey]: digest,
+      };
+      didApply = true;
+    });
 
-    if (digest !== lastSharedSnapshotRef.current) {
-      applySharedStateSnapshot(data.payload);
-      lastSharedSnapshotRef.current = digest;
+    if (didApply) {
+      const merged = mergeSharedStateSlices(buildCurrentSharedSnapshot(), rowsToSharedStateSlices(sliceRows));
+      lastSharedSnapshotRef.current = JSON.stringify(buildSharedSnapshot(merged));
     }
-
     setSyncStatus("Live sync");
-    setLastSyncAt(data.updated_at || new Date().toISOString());
-    return normalized;
+    setLastSyncAt(latestRowUpdatedAt(sliceRows, new Date().toISOString()));
+    return normalizeSharedSnapshot(buildCurrentSharedSnapshot());
   }
 
   function applySharedPresencePayload(payload) {
@@ -1525,8 +1772,8 @@ function SchedulerApp() {
     }
   }
 
-  async function persistSharedSnapshot({ snapshot, digest, updatedBy }) {
-    queuedSharedSaveRef.current = { snapshot, digest, updatedBy };
+  async function persistSharedSnapshot({ snapshot, digest, slices, sliceDigests, sliceKeys, updatedBy }) {
+    queuedSharedSaveRef.current = { snapshot, digest, slices, sliceDigests, sliceKeys, updatedBy };
     if (sharedSaveInFlightRef.current) return;
     sharedSaveInFlightRef.current = true;
 
@@ -1535,6 +1782,7 @@ function SchedulerApp() {
         const nextSave = queuedSharedSaveRef.current;
         queuedSharedSaveRef.current = null;
         localStorage.setItem(STORAGE_KEY, nextSave.digest);
+        const nextSliceKeys = (nextSave.sliceKeys || []).filter((sliceKey) => SHARED_STATE_SLICE_ROWS[sliceKey]);
 
         if (nextSave.digest === lastSharedSnapshotRef.current) {
           clearPendingSharedSnapshot(nextSave.digest);
@@ -1544,16 +1792,28 @@ function SchedulerApp() {
 
         if (!isSupabaseConfigured || !supabase) {
           lastSharedSnapshotRef.current = nextSave.digest;
+          nextSliceKeys.forEach((sliceKey) => {
+            lastSharedSliceDigestsRef.current = {
+              ...lastSharedSliceDigestsRef.current,
+              [sliceKey]: nextSave.sliceDigests[sliceKey],
+            };
+            clearPendingSharedSlice(sliceKey, nextSave.sliceDigests[sliceKey]);
+          });
           clearPendingSharedSnapshot(nextSave.digest);
           setSyncStatus("Local only");
           continue;
         }
 
-        const { error } = await supabase.from("app_state").upsert({
-          id: SHARED_STATE_ROW_ID,
-          payload: nextSave.snapshot,
+        const rows = nextSliceKeys.map((sliceKey) => ({
+          id: SHARED_STATE_SLICE_ROWS[sliceKey],
+          payload: nextSave.slices[sliceKey],
           updated_by: nextSave.updatedBy || "system",
-        });
+        }));
+        if (!rows.length) {
+          setSyncStatus("Live sync");
+          continue;
+        }
+        const { error } = await supabase.from("app_state").upsert(rows);
 
         if (error) {
           console.error("Failed to save shared scheduler state.", error);
@@ -1561,11 +1821,25 @@ function SchedulerApp() {
           return;
         }
 
-        if (pendingSharedSnapshotRef.current === nextSave.digest) {
+        let stillPending = false;
+        nextSliceKeys.forEach((sliceKey) => {
+          const sliceDigest = nextSave.sliceDigests[sliceKey];
+          if (pendingSharedSliceDigestsRef.current[sliceKey] === sliceDigest) {
+            lastSharedSliceDigestsRef.current = {
+              ...lastSharedSliceDigestsRef.current,
+              [sliceKey]: sliceDigest,
+            };
+            clearPendingSharedSlice(sliceKey, sliceDigest);
+          } else if (pendingSharedSliceDigestsRef.current[sliceKey]) {
+            stillPending = true;
+          }
+        });
+
+        if (pendingSharedSnapshotRef.current === nextSave.digest && !stillPending) {
           lastSharedSnapshotRef.current = nextSave.digest;
           clearPendingSharedSnapshot(nextSave.digest);
           setSyncStatus("Live sync");
-        } else if (pendingSharedSnapshotRef.current) {
+        } else if (pendingSharedSnapshotRef.current || stillPending) {
           setSyncStatus("Saving...");
         } else {
           lastSharedSnapshotRef.current = nextSave.digest;
@@ -1599,9 +1873,9 @@ function SchedulerApp() {
         if (demoRequested) {
           const demoSnapshot = buildDemoSharedSnapshot();
           const normalized = applySharedStateSnapshot(demoSnapshot);
-          const digest = JSON.stringify(buildSharedSnapshot(normalized));
-          lastSharedSnapshotRef.current = digest;
+          rememberSharedStateSnapshot(normalized);
           clearPendingSharedSnapshot();
+          clearAllPendingSharedSlices();
           if (!isCancelled) {
             setWorkspaceMode("demo");
             setSyncStatus("Demo mode");
@@ -1628,27 +1902,34 @@ function SchedulerApp() {
           setSyncStatus("Connecting...");
           const { data, error } = await supabase
             .from("app_state")
-            .select("payload, updated_at")
-            .eq("id", SHARED_STATE_ROW_ID)
-            .maybeSingle();
+            .select("id, payload, updated_at")
+            .in("id", [SHARED_STATE_ROW_ID, ...SHARED_STATE_SLICE_ROW_IDS]);
 
           if (error) throw error;
 
-          if (data?.payload) {
-            sharedSnapshot = data.payload;
+          const rows = Array.isArray(data) ? data : [];
+          const legacyRow = rows.find((row) => row.id === SHARED_STATE_ROW_ID);
+          const sliceRows = rows.filter((row) => getSharedStateSliceKeyForRowId(row.id));
+
+          if (sliceRows.length) {
+            sharedSnapshot = mergeSharedStateSlices(
+              legacyRow?.payload || (Object.keys(saved || {}).length > 0 ? saved : defaultSharedSnapshot()),
+              rowsToSharedStateSlices(sliceRows)
+            );
+            const existingSliceKeys = new Set(sliceRows.map((row) => getSharedStateSliceKeyForRowId(row.id)));
+            const missingSliceKeys = SHARED_STATE_SLICE_KEYS.filter((sliceKey) => !existingSliceKeys.has(sliceKey));
+            if (missingSliceKeys.length) {
+              await upsertSharedStateSlices(sharedSnapshot, "migration", missingSliceKeys);
+            }
             if (!isCancelled) {
               setSyncStatus("Live sync");
-              setLastSyncAt(data.updated_at || new Date().toISOString());
+              setLastSyncAt(latestRowUpdatedAt(rows, new Date().toISOString()));
             }
           } else {
             const seedSnapshot =
-              Object.keys(saved || {}).length > 0 ? buildSharedSnapshot(normalizeSharedSnapshot(saved)) : defaultSharedSnapshot();
-            const { error: seedError } = await supabase.from("app_state").upsert({
-              id: SHARED_STATE_ROW_ID,
-              payload: seedSnapshot,
-              updated_by: safeText(session.currentUsername) || "system",
-            });
-            if (seedError) throw seedError;
+              legacyRow?.payload ||
+              (Object.keys(saved || {}).length > 0 ? buildSharedSnapshot(normalizeSharedSnapshot(saved)) : defaultSharedSnapshot());
+            await upsertSharedStateSlices(seedSnapshot, safeText(session.currentUsername) || "system");
             sharedSnapshot = seedSnapshot;
             if (!isCancelled) {
               setSyncStatus("Live sync");
@@ -1660,9 +1941,9 @@ function SchedulerApp() {
         if (isCancelled) return;
 
         const normalized = applySharedStateSnapshot(sharedSnapshot);
-        const digest = JSON.stringify(buildSharedSnapshot(normalized));
-        lastSharedSnapshotRef.current = digest;
+        rememberSharedStateSnapshot(normalized);
         clearPendingSharedSnapshot();
+        clearAllPendingSharedSlices();
         if (isSessionActive) {
           const match = normalized.users.find(
             (user) => comparableUsername(user.username) === comparableUsername(sessionUsername)
@@ -1685,8 +1966,9 @@ function SchedulerApp() {
         const fallbackSource = Object.keys(saved || {}).length ? saved : defaultSharedSnapshot();
         const fallback = normalizeSharedSnapshot(fallbackSource);
         applySharedStateSnapshot(fallback);
-        lastSharedSnapshotRef.current = JSON.stringify(buildSharedSnapshot(fallback));
+        rememberSharedStateSnapshot(fallback);
         clearPendingSharedSnapshot();
+        clearAllPendingSharedSlices();
         setSyncStatus(isSupabaseConfigured ? "Sync error" : "Local only");
       } finally {
         if (!isCancelled) setIsReady(true);
@@ -1705,40 +1987,43 @@ function SchedulerApp() {
     if (workspaceMode === "demo") {
       setSyncStatus("Demo mode");
       clearPendingSharedSnapshot();
+      clearAllPendingSharedSlices();
       return;
     }
-    const sharedSnapshot = buildSharedSnapshot({
-      jobs,
-      assignments,
-      scheduleLocks,
-      pressOperators,
-      requests,
-      pullPaperRequests,
-      notes,
-      registrationRequests,
-      suppliesRequests,
-      shipmentGroups,
-      shipmentEmailLogs,
-      shipmentEmailGroups,
-      activityLog,
-      shipmentMethods,
-      shipmentRateRules,
-      users,
-    });
+    const sharedSnapshot = normalizeSharedSnapshot(buildCurrentSharedSnapshot());
     const digest = JSON.stringify(sharedSnapshot);
-    if (digest === lastSharedSnapshotRef.current) {
+    const slices = buildSharedStateSlices(sharedSnapshot);
+    const sliceDigests = buildSharedStateSliceDigests(slices);
+    const changedSliceKeys = SHARED_STATE_SLICE_KEYS.filter((sliceKey) => {
+      const sliceDigest = sliceDigests[sliceKey];
+      return (
+        sliceDigest !== lastSharedSliceDigestsRef.current[sliceKey] &&
+        sliceDigest !== pendingSharedSliceDigestsRef.current[sliceKey]
+      );
+    });
+
+    if (!changedSliceKeys.length) {
       localStorage.setItem(STORAGE_KEY, digest);
-      clearPendingSharedSnapshot();
+      if (digest === lastSharedSnapshotRef.current) {
+        clearPendingSharedSnapshot();
+      }
       if (!isSupabaseConfigured || !supabase) {
         setSyncStatus("Local only");
       } else {
-        setSyncStatus("Live sync");
+        setSyncStatus(Object.keys(pendingSharedSliceDigestsRef.current).length ? "Saving..." : "Live sync");
       }
       return;
     }
 
     setPendingSharedSnapshot(digest);
     lastLocalSharedChangeRef.current = Date.now();
+    changedSliceKeys.forEach((sliceKey) => {
+      setPendingSharedSlice(sliceKey, sliceDigests[sliceKey]);
+      lastLocalSharedSliceChangeRef.current = {
+        ...lastLocalSharedSliceChangeRef.current,
+        [sliceKey]: Date.now(),
+      };
+    });
     window.clearTimeout(saveTimerRef.current);
     if (isSupabaseConfigured && supabase) {
       setSyncStatus("Saving...");
@@ -1748,6 +2033,9 @@ function SchedulerApp() {
       persistSharedSnapshot({
         snapshot: sharedSnapshot,
         digest,
+        slices,
+        sliceDigests,
+        sliceKeys: changedSliceKeys,
         updatedBy: currentUsername || "system",
       });
     }, SHARED_SAVE_DEBOUNCE_MS);
@@ -1898,40 +2186,51 @@ function SchedulerApp() {
     if (!isReady || workspaceMode === "demo" || !isSupabaseConfigured || !supabase) return undefined;
 
     const channel = supabase
-      .channel("labeltraxx-shared-state")
+      .channel("labeltraxx-shared-state-slices")
       .on(
         "postgres_changes",
         {
           event: "*",
           schema: "public",
           table: "app_state",
-          filter: `id=eq.${SHARED_STATE_ROW_ID}`,
         },
         (payload) => {
+          const rowId = safeText(payload.new?.id);
+          const sliceKey = getSharedStateSliceKeyForRowId(rowId);
+          if (!sliceKey) return;
           const nextPayload = payload.new?.payload;
           if (!nextPayload) return;
-          const normalized = normalizeSharedSnapshot(nextPayload);
-          const digest = JSON.stringify(buildSharedSnapshot(normalized));
-          if (digest === pendingSharedSnapshotRef.current) {
-            lastSharedSnapshotRef.current = digest;
-            clearPendingSharedSnapshot(digest);
+          const normalizedSlice = normalizeSharedStateSlice(sliceKey, nextPayload);
+          const digest = JSON.stringify(normalizedSlice);
+          if (digest === pendingSharedSliceDigestsRef.current[sliceKey]) {
+            lastSharedSliceDigestsRef.current = {
+              ...lastSharedSliceDigestsRef.current,
+              [sliceKey]: digest,
+            };
+            clearPendingSharedSlice(sliceKey, digest);
+            if (!Object.keys(pendingSharedSliceDigestsRef.current).length) {
+              clearPendingSharedSnapshot();
+            }
             setSyncStatus("Live sync");
             setLastSyncAt(payload.new?.updated_at || new Date().toISOString());
             return;
           }
 
-          if (digest === lastSharedSnapshotRef.current) {
-            setSyncStatus(pendingSharedSnapshotRef.current ? "Saving..." : "Live sync");
+          if (digest === lastSharedSliceDigestsRef.current[sliceKey]) {
+            setSyncStatus(Object.keys(pendingSharedSliceDigestsRef.current).length ? "Saving..." : "Live sync");
             setLastSyncAt(payload.new?.updated_at || new Date().toISOString());
             return;
           }
 
-          if (shouldBlockRemoteSnapshot(digest)) {
+          if (shouldBlockRemoteSharedSlice(sliceKey, digest)) {
             return;
           }
 
-          applySharedStateSnapshot(nextPayload);
-          lastSharedSnapshotRef.current = digest;
+          applySharedStateSlice(sliceKey, normalizedSlice);
+          lastSharedSliceDigestsRef.current = {
+            ...lastSharedSliceDigestsRef.current,
+            [sliceKey]: digest,
+          };
           setSyncStatus("Live sync");
           setLastSyncAt(payload.new?.updated_at || new Date().toISOString());
         }
@@ -1944,7 +2243,7 @@ function SchedulerApp() {
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
           setSyncStatus("Sync error");
           fetchLatestSharedState({ force: true }).catch((error) => {
-            console.error("Failed to recover shared scheduler state after realtime error.", error);
+            console.error("Failed to recover shared scheduler state slices after realtime error.", error);
           });
         }
       });
@@ -4717,7 +5016,9 @@ function SchedulerApp() {
     updateDemoWorkspaceUrl(true);
     const demoSnapshot = buildDemoSharedSnapshot();
     const normalized = applySharedStateSnapshot(demoSnapshot);
-    lastSharedSnapshotRef.current = JSON.stringify(buildSharedSnapshot(normalized));
+    rememberSharedStateSnapshot(normalized);
+    clearPendingSharedSnapshot();
+    clearAllPendingSharedSlices();
     setWorkspaceMode("demo");
     setSyncStatus("Demo mode");
     setLastSyncAt("");
