@@ -30,8 +30,8 @@ const PRESENCE_SHARED_REFRESH_MS = 5000;
 const ATTACHMENT_BUCKET = "labeltraxx-attachments";
 const ACTIVITY_LOG_LIMIT = 300;
 const DEMO_QUERY_PARAM = "demo";
-const BASE_TABS = ["Calendar", "Scheduler", "Schedule", "Shift Report", "Time Off", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails", "Activity Log"];
-const MANAGEMENT_ONLY_TABS = ["Schedule"];
+const BASE_TABS = ["Calendar", "Scheduler", "Schedule Email", "Shift Report", "Time Off", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails", "Activity Log"];
+const MANAGEMENT_ONLY_TABS = ["Schedule Email"];
 const ACCESS_MODE_OPTIONS = ["edit", "view"];
 const TAB_ACCESS_OPTIONS = ["none", "view", "edit"];
 const ATTACHMENT_ACCEPT =
@@ -124,9 +124,12 @@ const EMPTY_SCHEDULE_EMAIL_FORM = {
 
 const EMPTY_CALENDAR_ENTRY_FORM = {
   title: "",
-  date: todayKey(),
+  startDate: todayKey(),
+  endDate: todayKey(),
   category: "Vendor Visit",
   details: "",
+  visibility: "everyone",
+  visibleTo: [],
 };
 
 const DEFAULT_USER_FORM_TABS = BASE_TABS.filter((tab) => !["New Request", "Open Requests"].includes(tab));
@@ -372,7 +375,7 @@ function normalizeTabAccessValue(value) {
 function normalizeAppTabName(tab) {
   const normalized = safeText(tab);
   if (normalized === "Today") return "Calendar";
-  if (normalized === "Schedule Email") return "Schedule";
+  if (normalized === "Schedule") return "Schedule Email";
   return normalized;
 }
 
@@ -811,17 +814,38 @@ function normalizeTimeOffRequests(requests) {
 function normalizeCalendarEntries(entries) {
   return Array.isArray(entries)
     ? entries
-        .map((entry, index) => ({
-          id: entry.id || `calendar-${index + 1}`,
-          title: safeText(entry.title),
-          date: safeText(entry.date),
-          category: safeText(entry.category) || "Calendar Entry",
-          details: safeText(entry.details),
-          createdAt: entry.createdAt || new Date().toISOString(),
-          createdBy: safeText(entry.createdBy),
-        }))
-        .filter((entry) => entry.title && entry.date)
+        .map((entry, index) => {
+          const startDate = safeText(entry.startDate || entry.date);
+          const endDate = safeText(entry.endDate || startDate);
+          const visibility = ["everyone", "self", "selected"].includes(safeText(entry.visibility))
+            ? safeText(entry.visibility)
+            : "everyone";
+          return {
+            id: entry.id || `calendar-${index + 1}`,
+            title: safeText(entry.title),
+            date: startDate,
+            startDate,
+            endDate: endDate < startDate ? startDate : endDate,
+            category: safeText(entry.category) || "Calendar Entry",
+            details: safeText(entry.details),
+            visibility,
+            visibleTo: Array.isArray(entry.visibleTo) ? entry.visibleTo.map((user) => safeText(user)).filter(Boolean) : [],
+            createdAt: entry.createdAt || new Date().toISOString(),
+            createdBy: safeText(entry.createdBy),
+          };
+        })
+        .filter((entry) => entry.title && entry.startDate)
     : [];
+}
+
+function canUserViewCalendarEntry(user, entry) {
+  if (!entry) return false;
+  if (entry.visibility === "everyone") return true;
+  const username = comparableUsername(user?.username);
+  const createdBy = comparableUsername(entry.createdBy);
+  if (username && username === createdBy) return true;
+  if (entry.visibility === "self") return false;
+  return (entry.visibleTo || []).some((name) => comparableUsername(name) === username);
 }
 
 function normalizeShiftReports(reports) {
@@ -3557,38 +3581,42 @@ function SchedulerApp() {
 
   const scheduleEmailDraft = useMemo(() => {
     const weekRange = `${formatShortDate(weekColumns[0]?.date)} - ${formatShortDate(weekColumns[4]?.date)}`;
-    const lines = [`DG-Labels management schedule for ${weekRange}`, ""];
+    const lines = [`DG-Labels day-to-day schedule for ${weekRange}`, ""];
     let scheduledLineCount = 0;
 
-    PRESS_ORDER.forEach((press) => {
-      const weekLaneItems = weekColumns.flatMap((day) => board[day.key]?.[press] || []);
-      const customers = Array.from(
-        new Set(
-          weekLaneItems
-            .map(({ assignment, job }) => safeText(job?.customerName || assignment.manualTitle))
-            .filter(Boolean)
-        )
-      );
-      const operators = Array.from(
-        new Set(
-          weekColumns
-            .flatMap((day) => {
-              const entry = pressOperators[pressOperatorKey(day.key, press)];
-              if (entry && typeof entry === "object") return [safeText(entry.operator1), safeText(entry.operator2)];
-              return [safeText(entry)];
-            })
-            .filter(Boolean)
-        )
-      );
-      if (!customers.length && !operators.length) return;
-      scheduledLineCount += 1;
-      lines.push(
-        `${formatManagementSchedulePressLabel(press)} - ${operators.join(" / ") || "Unassigned"} - ${customers.join(", ") || "No work scheduled"}`
-      );
+    weekColumns.forEach((day) => {
+      const dayLines = [];
+      PRESS_ORDER.forEach((press) => {
+        const laneItems = board[day.key]?.[press] || [];
+        const customers = Array.from(
+          new Set(
+            laneItems
+              .map(({ assignment, job }) => safeText(job?.customerName || assignment.manualTitle))
+              .filter(Boolean)
+          )
+        );
+        const operatorEntry = pressOperators[pressOperatorKey(day.key, press)];
+        const operators = Array.from(
+          new Set(
+            (operatorEntry && typeof operatorEntry === "object"
+              ? [safeText(operatorEntry.operator1), safeText(operatorEntry.operator2)]
+              : [safeText(operatorEntry)]
+            ).filter(Boolean)
+          )
+        );
+        if (!customers.length && !operators.length) return;
+        scheduledLineCount += 1;
+        dayLines.push(
+          `${formatManagementSchedulePressLabel(press)} - ${operators.join(" / ") || "Unassigned"} - ${customers.join(", ") || "No work scheduled"}`
+        );
+      });
+      lines.push(`${day.label} ${formatShortDate(day.date)}`);
+      lines.push(...(dayLines.length ? dayLines : ["No scheduled work."]));
+      lines.push("");
     });
 
     return {
-      subject: `DG-Labels management schedule ${weekRange}`,
+      subject: `DG-Labels day-to-day schedule ${weekRange}`,
       body: lines.join("\n").trim(),
       jobCount: assignments.filter((assignment) => assignment.kind === "press" && weekKeys.has(assignment.dayKey)).length,
       lineCount: scheduledLineCount,
@@ -3628,9 +3656,10 @@ function SchedulerApp() {
   const selectedCalendarEntries = useMemo(
     () =>
       calendarEntries
-        .filter((entry) => entry.date === selectedCalendarDate)
+        .filter((entry) => canUserViewCalendarEntry(currentUser, entry))
+        .filter((entry) => isDateKeyInRange(selectedCalendarDate, entry.startDate, entry.endDate))
         .sort((left, right) => left.title.localeCompare(right.title)),
-    [calendarEntries, selectedCalendarDate]
+    [calendarEntries, currentUser, selectedCalendarDate]
   );
   const selectedCalendarTimeOff = useMemo(
     () =>
@@ -5572,24 +5601,48 @@ function SchedulerApp() {
     event.preventDefault();
     if (!currentUser || !userCanEdit) return;
     const title = safeText(calendarEntryForm.title);
-    const date = safeText(calendarEntryForm.date);
-    if (!title || !date) return;
+    const startDate = safeText(calendarEntryForm.startDate);
+    const endDate = safeText(calendarEntryForm.endDate || startDate);
+    if (!title || !startDate) return;
+    const normalizedEndDate = endDate < startDate ? startDate : endDate;
+    const visibility = ["everyone", "self", "selected"].includes(safeText(calendarEntryForm.visibility))
+      ? safeText(calendarEntryForm.visibility)
+      : "everyone";
     const entry = {
       id: makeId("calendar"),
       title,
-      date,
+      date: startDate,
+      startDate,
+      endDate: normalizedEndDate,
       category: safeText(calendarEntryForm.category) || "Calendar Entry",
       details: safeText(calendarEntryForm.details),
+      visibility,
+      visibleTo: visibility === "selected" ? calendarEntryForm.visibleTo.map((name) => safeText(name)).filter(Boolean) : [],
       createdAt: new Date().toISOString(),
       createdBy: currentUser.username,
     };
     setCalendarEntries((current) => [entry, ...current]);
-    setCalendarEntryForm({ ...EMPTY_CALENDAR_ENTRY_FORM, date });
-    setSelectedCalendarDate(date);
-    setCalendarMonth(date.slice(0, 7));
-    recordActivity("Added calendar entry", "Calendar", `${entry.category}: ${entry.title} on ${date}.`, {
+    setCalendarEntryForm({ ...EMPTY_CALENDAR_ENTRY_FORM, startDate, endDate: normalizedEndDate });
+    setSelectedCalendarDate(startDate);
+    setCalendarMonth(startDate.slice(0, 7));
+    recordActivity("Added calendar entry", "Calendar", `${entry.category}: ${entry.title} from ${startDate} to ${normalizedEndDate}.`, {
       entryId: entry.id,
-      date,
+      date: startDate,
+    });
+  }
+
+  function toggleCalendarEntryVisibleUser(username) {
+    const nextUsername = safeText(username);
+    if (!nextUsername) return;
+    setCalendarEntryForm((current) => {
+      const currentList = Array.isArray(current.visibleTo) ? current.visibleTo : [];
+      const exists = currentList.some((name) => comparableUsername(name) === comparableUsername(nextUsername));
+      return {
+        ...current,
+        visibleTo: exists
+          ? currentList.filter((name) => comparableUsername(name) !== comparableUsername(nextUsername))
+          : [...currentList, nextUsername],
+      };
     });
   }
 
@@ -5600,7 +5653,7 @@ function SchedulerApp() {
     if (entry) {
       recordActivity("Deleted calendar entry", "Calendar", `${entry.category}: ${entry.title} was deleted.`, {
         entryId,
-        date: entry.date,
+        date: entry.startDate,
       });
     }
   }
@@ -6298,7 +6351,9 @@ function SchedulerApp() {
               </div>
               <div className="grid grid-cols-7 border-x border-b border-stone-300 bg-white">
                 {calendarGridDays.map((day) => {
-                  const dayEntries = calendarEntries.filter((entry) => entry.date === day.key);
+                  const dayEntries = calendarEntries
+                    .filter((entry) => canUserViewCalendarEntry(currentUser, entry))
+                    .filter((entry) => isDateKeyInRange(day.key, entry.startDate, entry.endDate));
                   const dayTimeOff = timeOffRequests.filter(
                     (request) => request.status !== "denied" && isDateKeyInRange(day.key, request.startDate, request.endDate)
                   );
@@ -6309,7 +6364,7 @@ function SchedulerApp() {
                       type="button"
                       onClick={() => {
                         setSelectedCalendarDate(day.key);
-                        setCalendarEntryForm((current) => ({ ...current, date: day.key }));
+                        setCalendarEntryForm((current) => ({ ...current, startDate: day.key, endDate: day.key }));
                       }}
                       className={`min-h-28 border-r border-t border-stone-200 p-2 text-left transition hover:bg-sky-50 ${
                         day.isSelected
@@ -6386,7 +6441,15 @@ function SchedulerApp() {
                       </div>
                       <div className="mt-2 text-sm font-semibold">{entry.title}</div>
                       {entry.details && <div className="mt-2 whitespace-pre-wrap text-sm text-stone-800">{entry.details}</div>}
-                      <div className="mt-2 text-xs text-stone-600">Added by {entry.createdBy || "-"} on {formatDateTime(entry.createdAt)}</div>
+                      <div className="mt-2 text-xs text-stone-600">
+                        {entry.startDate === entry.endDate ? entry.startDate : `${entry.startDate} to ${entry.endDate}`} |{" "}
+                        {entry.visibility === "self"
+                          ? "Only me"
+                          : entry.visibility === "selected"
+                            ? `Selected people: ${(entry.visibleTo || []).join(", ") || "-"}`
+                            : "Everyone"}{" "}
+                        | Added by {entry.createdBy || "-"} on {formatDateTime(entry.createdAt)}
+                      </div>
                     </div>
                   ))}
                   {!selectedCalendarTimeOff.length && !selectedCalendarEntries.length && (
@@ -6400,23 +6463,47 @@ function SchedulerApp() {
               <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
                 <div className="mb-4">
                   <div className="text-sm font-semibold">Add calendar entry</div>
-                  <div className="text-xs text-stone-600">Use this for vendor visits, audits, meetings, maintenance, or any note that should show on a date.</div>
+                  <div className="text-xs text-stone-600">Use this for vendor visits, audits, operator sick/vacation time, or notes that should show across one or more dates.</div>
                 </div>
                 <form onSubmit={submitCalendarEntry} className="grid gap-3">
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3">
+                    <div className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-950">Operator call out</div>
+                    <div className="mt-1 text-xs text-amber-900">For operators out sick, vacation, or another reason, choose the type below and put the operator name in Title.</div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {["Sick", "Vacation", "Other"].map((category) => (
+                        <button
+                          key={category}
+                          type="button"
+                          onClick={() => setCalendarEntryForm((current) => ({ ...current, category, title: current.title || "" }))}
+                          className={`rounded-xl border px-3 py-2 text-xs font-medium ${
+                            calendarEntryForm.category === category
+                              ? "border-amber-400 bg-amber-200 text-amber-950"
+                              : "border-amber-200 bg-white text-amber-900"
+                          }`}
+                        >
+                          {category}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <Field
                     label="Title"
                     value={calendarEntryForm.title}
                     onChange={(value) => setCalendarEntryForm((current) => ({ ...current, title: value }))}
-                    placeholder="Vendor visit, audit, meeting, etc."
+                    placeholder="Vendor visit, operator name, audit, meeting, etc."
                   />
                   <div className="grid gap-3 sm:grid-cols-2">
                     <div>
-                      <div className="mb-2 text-sm font-medium text-stone-800">Date</div>
+                      <div className="mb-2 text-sm font-medium text-stone-800">Start date</div>
                       <input
                         type="date"
-                        value={calendarEntryForm.date}
+                        value={calendarEntryForm.startDate}
                         onChange={(event) => {
-                          setCalendarEntryForm((current) => ({ ...current, date: event.target.value }));
+                          setCalendarEntryForm((current) => ({
+                            ...current,
+                            startDate: event.target.value,
+                            endDate: current.endDate && current.endDate >= event.target.value ? current.endDate : event.target.value,
+                          }));
                           setSelectedCalendarDate(event.target.value);
                           setCalendarMonth(event.target.value.slice(0, 7));
                         }}
@@ -6424,18 +6511,61 @@ function SchedulerApp() {
                       />
                     </div>
                     <div>
+                      <div className="mb-2 text-sm font-medium text-stone-800">End date</div>
+                      <input
+                        type="date"
+                        value={calendarEntryForm.endDate}
+                        onChange={(event) => setCalendarEntryForm((current) => ({ ...current, endDate: event.target.value }))}
+                        className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
                       <div className="mb-2 text-sm font-medium text-stone-800">Type</div>
                       <select
                         value={calendarEntryForm.category}
                         onChange={(event) => setCalendarEntryForm((current) => ({ ...current, category: event.target.value }))}
                         className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
                       >
-                        {["Vendor Visit", "Meeting", "Maintenance", "Audit", "Reminder", "Other"].map((category) => (
+                        {["Vendor Visit", "Meeting", "Maintenance", "Audit", "Reminder", "Sick", "Vacation", "Other"].map((category) => (
                           <option key={category}>{category}</option>
                         ))}
                       </select>
                     </div>
+                    <div>
+                      <div className="mb-2 text-sm font-medium text-stone-800">Visible to</div>
+                      <select
+                        value={calendarEntryForm.visibility}
+                        onChange={(event) => setCalendarEntryForm((current) => ({ ...current, visibility: event.target.value }))}
+                        className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                      >
+                        <option value="everyone">Everyone</option>
+                        <option value="self">Just myself</option>
+                        <option value="selected">Selected people</option>
+                      </select>
+                    </div>
                   </div>
+                  {calendarEntryForm.visibility === "selected" && (
+                    <div className="rounded-2xl border border-stone-300 bg-white p-3">
+                      <div className="mb-2 text-sm font-medium text-stone-800">Select people</div>
+                      <div className="grid max-h-36 gap-2 overflow-auto sm:grid-cols-2">
+                        {users.map((user) => {
+                          const checked = calendarEntryForm.visibleTo.some((name) => comparableUsername(name) === comparableUsername(user.username));
+                          return (
+                            <label key={user.id || user.username} className="flex items-center gap-2 rounded-xl border border-stone-200 px-3 py-2 text-xs text-stone-800">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleCalendarEntryVisibleUser(user.username)}
+                              />
+                              {user.username}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                   <div>
                     <div className="mb-2 text-sm font-medium text-stone-800">Details</div>
                     <textarea
@@ -6678,13 +6808,13 @@ function SchedulerApp() {
           </div>
         )}
 
-        {activeTab === "Schedule" && userCanManageUsers && (
+        {activeTab === "Schedule Email" && userCanManageUsers && (
           <div className="grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
             <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
               <div className="mb-5">
-                <div className="text-sm font-semibold">Management schedule</div>
+                <div className="text-sm font-semibold">Schedule email</div>
                 <div className="text-xs text-stone-600">
-                  Send a concise press/operator/customer summary for the current week, or export the detailed schedule as Excel.
+                  Send a concise day-by-day press/operator/customer summary for the current week, or export the detailed schedule as Excel.
                 </div>
               </div>
               <div className="grid gap-4">

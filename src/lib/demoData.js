@@ -1,7 +1,7 @@
 const BASE_TABS = [
   "Calendar",
   "Scheduler",
-  "Schedule",
+  "Schedule Email",
   "Notes",
   "New Request",
   "Open Requests",
