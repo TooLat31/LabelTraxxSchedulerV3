@@ -502,6 +502,21 @@ function normalizeUsers(users) {
   return normalized;
 }
 
+function normalizeDepartments(departments, extraDepartments = []) {
+  const hasSavedDepartments = Array.isArray(departments) && departments.length > 0;
+  const source = hasSavedDepartments ? departments : DEPARTMENT_OPTIONS;
+  const seen = new Set();
+  return [...source, ...extraDepartments]
+    .map((department) => safeText(department))
+    .filter(Boolean)
+    .filter((department) => {
+      const key = comparableUsername(department);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
 function normalizeJobs(jobs) {
   return Array.isArray(jobs)
     ? jobs.map((job) => ({
@@ -945,6 +960,7 @@ function defaultSharedSnapshot() {
     activityLog: [],
     shipmentMethods: [...DEFAULT_SHIPMENT_METHODS],
     shipmentRateRules: DEFAULT_SHIPMENT_RATE_RULES.map((rule) => ({ ...rule })),
+    departments: [...DEPARTMENT_OPTIONS],
     users: [buildDefaultAdmin()],
   };
 }
@@ -970,6 +986,11 @@ function normalizeSharedSnapshot(snapshot) {
     activityLog: normalizeActivityLog(source.activityLog),
     shipmentMethods: normalizeShipmentMethods(source.shipmentMethods),
     shipmentRateRules: normalizeShipmentRateRules(source.shipmentRateRules),
+    departments: normalizeDepartments(source.departments, [
+      ...(Array.isArray(source.users) ? source.users.map((user) => user?.department) : []),
+      ...(Array.isArray(source.registrationRequests) ? source.registrationRequests.map((request) => request?.department) : []),
+      ...(Array.isArray(source.timeOffRequests) ? source.timeOffRequests.map((request) => request?.department) : []),
+    ]),
     users: normalizeUsers(source.users),
   };
 }
@@ -994,6 +1015,7 @@ function buildSharedSnapshot(state) {
     activityLog: state.activityLog,
     shipmentMethods: state.shipmentMethods,
     shipmentRateRules: state.shipmentRateRules,
+    departments: state.departments,
     users: state.users,
   };
 }
@@ -1036,6 +1058,7 @@ function normalizeSharedStateSlice(sliceKey, payload) {
   }
   if (sliceKey === "users") {
     return {
+      departments: normalizeDepartments(source.departments, Array.isArray(source.users) ? source.users.map((user) => user?.department) : []),
       users: normalizeUsers(source.users),
     };
   }
@@ -1541,6 +1564,7 @@ function SchedulerApp() {
   const [activityLog, setActivityLog] = useState([]);
   const [shipmentMethods, setShipmentMethods] = useState([...DEFAULT_SHIPMENT_METHODS]);
   const [shipmentRateRules, setShipmentRateRules] = useState(DEFAULT_SHIPMENT_RATE_RULES.map((rule) => ({ ...rule })));
+  const [departments, setDepartments] = useState([...DEPARTMENT_OPTIONS]);
   const [users, setUsers] = useState([buildDefaultAdmin()]);
   const [currentUsername, setCurrentUsername] = useState("");
   const [weekStart, setWeekStart] = useState(readLocalWeekStart);
@@ -1584,6 +1608,7 @@ function SchedulerApp() {
   const [registerSuccess, setRegisterSuccess] = useState("");
   const [sessionExpiresAt, setSessionExpiresAt] = useState("");
   const [userForm, setUserForm] = useState(EMPTY_USER_FORM);
+  const [newDepartmentName, setNewDepartmentName] = useState("");
   const [userPasswordDrafts, setUserPasswordDrafts] = useState({});
   const [userUsernameDrafts, setUserUsernameDrafts] = useState({});
   const [requestHistoryFilterDate, setRequestHistoryFilterDate] = useState("");
@@ -1645,6 +1670,7 @@ function SchedulerApp() {
     setActivityLog(normalized.activityLog);
     setShipmentMethods(normalized.shipmentMethods);
     setShipmentRateRules(normalized.shipmentRateRules);
+    setDepartments(normalized.departments);
     setUsers(normalized.users);
     return normalized;
   }
@@ -1674,6 +1700,7 @@ function SchedulerApp() {
       setShipmentMethods(normalized.shipmentMethods);
       setShipmentRateRules(normalized.shipmentRateRules);
     } else if (sliceKey === "users") {
+      setDepartments(normalized.departments);
       setUsers(normalized.users);
     }
     return normalized;
@@ -1699,6 +1726,7 @@ function SchedulerApp() {
       activityLog,
       shipmentMethods,
       shipmentRateRules,
+      departments,
       users,
     });
   }
@@ -2188,7 +2216,7 @@ function SchedulerApp() {
     return () => {
       window.clearTimeout(saveTimerRef.current);
     };
-  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressOperators, pullPaperRequests, registrationRequests, requests, scheduleEmailLogs, scheduleLocks, shiftReports, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, shipmentRateRules, suppliesRequests, timeOffRequests, users, workspaceMode]);
+  }, [activityLog, assignments, currentUsername, departments, isReady, jobs, notes, pressOperators, pullPaperRequests, registrationRequests, requests, scheduleEmailLogs, scheduleLocks, shiftReports, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, shipmentRateRules, suppliesRequests, timeOffRequests, users, workspaceMode]);
 
   useEffect(() => {
     try {
@@ -2213,6 +2241,15 @@ function SchedulerApp() {
     () =>
       users.find((user) => comparableUsername(user.username) === comparableUsername(currentUsername)) || null,
     [currentUsername, users]
+  );
+  const departmentOptions = useMemo(
+    () =>
+      normalizeDepartments(departments, [
+        ...users.map((user) => user.department),
+        ...registrationRequests.map((request) => request.department),
+        ...timeOffRequests.map((request) => request.department),
+      ]),
+    [departments, registrationRequests, timeOffRequests, users]
   );
 
   const weekStartKey = useMemo(() => isoDate(weekStart), [weekStart]);
@@ -5108,6 +5145,85 @@ function SchedulerApp() {
     });
   }
 
+  function addDepartment(event) {
+    event.preventDefault();
+    if (!userCanManageUsers) return;
+    const department = safeText(newDepartmentName);
+    if (!department) return;
+    if (departmentOptions.some((item) => comparableUsername(item) === comparableUsername(department))) {
+      window.alert("That department already exists.");
+      return;
+    }
+    setDepartments((current) => normalizeDepartments([...current, department]));
+    setNewDepartmentName("");
+    setUserForm((current) => ({ ...current, department }));
+    recordActivity("Added department", "Users", `${department} was added as a department.`);
+  }
+
+  function deleteDepartment(department) {
+    if (!userCanManageUsers) return;
+    const targetDepartment = safeText(department);
+    if (!targetDepartment) return;
+    const assignedUsers = users.filter(
+      (user) => comparableUsername(user.department) === comparableUsername(targetDepartment)
+    );
+    const pendingRequests = registrationRequests.filter(
+      (request) =>
+        request.status === "pending" &&
+        comparableUsername(request.department) === comparableUsername(targetDepartment)
+    );
+    const matchingTimeOffRequests = timeOffRequests.filter(
+      (request) => comparableUsername(request.department) === comparableUsername(targetDepartment)
+    );
+    if (assignedUsers.length || pendingRequests.length || matchingTimeOffRequests.length) {
+      window.alert(
+        `Move ${assignedUsers.length} user(s), ${pendingRequests.length} pending registration request(s), and ${matchingTimeOffRequests.length} time-off record(s) out of ${targetDepartment} before deleting it.`
+      );
+      return;
+    }
+    if (departmentOptions.length <= 1) {
+      window.alert("Keep at least one department.");
+      return;
+    }
+    const confirmed = window.confirm(`Delete the ${targetDepartment} department?`);
+    if (!confirmed) return;
+    const fallbackDepartment =
+      departmentOptions.find((item) => comparableUsername(item) !== comparableUsername(targetDepartment)) ||
+      DEPARTMENT_OPTIONS[0];
+    setDepartments((current) =>
+      normalizeDepartments(current.filter((item) => comparableUsername(item) !== comparableUsername(targetDepartment)))
+    );
+    setUserForm((current) => ({
+      ...current,
+      department:
+        comparableUsername(current.department) === comparableUsername(targetDepartment)
+          ? fallbackDepartment
+          : current.department,
+    }));
+    setRegisterForm((current) => ({
+      ...current,
+      department:
+        comparableUsername(current.department) === comparableUsername(targetDepartment)
+          ? fallbackDepartment
+          : current.department,
+    }));
+    setLoginForm((current) => ({
+      ...current,
+      department:
+        comparableUsername(current.department) === comparableUsername(targetDepartment)
+          ? fallbackDepartment
+          : current.department,
+    }));
+    setTimeOffForm((current) => ({
+      ...current,
+      department:
+        comparableUsername(current.department) === comparableUsername(targetDepartment)
+          ? fallbackDepartment
+          : current.department,
+    }));
+    recordActivity("Deleted department", "Users", `${targetDepartment} was deleted from department options.`);
+  }
+
   function updateUserAccess(userId, updates) {
     if (!userCanManageUsers) return;
     const target = users.find((user) => user.id === userId);
@@ -5332,7 +5448,7 @@ function SchedulerApp() {
       resolvedBy: "",
     };
     setTimeOffRequests((current) => [request, ...current]);
-    setTimeOffForm({ ...EMPTY_TIME_OFF_FORM, employeeName: currentUser?.username || "", department: currentUser?.department || DEPARTMENT_OPTIONS[0] });
+    setTimeOffForm({ ...EMPTY_TIME_OFF_FORM, employeeName: currentUser?.username || "", department: currentUser?.department || departmentOptions[0] || DEPARTMENT_OPTIONS[0] });
     recordActivity("Requested time off", "Time Off", `${employeeName} requested time off from ${startDate} to ${endDate}.`, {
       requestId: request.id,
       department,
@@ -5776,6 +5892,7 @@ function SchedulerApp() {
         registerForm={registerForm}
         registerError={registerError}
         registerSuccess={registerSuccess}
+        departments={departmentOptions}
         users={users}
         onChangeLogin={setLoginForm}
         onChangeRegister={setRegisterForm}
@@ -6370,6 +6487,7 @@ function SchedulerApp() {
                   label="Department"
                   value={timeOffForm.department}
                   onChange={(value) => setTimeOffForm((current) => ({ ...current, department: value }))}
+                  departments={departmentOptions}
                 />
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div>
@@ -8537,6 +8655,7 @@ function SchedulerApp() {
 
         {activeTab === "User Admin" && userCanManageUsers && (
           <div className="grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
+            <div className="space-y-4">
             <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
               <div className="mb-5">
                 <div className="text-sm font-semibold">Add user</div>
@@ -8559,6 +8678,7 @@ function SchedulerApp() {
                   label="Department"
                   value={userForm.department}
                   onChange={(value) => setUserForm((current) => ({ ...current, department: value }))}
+                  departments={departmentOptions}
                 />
                 <label className="flex items-center gap-3 rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800">
                   <input
@@ -8613,6 +8733,62 @@ function SchedulerApp() {
                   Create user
                 </button>
               </form>
+            </div>
+
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+              <div className="mb-5">
+                <div className="text-sm font-semibold">Departments</div>
+                <div className="text-xs text-stone-600">Add or remove departments used for login, registration, time off, and user accounts.</div>
+              </div>
+              <form onSubmit={addDepartment} className="mb-4 grid gap-2 sm:grid-cols-[1fr_auto]">
+                <input
+                  type="text"
+                  value={newDepartmentName}
+                  onChange={(event) => setNewDepartmentName(event.target.value)}
+                  placeholder="New department name"
+                  className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                />
+                <button
+                  type="submit"
+                  className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white"
+                >
+                  Add
+                </button>
+              </form>
+              <div className="space-y-2">
+                {departmentOptions.map((department) => {
+                  const assignedCount = users.filter(
+                    (user) => comparableUsername(user.department) === comparableUsername(department)
+                  ).length;
+                  const pendingCount = pendingRegistrationRequests.filter(
+                    (request) => comparableUsername(request.department) === comparableUsername(department)
+                  ).length;
+                  const timeOffCount = timeOffRequests.filter(
+                    (request) => comparableUsername(request.department) === comparableUsername(department)
+                  ).length;
+                  const canDeleteDepartment = assignedCount === 0 && pendingCount === 0 && timeOffCount === 0 && departmentOptions.length > 1;
+                  return (
+                    <div key={department} className="flex flex-col gap-3 rounded-2xl border border-stone-300 bg-white p-4 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <div className="text-sm font-semibold">{department}</div>
+                        <div className="mt-1 text-xs text-stone-600">
+                          {assignedCount} user(s), {pendingCount} pending request(s), {timeOffCount} time-off record(s)
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => deleteDepartment(department)}
+                        disabled={!canDeleteDepartment}
+                        title={canDeleteDepartment ? "Delete department" : "Move users, pending registrations, and time-off records before deleting"}
+                        className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
             </div>
 
             <div className="space-y-4">
@@ -8729,8 +8905,9 @@ function SchedulerApp() {
                             </div>
                             <DepartmentSelect
                               label="Department"
-                              value={user.department || DEPARTMENT_OPTIONS[0]}
+                              value={user.department || departmentOptions[0] || DEPARTMENT_OPTIONS[0]}
                               onChange={(value) => updateUserAccess(user.id, { department: value })}
+                              departments={departmentOptions}
                             />
                             <button
                               onClick={() => deleteUser(user.id)}
@@ -8935,6 +9112,7 @@ function LoginScreen({
   registerForm,
   registerError,
   registerSuccess,
+  departments,
   users,
   onChangeLogin,
   onChangeRegister,
@@ -8945,9 +9123,7 @@ function LoginScreen({
   onEnterDemo,
   onExitDemo,
 }) {
-  const departments = Array.from(
-    new Set([...DEPARTMENT_OPTIONS, ...users.map((user) => safeText(user.department)).filter(Boolean)])
-  );
+  const departmentChoices = normalizeDepartments(departments, users.map((user) => user.department));
   const visibleUsers = loginForm.department
     ? users.filter((user) => !safeText(user.department) || comparableUsername(user.department) === comparableUsername(loginForm.department))
     : users;
@@ -8994,7 +9170,7 @@ function LoginScreen({
                 className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
               >
                 <option value="">Select department</option>
-                {departments.map((department) => (
+                {departmentChoices.map((department) => (
                   <option key={department} value={department}>
                     {department}
                   </option>
@@ -9056,6 +9232,7 @@ function LoginScreen({
               label="Department"
               value={registerForm.department}
               onChange={(value) => onChangeRegister((current) => ({ ...current, department: value }))}
+              departments={departmentChoices}
             />
             <div>
               <div className="mb-2 text-sm font-medium text-stone-800">Name</div>
@@ -9112,7 +9289,8 @@ function Detail({ label, value }) {
   );
 }
 
-function DepartmentSelect({ label = "Department", value, onChange }) {
+function DepartmentSelect({ label = "Department", value, onChange, departments = DEPARTMENT_OPTIONS }) {
+  const options = normalizeDepartments(departments, [value]);
   return (
     <div>
       <div className="mb-2 text-sm font-medium text-stone-800">{label}</div>
@@ -9122,7 +9300,7 @@ function DepartmentSelect({ label = "Department", value, onChange }) {
         className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
       >
         <option value="">Select department</option>
-        {DEPARTMENT_OPTIONS.map((department) => (
+        {options.map((department) => (
           <option key={department} value={department}>
             {department}
           </option>
