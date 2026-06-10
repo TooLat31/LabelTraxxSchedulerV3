@@ -1,4 +1,5 @@
 import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import * as XLSX from "xlsx";
 import { isSupabaseConfigured, supabase } from "./lib/supabase";
 import { exportWeeklyScheduleWorkbook, importWeeklyScheduleWorkbook } from "./lib/scheduleWorkbook";
 import { buildDemoSharedSnapshot, DEMO_DEFAULT_PASSWORD, DEMO_DEFAULT_USERNAME } from "./lib/demoData";
@@ -29,13 +30,15 @@ const PRESENCE_SHARED_REFRESH_MS = 5000;
 const ATTACHMENT_BUCKET = "labeltraxx-attachments";
 const ACTIVITY_LOG_LIMIT = 300;
 const DEMO_QUERY_PARAM = "demo";
-const BASE_TABS = ["Today", "Scheduler", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails", "Activity Log"];
+const BASE_TABS = ["Today", "Scheduler", "Schedule Email", "Shift Report", "Time Off", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails", "Activity Log"];
+const MANAGEMENT_ONLY_TABS = ["Schedule Email"];
 const ACCESS_MODE_OPTIONS = ["edit", "view"];
 const TAB_ACCESS_OPTIONS = ["none", "view", "edit"];
 const ATTACHMENT_ACCEPT =
   ".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.png,.jpg,.jpeg,.zip,.msg,.eml";
 const PULL_PAPER_TARGETS = ["Press 5.1", "Press 6.1", "Press 2.1", "Press 1.1", "Digital"];
 const ROLE_OPTIONS = ["Management", "Warehouse/Shipper", "Operator"];
+const DEPARTMENT_OPTIONS = ["Management", "Customer Service", "Prepress", "Press", "Digital", "Warehouse", "Shipping", "Office"];
 const DEFAULT_SHIPMENT_METHODS = ["Skid", "FedEx", "UPS", "LTL", "Customer Pickup", "JP Express"];
 const DEFAULT_SHIPMENT_RATE_RULES = [
   {
@@ -89,13 +92,34 @@ const EMPTY_MANUAL_SCHEDULE_FORM = {
 };
 
 const EMPTY_LOGIN_FORM = {
+  department: "",
   username: "",
   password: "",
 };
 
 const EMPTY_REGISTER_FORM = {
+  department: "",
   username: "",
   password: "",
+};
+
+const EMPTY_SHIFT_REPORT_IMPORT = {
+  title: "",
+  reportDate: todayKey(),
+  rawText: "",
+};
+
+const EMPTY_TIME_OFF_FORM = {
+  employeeName: "",
+  department: DEPARTMENT_OPTIONS[0],
+  startDate: todayKey(),
+  endDate: todayKey(),
+  reason: "",
+};
+
+const EMPTY_SCHEDULE_EMAIL_FORM = {
+  recipients: "",
+  cc: "",
 };
 
 const DEFAULT_USER_FORM_TABS = BASE_TABS.filter((tab) => !["New Request", "Open Requests"].includes(tab));
@@ -104,6 +128,7 @@ const DEFAULT_USER_FORM_TAB_ACCESS = Object.fromEntries(DEFAULT_USER_FORM_TABS.m
 const EMPTY_USER_FORM = {
   username: "",
   password: "",
+  department: DEPARTMENT_OPTIONS[0],
   accessMode: "edit",
   canManageUsers: false,
   tabs: DEFAULT_USER_FORM_TABS,
@@ -262,15 +287,17 @@ function sameDay(dateValue, dayKey) {
 
 function isDemoWorkspaceRequested() {
   if (typeof window === "undefined") return false;
-  return new URLSearchParams(window.location.search).get(DEMO_QUERY_PARAM) === "1";
+  return window.location.pathname.replace(/\/+$/, "") === "/demo" || new URLSearchParams(window.location.search).get(DEMO_QUERY_PARAM) === "1";
 }
 
 function updateDemoWorkspaceUrl(enabled) {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
   if (enabled) {
+    url.pathname = "/demo";
     url.searchParams.set(DEMO_QUERY_PARAM, "1");
   } else {
+    if (url.pathname.replace(/\/+$/, "") === "/demo") url.pathname = "/";
     url.searchParams.delete(DEMO_QUERY_PARAM);
   }
   window.history.replaceState({}, "", url.toString());
@@ -347,15 +374,19 @@ function normalizeUserTabAccess(tabAccess, tabs, accessMode, role, isAdmin = fal
   const source = tabAccess && typeof tabAccess === "object" ? tabAccess : {};
   const hasExplicitAccess = Object.keys(source).some((tab) => [...BASE_TABS, "User Admin"].includes(tab));
   const fallbackTabs = normalizeUserTabs(tabs, role, isAdmin, canManage);
+  const savedTabs = Array.isArray(tabs) ? tabs.map((tab) => safeText(tab)) : [];
   const fallbackMode = normalizeAccessMode(accessMode, role, isAdmin || canManage);
 
   return [...BASE_TABS, "User Admin"].reduce((next, tab) => {
     const explicitMode = normalizeTabAccessValue(source[tab]);
-    const mode = hasExplicitAccess
-      ? explicitMode || "none"
-      : fallbackTabs.includes(tab)
-        ? fallbackMode
-        : "none";
+    let mode = "none";
+    if (hasExplicitAccess) {
+      const generatedMissingManagementTab =
+        canManage && tab !== "User Admin" && (!explicitMode || (explicitMode === "none" && !savedTabs.includes(tab)));
+      mode = generatedMissingManagementTab ? "edit" : explicitMode || "none";
+    } else if (fallbackTabs.includes(tab)) {
+      mode = fallbackMode;
+    }
 
     if (tab === "User Admin") {
       next[tab] = canManage ? "edit" : "none";
@@ -401,11 +432,13 @@ function canMoveJobs(user) {
 }
 
 function canAccessTab(user, tab) {
+  if (MANAGEMENT_ONLY_TABS.includes(tab) && !hasManagementAccess(user)) return false;
   return getVisibleTabs(user).includes(tab);
 }
 
 function getUserTabAccess(user, tab) {
   if (!user) return "none";
+  if (MANAGEMENT_ONLY_TABS.includes(tab) && !hasManagementAccess(user)) return "none";
   const tabAccess = normalizeUserTabAccess(user.tabAccess, user.tabs, user.accessMode, user.role, user.isAdmin, user.canManageUsers);
   return normalizeTabAccessValue(tabAccess[tab]) || "none";
 }
@@ -419,6 +452,7 @@ function buildDefaultAdmin() {
     id: "user-admin",
     username: "Admin",
     password: "1234",
+    department: "Management",
     role: "Management",
     accessMode: "edit",
     tabs: [...BASE_TABS, "User Admin"],
@@ -449,6 +483,7 @@ function normalizeUsers(users) {
             id: user.id || `user-${index + 1}`,
             username: safeText(user.username),
             password: safeText(user.password),
+            department: safeText(user.department || user.role || ""),
             role,
             accessMode,
             canManageUsers,
@@ -683,6 +718,7 @@ function normalizeRegistrationRequests(requests) {
           id: request.id || `registration-${index + 1}`,
           username: safeText(request.username),
           password: safeText(request.password),
+          department: safeText(request.department),
           status: safeText(request.status) || "pending",
           createdAt: request.createdAt || new Date().toISOString(),
           createdBy: request.createdBy || safeText(request.username),
@@ -692,6 +728,61 @@ function normalizeRegistrationRequests(requests) {
           deniedBy: request.deniedBy || "",
         }))
         .filter((request) => request.username && request.password)
+    : [];
+}
+
+function normalizeTimeOffRequests(requests) {
+  return Array.isArray(requests)
+    ? requests
+        .map((request, index) => ({
+          id: request.id || `time-off-${index + 1}`,
+          employeeName: safeText(request.employeeName),
+          department: safeText(request.department),
+          startDate: safeText(request.startDate),
+          endDate: safeText(request.endDate || request.startDate),
+          reason: safeText(request.reason),
+          status: safeText(request.status) || "pending",
+          createdAt: request.createdAt || new Date().toISOString(),
+          createdBy: safeText(request.createdBy),
+          resolvedAt: safeText(request.resolvedAt),
+          resolvedBy: safeText(request.resolvedBy),
+        }))
+        .filter((request) => request.employeeName && request.startDate)
+    : [];
+}
+
+function normalizeShiftReports(reports) {
+  return Array.isArray(reports)
+    ? reports
+        .map((report, index) => ({
+          id: report.id || `shift-report-${index + 1}`,
+          title: safeText(report.title) || `Shift report ${index + 1}`,
+          reportDate: safeText(report.reportDate),
+          importedAt: report.importedAt || new Date().toISOString(),
+          importedBy: safeText(report.importedBy),
+          rawText: safeText(report.rawText),
+          rows: Array.isArray(report.rows)
+            ? report.rows.map((row) => (Array.isArray(row) ? row.map((cell) => safeText(cell)) : [safeText(row)]))
+            : [],
+        }))
+        .filter((report) => report.rawText || report.rows.length)
+    : [];
+}
+
+function normalizeScheduleEmailLogs(logs) {
+  return Array.isArray(logs)
+    ? logs
+        .map((log, index) => ({
+          id: log.id || `schedule-email-${index + 1}`,
+          weekStartKey: safeText(log.weekStartKey),
+          recipients: safeText(log.recipients),
+          cc: safeText(log.cc),
+          subject: safeText(log.subject),
+          body: safeText(log.body),
+          createdAt: log.createdAt || new Date().toISOString(),
+          createdBy: safeText(log.createdBy),
+        }))
+        .filter((log) => log.weekStartKey)
     : [];
 }
 
@@ -844,10 +935,13 @@ function defaultSharedSnapshot() {
     pullPaperRequests: [],
     notes: [],
     registrationRequests: [],
+    timeOffRequests: [],
     suppliesRequests: [],
+    shiftReports: [],
     shipmentGroups: [],
     shipmentEmailLogs: [],
     shipmentEmailGroups: [],
+    scheduleEmailLogs: [],
     activityLog: [],
     shipmentMethods: [...DEFAULT_SHIPMENT_METHODS],
     shipmentRateRules: DEFAULT_SHIPMENT_RATE_RULES.map((rule) => ({ ...rule })),
@@ -866,10 +960,13 @@ function normalizeSharedSnapshot(snapshot) {
     pullPaperRequests: normalizePullPaperRequests(source.pullPaperRequests),
     notes: normalizeNotes(source.notes),
     registrationRequests: normalizeRegistrationRequests(source.registrationRequests),
+    timeOffRequests: normalizeTimeOffRequests(source.timeOffRequests),
     suppliesRequests: normalizeSuppliesRequests(source.suppliesRequests),
+    shiftReports: normalizeShiftReports(source.shiftReports),
     shipmentGroups: normalizeShipmentGroups(source.shipmentGroups),
     shipmentEmailLogs: normalizeShipmentEmailLogs(source.shipmentEmailLogs),
     shipmentEmailGroups: normalizeShipmentEmailGroups(source.shipmentEmailGroups),
+    scheduleEmailLogs: normalizeScheduleEmailLogs(source.scheduleEmailLogs),
     activityLog: normalizeActivityLog(source.activityLog),
     shipmentMethods: normalizeShipmentMethods(source.shipmentMethods),
     shipmentRateRules: normalizeShipmentRateRules(source.shipmentRateRules),
@@ -887,10 +984,13 @@ function buildSharedSnapshot(state) {
     pullPaperRequests: state.pullPaperRequests,
     notes: state.notes,
     registrationRequests: state.registrationRequests,
+    timeOffRequests: state.timeOffRequests,
     suppliesRequests: state.suppliesRequests,
+    shiftReports: state.shiftReports,
     shipmentGroups: state.shipmentGroups,
     shipmentEmailLogs: state.shipmentEmailLogs,
     shipmentEmailGroups: state.shipmentEmailGroups,
+    scheduleEmailLogs: state.scheduleEmailLogs,
     activityLog: state.activityLog,
     shipmentMethods: state.shipmentMethods,
     shipmentRateRules: state.shipmentRateRules,
@@ -918,7 +1018,9 @@ function normalizeSharedStateSlice(sliceKey, payload) {
       pullPaperRequests: normalizePullPaperRequests(source.pullPaperRequests),
       notes: normalizeNotes(source.notes),
       registrationRequests: normalizeRegistrationRequests(source.registrationRequests),
+      timeOffRequests: normalizeTimeOffRequests(source.timeOffRequests),
       suppliesRequests: normalizeSuppliesRequests(source.suppliesRequests),
+      shiftReports: normalizeShiftReports(source.shiftReports),
     };
   }
   if (sliceKey === "shipments") {
@@ -926,6 +1028,7 @@ function normalizeSharedStateSlice(sliceKey, payload) {
       shipmentGroups: normalizeShipmentGroups(source.shipmentGroups),
       shipmentEmailLogs: normalizeShipmentEmailLogs(source.shipmentEmailLogs),
       shipmentEmailGroups: normalizeShipmentEmailGroups(source.shipmentEmailGroups),
+      scheduleEmailLogs: normalizeScheduleEmailLogs(source.scheduleEmailLogs),
       activityLog: normalizeActivityLog(source.activityLog),
       shipmentMethods: normalizeShipmentMethods(source.shipmentMethods),
       shipmentRateRules: normalizeShipmentRateRules(source.shipmentRateRules),
@@ -1188,6 +1291,30 @@ function parseLabelTraxxText(text) {
     .filter((job) => job.number);
 }
 
+function parseShiftReportText(text) {
+  const lines = safeText(text)
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) return [];
+  return lines.map((line, index) => {
+    const delimiter = line.includes("\t") ? "\t" : line.includes("|") ? "|" : line.includes(",") ? "," : "";
+    const cells = delimiter ? line.split(delimiter).map((cell) => safeText(cell)) : [String(index + 1), line];
+    return cells.length > 1 ? cells : [String(index + 1), cells[0]];
+  });
+}
+
+function exportRowsToWorkbook(fileName, sheetName, rows) {
+  const workbook = XLSX.utils.book_new();
+  const worksheet = XLSX.utils.aoa_to_sheet(rows.length ? rows : [["No data"]]);
+  worksheet["!cols"] = Array.from({ length: Math.max(...(rows.length ? rows.map((row) => row.length) : [1])) }, () => ({ wch: 24 }));
+  XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+  const output = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+  downloadFile(fileName, output, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+}
+
 function priorityTone(priority) {
   const value = safeText(priority).toLowerCase();
   if (value.includes("high")) return "bg-amber-100 text-amber-900 border-amber-300";
@@ -1404,10 +1531,13 @@ function SchedulerApp() {
   const [pullPaperRequests, setPullPaperRequests] = useState([]);
   const [notes, setNotes] = useState([]);
   const [registrationRequests, setRegistrationRequests] = useState([]);
+  const [timeOffRequests, setTimeOffRequests] = useState([]);
   const [suppliesRequests, setSuppliesRequests] = useState([]);
+  const [shiftReports, setShiftReports] = useState([]);
   const [shipmentGroups, setShipmentGroups] = useState([]);
   const [shipmentEmailLogs, setShipmentEmailLogs] = useState([]);
   const [shipmentEmailGroups, setShipmentEmailGroups] = useState([]);
+  const [scheduleEmailLogs, setScheduleEmailLogs] = useState([]);
   const [activityLog, setActivityLog] = useState([]);
   const [shipmentMethods, setShipmentMethods] = useState([...DEFAULT_SHIPMENT_METHODS]);
   const [shipmentRateRules, setShipmentRateRules] = useState(DEFAULT_SHIPMENT_RATE_RULES.map((rule) => ({ ...rule })));
@@ -1440,6 +1570,12 @@ function SchedulerApp() {
   const [shipmentRateForm, setShipmentRateForm] = useState(EMPTY_SHIPMENT_RATE_FORM);
   const [shipmentEmailForm, setShipmentEmailForm] = useState(EMPTY_EMAIL_FORM);
   const [shipmentEmailGroupForm, setShipmentEmailGroupForm] = useState(EMPTY_EMAIL_GROUP_FORM);
+  const [scheduleEmailForm, setScheduleEmailForm] = useState(EMPTY_SCHEDULE_EMAIL_FORM);
+  const [shiftReportImport, setShiftReportImport] = useState(EMPTY_SHIFT_REPORT_IMPORT);
+  const [timeOffForm, setTimeOffForm] = useState(EMPTY_TIME_OFF_FORM);
+  const [timeOffCalendarMonth, setTimeOffCalendarMonth] = useState(todayKey().slice(0, 7));
+  const [dailyShipmentSearch, setDailyShipmentSearch] = useState("");
+  const [summaryModalKey, setSummaryModalKey] = useState("");
   const [loginForm, setLoginForm] = useState(EMPTY_LOGIN_FORM);
   const [loginError, setLoginError] = useState("");
   const [authView, setAuthView] = useState("login");
@@ -1499,10 +1635,13 @@ function SchedulerApp() {
     setPullPaperRequests(normalized.pullPaperRequests);
     setNotes(normalized.notes);
     setRegistrationRequests(normalized.registrationRequests);
+    setTimeOffRequests(normalized.timeOffRequests);
     setSuppliesRequests(normalized.suppliesRequests);
+    setShiftReports(normalized.shiftReports);
     setShipmentGroups(normalized.shipmentGroups);
     setShipmentEmailLogs(normalized.shipmentEmailLogs);
     setShipmentEmailGroups(normalized.shipmentEmailGroups);
+    setScheduleEmailLogs(normalized.scheduleEmailLogs);
     setActivityLog(normalized.activityLog);
     setShipmentMethods(normalized.shipmentMethods);
     setShipmentRateRules(normalized.shipmentRateRules);
@@ -1523,11 +1662,14 @@ function SchedulerApp() {
       setPullPaperRequests(normalized.pullPaperRequests);
       setNotes(normalized.notes);
       setRegistrationRequests(normalized.registrationRequests);
+      setTimeOffRequests(normalized.timeOffRequests);
       setSuppliesRequests(normalized.suppliesRequests);
+      setShiftReports(normalized.shiftReports);
     } else if (sliceKey === "shipments") {
       setShipmentGroups(normalized.shipmentGroups);
       setShipmentEmailLogs(normalized.shipmentEmailLogs);
       setShipmentEmailGroups(normalized.shipmentEmailGroups);
+      setScheduleEmailLogs(normalized.scheduleEmailLogs);
       setActivityLog(normalized.activityLog);
       setShipmentMethods(normalized.shipmentMethods);
       setShipmentRateRules(normalized.shipmentRateRules);
@@ -1547,10 +1689,13 @@ function SchedulerApp() {
       pullPaperRequests,
       notes,
       registrationRequests,
+      timeOffRequests,
       suppliesRequests,
+      shiftReports,
       shipmentGroups,
       shipmentEmailLogs,
       shipmentEmailGroups,
+      scheduleEmailLogs,
       activityLog,
       shipmentMethods,
       shipmentRateRules,
@@ -2043,7 +2188,7 @@ function SchedulerApp() {
     return () => {
       window.clearTimeout(saveTimerRef.current);
     };
-  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressOperators, pullPaperRequests, registrationRequests, requests, scheduleLocks, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, shipmentRateRules, suppliesRequests, users, workspaceMode]);
+  }, [activityLog, assignments, currentUsername, isReady, jobs, notes, pressOperators, pullPaperRequests, registrationRequests, requests, scheduleEmailLogs, scheduleLocks, shiftReports, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, shipmentRateRules, suppliesRequests, timeOffRequests, users, workspaceMode]);
 
   useEffect(() => {
     try {
@@ -3210,6 +3355,119 @@ function SchedulerApp() {
       shipmentsThisWeekNotGrouped,
     };
   }, [assignedShipmentJobIds, assignments, finishedMetaByJobId, jobs, openRequests.length, visibleSchedulerJobIds, weekKeys]);
+
+  const normalizedDailyShipmentSearch = safeText(dailyShipmentSearch).toLowerCase();
+  const shipmentSearchMatches = (job) => {
+    if (!normalizedDailyShipmentSearch) return true;
+    const haystack = `${safeText(job.number)} ${safeText(job.customerName)} ${safeText(job.generalDescr)} ${safeText(job.custPoNum)} ${safeText(job.press)}`.toLowerCase();
+    return haystack.includes(normalizedDailyShipmentSearch);
+  };
+  const filteredUnassignedFinishedJobs = useMemo(
+    () => unassignedFinishedJobs.filter(shipmentSearchMatches),
+    [normalizedDailyShipmentSearch, unassignedFinishedJobs]
+  );
+  const filteredDateDoneJobs = useMemo(
+    () => dateDoneJobs.filter(shipmentSearchMatches),
+    [dateDoneJobs, normalizedDailyShipmentSearch]
+  );
+  const filteredReadyToShipJobs = useMemo(
+    () => readyToShipJobs.filter(shipmentSearchMatches),
+    [normalizedDailyShipmentSearch, readyToShipJobs]
+  );
+
+  const summaryModalData = useMemo(() => {
+    if (!summaryModalKey) return null;
+    if (summaryModalKey === "Open jobs") {
+      return {
+        title: "Open jobs",
+        rows: jobs
+          .filter((job) => job.normalizedStatus === "open")
+          .slice(0, 150)
+          .map((job) => [`${job.customerName} ${job.number}`, job.generalDescr, `Ship ${formatDate(job.shipByDate)}`]),
+      };
+    }
+    if (summaryModalKey === "Marked finished this week") {
+      return {
+        title: "Marked finished this week",
+        rows: jobs
+          .filter((job) => {
+            const finishMeta = finishedMetaByJobId.get(job.id);
+            const finishedKey = job.dateDone ? isoDate(job.dateDone) : finishMeta?.finishedAt ? isoDate(finishMeta.finishedAt) : "";
+            return finishedKey && weekKeys.has(finishedKey);
+          })
+          .map((job) => [`${job.customerName} ${job.number}`, job.generalDescr, `Done ${formatDate(job.dateDone || finishedMetaByJobId.get(job.id)?.finishedAt)}`]),
+      };
+    }
+    if (summaryModalKey === "Open requests") {
+      return {
+        title: "Open requests",
+        rows: openRequests.map((request) => [`${request.customer} ${request.jobNumber}`, request.description, `Requested by ${request.requestorName}`]),
+      };
+    }
+    if (summaryModalKey === "Scheduled jobs this week") {
+      return {
+        title: "Scheduled jobs this week",
+        rows: assignments
+          .filter((assignment) => assignment.kind === "press" && assignment.status !== "finished" && weekKeys.has(assignment.dayKey))
+          .map((assignment) => {
+            const job = jobMap.get(assignment.jobId);
+            return [job ? `${job.customerName} ${job.number}` : assignment.manualTitle || "Schedule item", `${formatPressLabel(assignment.press)} on ${assignment.dayKey}`, job?.generalDescr || ""];
+          }),
+      };
+    }
+    if (summaryModalKey === "Shipments this week not grouped") {
+      return {
+        title: "Shipments this week not grouped",
+        rows: jobs
+          .filter((job) => {
+            const finishMeta = finishedMetaByJobId.get(job.id);
+            const finishedKey = job.dateDone ? isoDate(job.dateDone) : finishMeta?.finishedAt ? isoDate(finishMeta.finishedAt) : "";
+            if (!finishedKey || !weekKeys.has(finishedKey)) return false;
+            if (finishMeta?.excludeFromShipping) return false;
+            return !assignedShipmentJobIds.has(job.id);
+          })
+          .map((job) => [`${job.customerName} ${job.number}`, job.generalDescr, `Done ${formatDate(job.dateDone || finishedMetaByJobId.get(job.id)?.finishedAt)}`]),
+      };
+    }
+    return null;
+  }, [assignedShipmentJobIds, assignments, finishedMetaByJobId, jobMap, jobs, openRequests, summaryModalKey, weekKeys]);
+
+  const scheduleEmailDraft = useMemo(() => {
+    const lines = [`DG-Labels schedule for ${formatShortDate(weekColumns[0]?.date)} - ${formatShortDate(weekColumns[4]?.date)}`, ""];
+    weekColumns.forEach((day) => {
+      lines.push(`${day.label} ${formatDate(day.date)}`);
+      PRESS_ORDER.forEach((press) => {
+        const laneJobs = board[day.key]?.[press] || [];
+        if (!laneJobs.length) return;
+        lines.push(`  ${formatPressLabel(press)}`);
+        laneJobs.forEach(({ assignment, job }) => {
+          lines.push(`    - ${job ? `${job.customerName} ${job.number}: ${job.generalDescr}` : assignment.manualTitle || "Manual block"}`);
+        });
+      });
+      lines.push("");
+    });
+    return {
+      subject: `DG-Labels schedule ${formatShortDate(weekColumns[0]?.date)} - ${formatShortDate(weekColumns[4]?.date)}`,
+      body: lines.join("\n").trim(),
+      jobCount: assignments.filter((assignment) => assignment.kind === "press" && weekKeys.has(assignment.dayKey)).length,
+    };
+  }, [assignments, board, weekColumns, weekKeys]);
+
+  const scheduleEmailHistoryForWeek = useMemo(
+    () =>
+      scheduleEmailLogs
+        .filter((log) => log.weekStartKey === weekStartKey)
+        .sort((left, right) => dateSortValue(right.createdAt) - dateSortValue(left.createdAt)),
+    [scheduleEmailLogs, weekStartKey]
+  );
+
+  const timeOffRequestsForMonth = useMemo(
+    () =>
+      timeOffRequests
+        .filter((request) => request.startDate.slice(0, 7) <= timeOffCalendarMonth && request.endDate.slice(0, 7) >= timeOffCalendarMonth)
+        .sort((left, right) => left.startDate.localeCompare(right.startDate)),
+    [timeOffCalendarMonth, timeOffRequests]
+  );
 
   const shipmentEmailsForSelectedDate = useMemo(
     () =>
@@ -5005,6 +5263,145 @@ function SchedulerApp() {
     }
   }
 
+  function importShiftReport(event) {
+    event?.preventDefault?.();
+    if (!userCanEdit) return;
+    const rawText = safeText(shiftReportImport.rawText);
+    if (!rawText) return;
+    const rows = parseShiftReportText(rawText);
+    const report = {
+      id: makeId("shift-report"),
+      title: safeText(shiftReportImport.title) || `Shift report ${shiftReportImport.reportDate}`,
+      reportDate: safeText(shiftReportImport.reportDate) || todayKey(),
+      rawText,
+      rows,
+      importedAt: new Date().toISOString(),
+      importedBy: currentUser?.username || "",
+    };
+    setShiftReports((current) => [report, ...current]);
+    setShiftReportImport({ ...EMPTY_SHIFT_REPORT_IMPORT, reportDate: todayKey() });
+    recordActivity("Imported shift report", "Shift Report", `${report.title} was imported with ${rows.length} row(s).`, {
+      reportId: report.id,
+      reportDate: report.reportDate,
+    });
+  }
+
+  async function importShiftReportFile(fileList) {
+    const file = Array.from(fileList || [])[0];
+    if (!file) return;
+    const text = await file.text();
+    setShiftReportImport((current) => ({
+      ...current,
+      title: current.title || file.name.replace(/\.[^.]+$/, ""),
+      rawText: text,
+    }));
+  }
+
+  function exportShiftReport(report) {
+    const rows = [["Title", report.title], ["Report date", report.reportDate], ["Imported by", report.importedBy || "-"], [], ...report.rows];
+    exportRowsToWorkbook(`shift-report-${report.reportDate || todayKey()}.xlsx`, "Shift Report", rows);
+  }
+
+  function deleteShiftReport(reportId) {
+    if (!userCanEdit) return;
+    const report = shiftReports.find((item) => item.id === reportId);
+    setShiftReports((current) => current.filter((item) => item.id !== reportId));
+    if (report) {
+      recordActivity("Deleted shift report", "Shift Report", `${report.title} was deleted.`, { reportId });
+    }
+  }
+
+  function submitTimeOffRequest(event) {
+    event.preventDefault();
+    const employeeName = safeText(timeOffForm.employeeName || currentUser?.username);
+    const department = safeText(timeOffForm.department || currentUser?.department);
+    const startDate = safeText(timeOffForm.startDate);
+    const endDate = safeText(timeOffForm.endDate || startDate);
+    if (!employeeName || !startDate) return;
+    const request = {
+      id: makeId("time-off"),
+      employeeName,
+      department,
+      startDate,
+      endDate,
+      reason: safeText(timeOffForm.reason),
+      status: "pending",
+      createdAt: new Date().toISOString(),
+      createdBy: currentUser?.username || employeeName,
+      resolvedAt: "",
+      resolvedBy: "",
+    };
+    setTimeOffRequests((current) => [request, ...current]);
+    setTimeOffForm({ ...EMPTY_TIME_OFF_FORM, employeeName: currentUser?.username || "", department: currentUser?.department || DEPARTMENT_OPTIONS[0] });
+    recordActivity("Requested time off", "Time Off", `${employeeName} requested time off from ${startDate} to ${endDate}.`, {
+      requestId: request.id,
+      department,
+    });
+  }
+
+  function resolveTimeOffRequest(requestId, status) {
+    if (!userCanManageUsers) return;
+    const request = timeOffRequests.find((item) => item.id === requestId);
+    setTimeOffRequests((current) =>
+      current.map((item) =>
+        item.id === requestId
+          ? { ...item, status, resolvedAt: new Date().toISOString(), resolvedBy: currentUser?.username || "" }
+          : item
+      )
+    );
+    if (request) {
+      recordActivity(`${status === "approved" ? "Approved" : "Denied"} time off`, "Time Off", `${request.employeeName} was ${status} for ${request.startDate} to ${request.endDate}.`, {
+        requestId,
+      });
+    }
+  }
+
+  function deleteTimeOffRequest(requestId) {
+    if (!userCanManageUsers) return;
+    const request = timeOffRequests.find((item) => item.id === requestId);
+    setTimeOffRequests((current) => current.filter((item) => item.id !== requestId));
+    if (request) {
+      recordActivity("Deleted time off request", "Time Off", `${request.employeeName}'s time off request was deleted.`, { requestId });
+    }
+  }
+
+  function sendScheduleEmailDraft() {
+    if (!userCanManageUsers) return;
+    const params = new URLSearchParams({
+      subject: scheduleEmailDraft.subject,
+      body: scheduleEmailDraft.body,
+    });
+    if (safeText(scheduleEmailForm.cc)) params.set("cc", safeText(scheduleEmailForm.cc));
+    const mailtoUrl = `mailto:${encodeURIComponent(scheduleEmailForm.recipients)}?${params.toString()}`;
+    window.location.href = mailtoUrl;
+  }
+
+  function logScheduleEmailSent() {
+    if (!userCanManageUsers) return;
+    setScheduleEmailLogs((current) => [
+      {
+        id: makeId("schedule-email"),
+        weekStartKey,
+        recipients: safeText(scheduleEmailForm.recipients),
+        cc: safeText(scheduleEmailForm.cc),
+        subject: scheduleEmailDraft.subject,
+        body: scheduleEmailDraft.body,
+        createdAt: new Date().toISOString(),
+        createdBy: currentUser?.username || "",
+      },
+      ...current,
+    ]);
+    recordActivity("Logged schedule email", "Scheduler", `Schedule email for the week of ${weekStartKey} was marked sent.`, {
+      weekStartKey,
+      recipients: safeText(scheduleEmailForm.recipients),
+    });
+  }
+
+  function deleteScheduleEmailLog(logId) {
+    if (!userCanManageUsers) return;
+    setScheduleEmailLogs((current) => current.filter((log) => log.id !== logId));
+  }
+
   function switchAuthView(nextView) {
     setAuthView(nextView);
     setLoginError("");
@@ -5024,7 +5421,7 @@ function SchedulerApp() {
     setLastSyncAt("");
     setCurrentUsername(DEMO_DEFAULT_USERNAME);
     setSessionExpiresAt(new Date(Date.now() + LOGIN_SESSION_DURATION_MS).toISOString());
-    setLoginForm({ username: DEMO_DEFAULT_USERNAME, password: DEMO_DEFAULT_PASSWORD });
+    setLoginForm({ department: "Management", username: DEMO_DEFAULT_USERNAME, password: DEMO_DEFAULT_PASSWORD });
     setLoginError("");
     setRegisterError("");
     setRegisterSuccess("");
@@ -5043,6 +5440,7 @@ function SchedulerApp() {
     const match = users.find(
       (user) =>
         comparableUsername(user.username) === comparableUsername(loginForm.username) &&
+        (!safeText(user.department) || !safeText(loginForm.department) || comparableUsername(user.department) === comparableUsername(loginForm.department)) &&
         user.password === loginForm.password
     );
     if (!match) {
@@ -5062,9 +5460,10 @@ function SchedulerApp() {
     event.preventDefault();
     const username = safeText(registerForm.username);
     const password = safeText(registerForm.password);
+    const department = safeText(registerForm.department);
 
-    if (!username || !password) {
-      setRegisterError("Enter both a name and password.");
+    if (!department || !username || !password) {
+      setRegisterError("Enter department, name, and password.");
       setRegisterSuccess("");
       return;
     }
@@ -5092,6 +5491,7 @@ function SchedulerApp() {
         id: makeId("registration"),
         username,
         password,
+        department,
         status: "pending",
         createdAt: new Date().toISOString(),
         createdBy: username,
@@ -5127,6 +5527,7 @@ function SchedulerApp() {
     if (!userCanManageUsers) return;
     const username = safeText(userForm.username);
     const password = safeText(userForm.password);
+    const department = safeText(userForm.department);
     if (!username || !password) return;
     const exists = users.some((user) => comparableUsername(user.username) === comparableUsername(username));
     if (exists) {
@@ -5148,6 +5549,7 @@ function SchedulerApp() {
         id: makeId("user"),
         username,
         password,
+        department,
         role,
         accessMode: deriveAccessModeFromTabAccess(tabAccess, userForm.accessMode),
         tabs: getTabsFromTabAccess(tabAccess, userForm.canManageUsers),
@@ -5331,6 +5733,7 @@ function SchedulerApp() {
         id: makeId("user"),
         username: request.username,
         password: request.password,
+        department: request.department,
         role: "Warehouse/Shipper",
         accessMode: "edit",
         tabs: normalizeUserTabs(EMPTY_USER_FORM.tabs, "Warehouse/Shipper", false, false),
@@ -5396,6 +5799,8 @@ function SchedulerApp() {
 
   const tabBadges = {
     Notes: userNotes.filter((note) => !note.completed).length,
+    "Shift Report": shiftReports.length,
+    "Time Off": timeOffRequests.filter((request) => request.status === "pending").length,
     "Open Requests": openRequests.length,
     "Pull Paper Request": openPullPaperRequests.length,
     "Supplies Request": openSuppliesRequests.length,
@@ -5410,7 +5815,7 @@ function SchedulerApp() {
 
   return (
     <div className="min-h-screen bg-stone-100 text-stone-900">
-      <div className="mx-auto max-w-[1900px] p-4 md:p-6">
+      <div className="mx-auto max-w-[1900px] p-3 sm:p-4 md:p-5">
         <div className="mb-6 rounded-[2rem] border border-stone-300 bg-gradient-to-br from-stone-50 via-white to-stone-100 p-5 shadow-sm shadow-stone-300/40">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div>
@@ -5425,15 +5830,15 @@ function SchedulerApp() {
               </p>
             </div>
             <div className="flex flex-col gap-3 xl:items-end">
-              <div className="w-full overflow-x-auto pb-1 xl:max-w-[72vw]">
-                <div className="flex min-w-max gap-2">
+              <div className="w-full xl:max-w-[76vw]">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-7">
                   {tabs.map((tab) => {
                     const tabPresence = presenceByTab.get(tab) || [];
                     return (
                       <button
                         key={tab}
                         onClick={() => setActiveTab(tab)}
-                        className={`rounded-2xl px-4 py-2 text-sm font-medium transition ${
+                        className={`rounded-2xl px-3 py-2 text-center text-xs font-medium transition sm:text-sm ${
                           activeTab === tab
                             ? "bg-emerald-900 text-stone-50 shadow-sm"
                             : "border border-stone-300 bg-stone-50 text-stone-700 hover:bg-stone-100"
@@ -5487,7 +5892,7 @@ function SchedulerApp() {
                   )}
                 </div>
               )}
-              <div className="flex items-center gap-2 text-sm">
+              <div className="flex flex-wrap items-center gap-2 text-sm">
                 <span className={`rounded-full px-3 py-2 ${syncTone(syncStatus)}`}>
                   {syncStatus}
                   {lastSyncAt ? ` • ${formatDateTime(lastSyncAt)}` : ""}
@@ -5512,12 +5917,17 @@ function SchedulerApp() {
           </div>
         </div>
 
-        <div className="mb-6 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+        <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5">
           {schedulerCards.map(([label, value]) => (
-            <div key={label} className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
+            <button
+              key={label}
+              type="button"
+              onClick={() => setSummaryModalKey(label)}
+              className="rounded-3xl border border-stone-300 bg-stone-50 p-4 text-left shadow-sm shadow-stone-300/30 transition hover:border-sky-300 hover:bg-sky-50"
+            >
               <div className="text-xs uppercase tracking-[0.16em] text-stone-600">{label}</div>
               <div className="mt-2 text-2xl font-semibold tracking-tight">{value}</div>
-            </div>
+            </button>
           ))}
         </div>
 
@@ -5736,6 +6146,338 @@ function SchedulerApp() {
                     </button>
                   )}
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "Schedule Email" && userCanManageUsers && (
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+              <div className="mb-5">
+                <div className="text-sm font-semibold">Management schedule email</div>
+                <div className="text-xs text-stone-600">Export the current week, open an email draft, and log when it was sent.</div>
+              </div>
+              <div className="grid gap-4">
+                <Field
+                  label="Recipients"
+                  value={scheduleEmailForm.recipients}
+                  onChange={(value) => setScheduleEmailForm((current) => ({ ...current, recipients: value }))}
+                  placeholder="person@company.com; group@company.com"
+                />
+                <Field
+                  label="CC"
+                  value={scheduleEmailForm.cc}
+                  onChange={(value) => setScheduleEmailForm((current) => ({ ...current, cc: value }))}
+                  placeholder="Optional CC"
+                />
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <button
+                    type="button"
+                    onClick={sendScheduleEmailDraft}
+                    className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white"
+                  >
+                    Open email draft
+                  </button>
+                  <button
+                    type="button"
+                    onClick={logScheduleEmailSent}
+                    className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
+                  >
+                    Mark sent
+                  </button>
+                  <button
+                    type="button"
+                    onClick={exportScheduleWorkbook}
+                    className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
+                  >
+                    Export Excel
+                  </button>
+                </div>
+                <div className="rounded-2xl bg-white p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Subject</div>
+                  <div className="mt-1 text-sm font-medium text-stone-900">{scheduleEmailDraft.subject}</div>
+                  <div className="mt-3 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Draft body</div>
+                  <pre className="mt-2 max-h-[45vh] overflow-auto whitespace-pre-wrap rounded-2xl bg-stone-100 p-3 text-xs text-stone-800">
+                    {scheduleEmailDraft.body}
+                  </pre>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+              <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <div className="text-sm font-semibold">Schedule email history</div>
+                  <div className="text-xs text-stone-600">Week of {weekStartKey}. Use this to avoid sending the same schedule twice.</div>
+                </div>
+                <span className="rounded-full bg-stone-200 px-3 py-1 text-xs font-semibold text-stone-800">
+                  {scheduleEmailHistoryForWeek.length} logged
+                </span>
+              </div>
+              <div className="space-y-3">
+                {scheduleEmailHistoryForWeek.map((log) => (
+                  <div key={log.id} className="rounded-2xl border border-stone-300 bg-white p-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold">{log.subject}</div>
+                        <div className="mt-1 text-xs text-stone-600">
+                          Logged {formatDateTime(log.createdAt)} by {log.createdBy || "-"}
+                        </div>
+                        <div className="mt-1 text-xs text-stone-600">Recipients: {log.recipients || "-"}</div>
+                        <div className="mt-1 text-xs text-stone-600">CC: {log.cc || "-"}</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => deleteScheduleEmailLog(log.id)}
+                        className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {!scheduleEmailHistoryForWeek.length && (
+                  <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-5 text-sm text-stone-600">
+                    No schedule email has been logged for this week.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "Shift Report" && (
+          <div className="grid gap-4 xl:grid-cols-[440px_minmax(0,1fr)]">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+              <div className="mb-5">
+                <div className="text-sm font-semibold">Import shift report</div>
+                <div className="text-xs text-stone-600">Upload or paste a TXT shift report, then export it back out as Excel.</div>
+              </div>
+              <form onSubmit={importShiftReport} className="grid gap-4">
+                <Field
+                  label="Report title"
+                  value={shiftReportImport.title}
+                  onChange={(value) => setShiftReportImport((current) => ({ ...current, title: value }))}
+                  placeholder="Day shift, night shift, or operator report"
+                />
+                <div>
+                  <div className="mb-2 text-sm font-medium text-stone-800">Report date</div>
+                  <input
+                    type="date"
+                    value={shiftReportImport.reportDate}
+                    onChange={(event) => setShiftReportImport((current) => ({ ...current, reportDate: event.target.value }))}
+                    className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                  />
+                </div>
+                <label className="rounded-2xl border border-dashed border-stone-300 bg-white p-4 text-sm text-stone-700 hover:border-emerald-800">
+                  <div className="font-medium text-stone-900">Upload TXT report</div>
+                  <input
+                    type="file"
+                    accept=".txt,.tsv,text/plain"
+                    onChange={(event) => importShiftReportFile(event.target.files)}
+                    className="mt-3 block w-full text-xs"
+                  />
+                </label>
+                <div>
+                  <div className="mb-2 text-sm font-medium text-stone-800">Paste report text</div>
+                  <textarea
+                    value={shiftReportImport.rawText}
+                    onChange={(event) => setShiftReportImport((current) => ({ ...current, rawText: event.target.value }))}
+                    placeholder="Paste shift report text here"
+                    className="h-56 w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={!userCanEdit || !safeText(shiftReportImport.rawText)}
+                  className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Import shift report
+                </button>
+              </form>
+            </div>
+
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+              <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <div className="text-sm font-semibold">Shift report history</div>
+                  <div className="text-xs text-stone-600">Imported reports stay here so management can export them as needed.</div>
+                </div>
+                <span className="rounded-full bg-stone-200 px-3 py-1 text-xs font-semibold text-stone-800">
+                  {shiftReports.length} reports
+                </span>
+              </div>
+              <div className="space-y-3">
+                {shiftReports.map((report) => (
+                  <div key={report.id} className="rounded-2xl border border-stone-300 bg-white p-4">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold">{report.title}</div>
+                        <div className="mt-1 text-xs text-stone-600">
+                          {report.reportDate} imported {formatDateTime(report.importedAt)} by {report.importedBy || "-"}
+                        </div>
+                        <div className="mt-3 max-h-32 overflow-auto rounded-2xl bg-stone-100 p-3 text-xs text-stone-700">
+                          {report.rows.slice(0, 6).map((row, index) => (
+                            <div key={index}>{row.join(" | ")}</div>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => exportShiftReport(report)}
+                          className="rounded-2xl border border-stone-300 bg-stone-50 px-3 py-2 text-sm text-stone-800"
+                        >
+                          Export Excel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteShiftReport(report.id)}
+                          className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {!shiftReports.length && (
+                  <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-5 text-sm text-stone-600">
+                    No shift reports have been imported yet.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "Time Off" && (
+          <div className="grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+              <div className="mb-5">
+                <div className="text-sm font-semibold">Time off request</div>
+                <div className="text-xs text-stone-600">Submit time off for the calendar. Management can approve, deny, or delete requests.</div>
+              </div>
+              <form onSubmit={submitTimeOffRequest} className="grid gap-4">
+                <Field
+                  label="Employee name"
+                  value={timeOffForm.employeeName}
+                  onChange={(value) => setTimeOffForm((current) => ({ ...current, employeeName: value }))}
+                  placeholder={currentUser.username}
+                />
+                <DepartmentSelect
+                  label="Department"
+                  value={timeOffForm.department}
+                  onChange={(value) => setTimeOffForm((current) => ({ ...current, department: value }))}
+                />
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <div className="mb-2 text-sm font-medium text-stone-800">Start date</div>
+                    <input
+                      type="date"
+                      value={timeOffForm.startDate}
+                      onChange={(event) => setTimeOffForm((current) => ({ ...current, startDate: event.target.value }))}
+                      className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                    />
+                  </div>
+                  <div>
+                    <div className="mb-2 text-sm font-medium text-stone-800">End date</div>
+                    <input
+                      type="date"
+                      value={timeOffForm.endDate}
+                      onChange={(event) => setTimeOffForm((current) => ({ ...current, endDate: event.target.value }))}
+                      className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-2 text-sm font-medium text-stone-800">Reason</div>
+                  <textarea
+                    value={timeOffForm.reason}
+                    onChange={(event) => setTimeOffForm((current) => ({ ...current, reason: event.target.value }))}
+                    placeholder="Vacation, appointment, personal day, etc."
+                    className="h-28 w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                  />
+                </div>
+                <button type="submit" className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white">
+                  Submit time off
+                </button>
+              </form>
+            </div>
+
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
+              <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <div className="text-sm font-semibold">Time off calendar</div>
+                  <div className="text-xs text-stone-600">Month view list for requested and approved time off.</div>
+                </div>
+                <div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Month</div>
+                  <input
+                    type="month"
+                    value={timeOffCalendarMonth}
+                    onChange={(event) => setTimeOffCalendarMonth(event.target.value)}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                  />
+                </div>
+              </div>
+              <div className="space-y-3">
+                {timeOffRequestsForMonth.map((request) => (
+                  <div key={request.id} className="rounded-2xl border border-stone-300 bg-white p-4">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="text-sm font-semibold">{request.employeeName}</div>
+                          <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone(request.status)}`}>
+                            {request.status}
+                          </span>
+                          <span className="rounded-full bg-stone-200 px-2 py-1 text-[11px] text-stone-800">
+                            {request.department || "-"}
+                          </span>
+                        </div>
+                        <div className="mt-2 text-sm text-stone-800">
+                          {request.startDate} to {request.endDate || request.startDate}
+                        </div>
+                        {request.reason && <div className="mt-2 whitespace-pre-wrap text-sm text-stone-700">{request.reason}</div>}
+                        <div className="mt-2 text-xs text-stone-600">
+                          Requested {formatDateTime(request.createdAt)} by {request.createdBy || "-"}
+                          {request.resolvedAt ? `; resolved ${formatDateTime(request.resolvedAt)} by ${request.resolvedBy || "-"}` : ""}
+                        </div>
+                      </div>
+                      {userCanManageUsers && (
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => resolveTimeOffRequest(request.id, "approved")}
+                            className="rounded-2xl bg-emerald-900 px-3 py-2 text-sm text-white"
+                          >
+                            Approve
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => resolveTimeOffRequest(request.id, "denied")}
+                            className="rounded-2xl border border-stone-300 bg-stone-50 px-3 py-2 text-sm text-stone-800"
+                          >
+                            Deny
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => deleteTimeOffRequest(request.id)}
+                            className="rounded-2xl border border-rose-200 px-3 py-2 text-sm text-rose-700"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {!timeOffRequestsForMonth.length && (
+                  <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-5 text-sm text-stone-600">
+                    No time off requests overlap this month.
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -6224,104 +6966,7 @@ function SchedulerApp() {
             </div>
 
             {!boardFocusMode && (
-              <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_360px]">
-                <div ref={jobDetailsRef} className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
-                  <div className="mb-3 flex items-center justify-between">
-                    <div>
-                      <div className="text-sm font-semibold">Job details</div>
-                      <div className="text-xs text-stone-600">Select a job from the queue or board.</div>
-                    </div>
-                    {selectedJob && (
-                      <span
-                        className={`rounded-full px-2 py-1 text-xs font-medium ${statusTone(
-                          deriveVisibleJobState(selectedJob.id, activePressJobIds, userFinishedJobIds)
-                        )}`}
-                      >
-                        {deriveVisibleJobState(selectedJob.id, activePressJobIds, userFinishedJobIds)}
-                      </span>
-                    )}
-                  </div>
-
-                  {selectedJob ? (
-                    <div className="space-y-3 text-sm">
-                      <div>
-                        <div className="text-lg font-semibold">
-                          {selectedJob.customerName} {selectedJob.number}
-                        </div>
-                        <div className="text-stone-700">{selectedJob.generalDescr}</div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-3 text-xs text-stone-700">
-                        <Detail label="Default press" value={selectedJob.press ? formatPressLabel(selectedJob.press) : "-"} />
-                        <Detail label="Priority" value={selectedJob.priority || "-"} />
-                        <Detail label="Ship by" value={formatDate(selectedJob.shipByDate)} />
-                        <Detail label="Imported status" value={selectedJob.ticketStatus || "-"} />
-                        <Detail label="Quantity" value={selectedJob.ticQuantity.toLocaleString()} />
-                        <Detail label="EST time" value={`${selectedJob.estPressTime.toFixed(2)} hrs`} />
-                        <Detail label="PO number" value={selectedJob.custPoNum || "-"} />
-                        <Detail label="Main tool" value={selectedJob.mainTool || "-"} />
-                        <Detail label="Footage" value={selectedJob.estFootage.toLocaleString()} />
-                        <Detail label="Stock" value={selectedJob.stockDisplay || "-"} />
-                      </div>
-                      {selectedJobFinishMeta && (
-                        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-950">
-                          <div>
-                            Marked done on {formatDateTime(selectedJobFinishMeta.finishedAt)}
-                            {selectedJobFinishMeta.finishedBy ? ` by ${selectedJobFinishMeta.finishedBy}` : ""}
-                          </div>
-                          {userCanEdit && (
-                            <button
-                              type="button"
-                              onClick={() => undoFinishJob(selectedJob.id)}
-                              className="mt-3 rounded-xl border border-emerald-300 bg-white px-3 py-2 text-[11px] font-medium text-emerald-950"
-                            >
-                              Unmark done
-                            </button>
-                          )}
-                        </div>
-                      )}
-                      <div className={`rounded-2xl border p-4 ${selectedJob.holdActive ? "border-rose-300 bg-rose-50" : "border-stone-300 bg-white/60"}`}>
-                        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                          <div>
-                            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Job hold</div>
-                            <div className="mt-1 text-sm text-stone-700">Keep a red hold note on this job even after new TXT imports.</div>
-                          </div>
-                          <label className="flex items-center gap-2 text-sm font-medium text-stone-800">
-                            <input
-                              type="checkbox"
-                              checked={!!selectedJob.holdActive}
-                              onChange={(event) => updateJobHoldState(selectedJob.id, event.target.checked)}
-                              disabled={!userCanEdit}
-                              className="h-4 w-4"
-                            />
-                            <span>Highlight this job as hold</span>
-                          </label>
-                        </div>
-                        <div className="mt-3">
-                          <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Hold reason</div>
-                          <textarea
-                            value={selectedJob.holdNote || ""}
-                            onChange={(event) => updateJobHoldNote(selectedJob.id, event.target.value)}
-                            disabled={!userCanEdit}
-                            placeholder="Why is this job on hold?"
-                            className="h-24 w-full rounded-2xl border border-stone-300 bg-white px-3 py-3 text-sm outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
-                          />
-                        </div>
-                      </div>
-                      <div>
-                        <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Imported notes</div>
-                        <div className="max-h-56 overflow-auto whitespace-pre-wrap rounded-2xl bg-stone-100 p-3 text-sm text-stone-800">
-                          {selectedJob.notes || "No notes on this job."}
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
-                      No job selected yet.
-                    </div>
-                  )}
-                </div>
-
-                <div className="space-y-4">
+              <div className="space-y-4">
                   <div className="rounded-3xl border border-stone-300 bg-stone-50 p-4 shadow-sm shadow-stone-300/30">
                     <div className="mb-3">
                       <div className="text-sm font-semibold">Job location search</div>
@@ -6469,7 +7114,6 @@ function SchedulerApp() {
                     </div>
                   </div>
                 </div>
-              </div>
             )}
           </div>
         )}
@@ -6980,6 +7624,16 @@ function SchedulerApp() {
                   </div>
                 </div>
                 <div className="flex flex-wrap items-end gap-2">
+                  <div className="min-w-[220px] flex-1">
+                    <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Search jobs</div>
+                    <input
+                      type="text"
+                      value={dailyShipmentSearch}
+                      onChange={(event) => setDailyShipmentSearch(event.target.value)}
+                      placeholder="Ticket, customer, PO, press"
+                      className="w-full rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                    />
+                  </div>
                   <div>
                     <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Finished within</div>
                     <select
@@ -7005,7 +7659,7 @@ function SchedulerApp() {
                   </div>
                   <button
                     type="button"
-                    onClick={() => setSelectedShipQueueJobs(unassignedFinishedJobs.map((job) => job.id))}
+                    onClick={() => setSelectedShipQueueJobs(filteredUnassignedFinishedJobs.map((job) => job.id))}
                     className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800"
                   >
                     Select all
@@ -7031,11 +7685,13 @@ function SchedulerApp() {
                 <div className="text-xs text-stone-600">
                   {selectedShipQueueJobs.length} selected
                 </div>
-                <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{unassignedFinishedJobs.length}</div>
+                <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">
+                  {filteredUnassignedFinishedJobs.length} shown / {unassignedFinishedJobs.length}
+                </div>
               </div>
 
                 <div className="max-h-[320px] space-y-3 overflow-y-auto pr-1">
-                  {unassignedFinishedJobs.map((job) => (
+                  {filteredUnassignedFinishedJobs.map((job) => (
                     <div key={job.id} className="rounded-2xl border border-stone-300 bg-white p-3">
                       <div className="flex gap-3">
                         <input
@@ -7073,9 +7729,9 @@ function SchedulerApp() {
                       </div>
                     </div>
                   ))}
-                {!unassignedFinishedJobs.length && (
+                {!filteredUnassignedFinishedJobs.length && (
                   <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
-                    All finished jobs are already grouped into shipments.
+                    No finished jobs match that shipment search.
                   </div>
                 )}
               </div>
@@ -7096,7 +7752,7 @@ function SchedulerApp() {
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => setSelectedShipmentJobs(readyToShipJobs.map((job) => job.id))}
+                      onClick={() => setSelectedShipmentJobs(filteredReadyToShipJobs.map((job) => job.id))}
                       className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800"
                     >
                       Select all
@@ -7108,12 +7764,14 @@ function SchedulerApp() {
                     >
                       Clear
                     </button>
-                    <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">{dateDoneJobs.length}</div>
+                    <div className="rounded-xl bg-stone-200 px-2 py-1 text-xs text-stone-700">
+                      {filteredDateDoneJobs.length} shown / {dateDoneJobs.length}
+                    </div>
                   </div>
                 </div>
 
                 <div className="space-y-3">
-                  {dateDoneJobs.map((job) => {
+                  {filteredDateDoneJobs.map((job) => {
                     const isGrouped = assignedShipmentJobIds.has(job.id);
                     const isRemoved = Boolean(job.finishMeta?.excludeFromShipping);
                     const isSelectable = !isGrouped && !isRemoved;
@@ -7156,9 +7814,9 @@ function SchedulerApp() {
                       </div>
                     </label>
                   )})}
-                  {!dateDoneJobs.length && (
+                  {!filteredDateDoneJobs.length && (
                     <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
-                      No finished jobs match that done date.
+                      No finished jobs match that done date and search.
                     </div>
                   )}
                 </div>
@@ -7897,6 +8555,11 @@ function SchedulerApp() {
                   onChange={(value) => setUserForm((current) => ({ ...current, password: value }))}
                   placeholder="Set a password"
                 />
+                <DepartmentSelect
+                  label="Department"
+                  value={userForm.department}
+                  onChange={(value) => setUserForm((current) => ({ ...current, department: value }))}
+                />
                 <label className="flex items-center gap-3 rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800">
                   <input
                     type="checkbox"
@@ -7970,6 +8633,9 @@ function SchedulerApp() {
                         <div>
                           <div className="text-sm font-semibold">{request.username}</div>
                           <div className="mt-1 text-xs text-stone-600">
+                            Department: {request.department || "-"}
+                          </div>
+                          <div className="mt-1 text-xs text-stone-600">
                             Requested {formatDateTime(request.createdAt)}
                           </div>
                         </div>
@@ -8020,6 +8686,9 @@ function SchedulerApp() {
                               </span>
                             </div>
                             <div className="mt-1 text-xs text-stone-600">
+                              Department: {user.department || "-"}
+                            </div>
+                            <div className="mt-1 text-xs text-stone-600">
                               Created {formatDateTime(user.createdAt)} by {user.createdBy || "-"}
                             </div>
                           </div>
@@ -8058,6 +8727,11 @@ function SchedulerApp() {
                                 Save password
                               </button>
                             </div>
+                            <DepartmentSelect
+                              label="Department"
+                              value={user.department || DEPARTMENT_OPTIONS[0]}
+                              onChange={(value) => updateUserAccess(user.id, { department: value })}
+                            />
                             <button
                               onClick={() => deleteUser(user.id)}
                               disabled={comparableUsername(user.username) === comparableUsername(currentUsername)}
@@ -8117,6 +8791,138 @@ function SchedulerApp() {
             </div>
           </div>
         )}
+
+        {summaryModalData && (
+          <div className="fixed inset-0 z-40 flex items-center justify-center bg-stone-950/45 p-3">
+            <div className="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-[2rem] border border-stone-300 bg-white p-5 shadow-2xl">
+              <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-900">Quick view</div>
+                  <div className="mt-1 text-xl font-semibold">{summaryModalData.title}</div>
+                  <div className="mt-1 text-sm text-stone-600">{summaryModalData.rows.length} item(s) shown</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSummaryModalKey("")}
+                  className="rounded-2xl border border-stone-300 bg-stone-50 px-4 py-2 text-sm text-stone-800"
+                >
+                  Close
+                </button>
+              </div>
+              <div className="space-y-2">
+                {summaryModalData.rows.map((row, index) => (
+                  <div key={`${row[0]}-${index}`} className="rounded-2xl border border-stone-300 bg-stone-50 p-3">
+                    <div className="text-sm font-semibold text-stone-900">{row[0]}</div>
+                    <div className="mt-1 text-sm text-stone-700">{row[1] || "-"}</div>
+                    <div className="mt-2 text-xs text-stone-600">{row[2] || ""}</div>
+                  </div>
+                ))}
+                {!summaryModalData.rows.length && (
+                  <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50 p-5 text-sm text-stone-600">
+                    Nothing to show for this summary right now.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {selectedJob && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/45 p-3">
+            <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-[2rem] border border-stone-300 bg-white p-5 shadow-2xl">
+              <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-900">Job details</div>
+                  <div className="mt-1 text-xl font-semibold">
+                    {selectedJob.customerName} {selectedJob.number}
+                  </div>
+                  <div className="mt-1 text-sm text-stone-700">{selectedJob.generalDescr}</div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <span
+                    className={`rounded-full px-3 py-2 text-xs font-medium ${statusTone(
+                      deriveVisibleJobState(selectedJob.id, activePressJobIds, userFinishedJobIds)
+                    )}`}
+                  >
+                    {deriveVisibleJobState(selectedJob.id, activePressJobIds, userFinishedJobIds)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedJobId(null)}
+                    className="rounded-2xl border border-stone-300 bg-stone-50 px-4 py-2 text-sm text-stone-800"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+              <div className="space-y-4 text-sm">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Detail label="Default press" value={selectedJob.press ? formatPressLabel(selectedJob.press) : "-"} />
+                  <Detail label="Priority" value={selectedJob.priority || "-"} />
+                  <Detail label="Ship by" value={formatDate(selectedJob.shipByDate)} />
+                  <Detail label="Imported status" value={selectedJob.ticketStatus || "-"} />
+                  <Detail label="Quantity" value={selectedJob.ticQuantity.toLocaleString()} />
+                  <Detail label="EST time" value={`${selectedJob.estPressTime.toFixed(2)} hrs`} />
+                  <Detail label="PO number" value={selectedJob.custPoNum || "-"} />
+                  <Detail label="Main tool" value={selectedJob.mainTool || "-"} />
+                  <Detail label="Footage" value={selectedJob.estFootage.toLocaleString()} />
+                  <Detail label="Stock" value={selectedJob.stockDisplay || "-"} />
+                </div>
+                {selectedJobFinishMeta && (
+                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-950">
+                    <div>
+                      Marked done on {formatDateTime(selectedJobFinishMeta.finishedAt)}
+                      {selectedJobFinishMeta.finishedBy ? ` by ${selectedJobFinishMeta.finishedBy}` : ""}
+                    </div>
+                    {userCanEdit && (
+                      <button
+                        type="button"
+                        onClick={() => undoFinishJob(selectedJob.id)}
+                        className="mt-3 rounded-xl border border-emerald-300 bg-white px-3 py-2 text-[11px] font-medium text-emerald-950"
+                      >
+                        Unmark done
+                      </button>
+                    )}
+                  </div>
+                )}
+                <div className={`rounded-2xl border p-4 ${selectedJob.holdActive ? "border-rose-300 bg-rose-50" : "border-stone-300 bg-stone-50"}`}>
+                  <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Job hold</div>
+                      <div className="mt-1 text-sm text-stone-700">Keep a red hold note on this job even after new TXT imports.</div>
+                    </div>
+                    <label className="flex items-center gap-2 text-sm font-medium text-stone-800">
+                      <input
+                        type="checkbox"
+                        checked={!!selectedJob.holdActive}
+                        onChange={(event) => updateJobHoldState(selectedJob.id, event.target.checked)}
+                        disabled={!userCanEdit}
+                        className="h-4 w-4"
+                      />
+                      <span>Highlight this job as hold</span>
+                    </label>
+                  </div>
+                  <div className="mt-3">
+                    <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Hold reason</div>
+                    <textarea
+                      value={selectedJob.holdNote || ""}
+                      onChange={(event) => updateJobHoldNote(selectedJob.id, event.target.value)}
+                      disabled={!userCanEdit}
+                      placeholder="Why is this job on hold?"
+                      className="h-24 w-full rounded-2xl border border-stone-300 bg-white px-3 py-3 text-sm outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Imported notes</div>
+                  <div className="max-h-56 overflow-auto whitespace-pre-wrap rounded-2xl bg-stone-100 p-3 text-sm text-stone-800">
+                    {selectedJob.notes || "No notes on this job."}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -8139,9 +8945,16 @@ function LoginScreen({
   onEnterDemo,
   onExitDemo,
 }) {
+  const departments = Array.from(
+    new Set([...DEPARTMENT_OPTIONS, ...users.map((user) => safeText(user.department)).filter(Boolean)])
+  );
+  const visibleUsers = loginForm.department
+    ? users.filter((user) => !safeText(user.department) || comparableUsername(user.department) === comparableUsername(loginForm.department))
+    : users;
+
   return (
-    <div className="min-h-screen bg-stone-100 p-6 text-stone-900">
-      <div className="mx-auto max-w-xl rounded-[2rem] border border-stone-300 bg-gradient-to-br from-stone-50 via-white to-stone-100 p-8 shadow-sm shadow-stone-300/40">
+    <div className="min-h-screen bg-stone-100 p-3 text-stone-900 sm:p-6">
+      <div className="mx-auto max-w-xl rounded-[2rem] border border-stone-300 bg-gradient-to-br from-stone-50 via-white to-stone-100 p-5 shadow-sm shadow-stone-300/40 sm:p-8">
         <div className="mb-6">
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-900">Secure Access</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">Label Traxx Scheduler login</h1>
@@ -8174,14 +8987,29 @@ function LoginScreen({
         {authView === "login" ? (
           <form onSubmit={onSubmitLogin} className="grid gap-4">
             <div>
-              <div className="mb-2 text-sm font-medium text-stone-800">Username</div>
+              <div className="mb-2 text-sm font-medium text-stone-800">Department</div>
+              <select
+                value={loginForm.department}
+                onChange={(event) => onChangeLogin((current) => ({ ...current, department: event.target.value, username: "" }))}
+                className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+              >
+                <option value="">Select department</option>
+                {departments.map((department) => (
+                  <option key={department} value={department}>
+                    {department}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <div className="mb-2 text-sm font-medium text-stone-800">Name</div>
               <select
                 value={loginForm.username}
                 onChange={(event) => onChangeLogin((current) => ({ ...current, username: event.target.value }))}
                 className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
               >
-                <option value="">Select a username</option>
-                {users.map((user) => (
+                <option value="">Select a name</option>
+                {visibleUsers.map((user) => (
                   <option key={user.id} value={user.username}>
                     {user.username}
                   </option>
@@ -8224,6 +9052,11 @@ function LoginScreen({
             <div className="rounded-2xl bg-stone-200/70 px-4 py-3 text-sm text-stone-700">
               Create a name and password. A manager will need to approve the account before you can sign in.
             </div>
+            <DepartmentSelect
+              label="Department"
+              value={registerForm.department}
+              onChange={(value) => onChangeRegister((current) => ({ ...current, department: value }))}
+            />
             <div>
               <div className="mb-2 text-sm font-medium text-stone-800">Name</div>
               <input
@@ -8275,6 +9108,26 @@ function Detail({ label, value }) {
     <div className="rounded-2xl bg-stone-100 p-3">
       <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-stone-600">{label}</div>
       <div className="mt-1 text-sm font-medium text-stone-800">{value}</div>
+    </div>
+  );
+}
+
+function DepartmentSelect({ label = "Department", value, onChange }) {
+  return (
+    <div>
+      <div className="mb-2 text-sm font-medium text-stone-800">{label}</div>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+      >
+        <option value="">Select department</option>
+        {DEPARTMENT_OPTIONS.map((department) => (
+          <option key={department} value={department}>
+            {department}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }
