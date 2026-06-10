@@ -30,7 +30,7 @@ const PRESENCE_SHARED_REFRESH_MS = 5000;
 const ATTACHMENT_BUCKET = "labeltraxx-attachments";
 const ACTIVITY_LOG_LIMIT = 300;
 const DEMO_QUERY_PARAM = "demo";
-const BASE_TABS = ["Today", "Scheduler", "Schedule Email", "Shift Report", "Time Off", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails", "Activity Log"];
+const BASE_TABS = ["Calendar", "Scheduler", "Schedule Email", "Shift Report", "Time Off", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails", "Activity Log"];
 const MANAGEMENT_ONLY_TABS = ["Schedule Email"];
 const ACCESS_MODE_OPTIONS = ["edit", "view"];
 const TAB_ACCESS_OPTIONS = ["none", "view", "edit"];
@@ -120,6 +120,13 @@ const EMPTY_TIME_OFF_FORM = {
 const EMPTY_SCHEDULE_EMAIL_FORM = {
   recipients: "",
   cc: "",
+};
+
+const EMPTY_CALENDAR_ENTRY_FORM = {
+  title: "",
+  date: todayKey(),
+  category: "Vendor Visit",
+  details: "",
 };
 
 const DEFAULT_USER_FORM_TABS = BASE_TABS.filter((tab) => !["New Request", "Open Requests"].includes(tab));
@@ -263,6 +270,21 @@ function addDays(date, days) {
   return copy;
 }
 
+function monthStart(input) {
+  const date = new Date(input);
+  date.setDate(1);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function monthLabel(date) {
+  if (!date) return "";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    year: "numeric",
+  }).format(date);
+}
+
 function isoDate(date) {
   if (!date) return "";
   const year = date.getFullYear();
@@ -283,6 +305,13 @@ function localMiddayIso(date) {
 function sameDay(dateValue, dayKey) {
   if (!dateValue || !dayKey) return false;
   return isoDate(new Date(dateValue)) === dayKey;
+}
+
+function isDateKeyInRange(dayKey, startDate, endDate) {
+  const target = safeText(dayKey);
+  const start = safeText(startDate);
+  const end = safeText(endDate || startDate);
+  return !!target && !!start && target >= start && target <= (end || start);
 }
 
 function isDemoWorkspaceRequested() {
@@ -340,10 +369,15 @@ function normalizeTabAccessValue(value) {
   return TAB_ACCESS_OPTIONS.includes(normalized) ? normalized : "";
 }
 
+function normalizeAppTabName(tab) {
+  const normalized = safeText(tab);
+  return normalized === "Today" ? "Calendar" : normalized;
+}
+
 function normalizeUserTabs(tabs, role, isAdmin = false, canManageUsers = false) {
   const next = Array.isArray(tabs)
     ? tabs
-        .map((tab) => safeText(tab))
+        .map((tab) => normalizeAppTabName(tab))
         .filter((tab) => BASE_TABS.includes(tab) || (canManageUsers && tab === "User Admin"))
     : [];
   const fallback = next.length ? Array.from(new Set(next)) : getDefaultTabsForRole(role, isAdmin);
@@ -371,10 +405,16 @@ function deriveAccessModeFromTabAccess(tabAccess, fallback = "view") {
 
 function normalizeUserTabAccess(tabAccess, tabs, accessMode, role, isAdmin = false, canManageUsers = false) {
   const canManage = !!canManageUsers || normalizeRole(role, isAdmin) === "Management";
-  const source = tabAccess && typeof tabAccess === "object" ? tabAccess : {};
+  const source =
+    tabAccess && typeof tabAccess === "object"
+      ? Object.entries(tabAccess).reduce((next, [tab, mode]) => {
+          next[normalizeAppTabName(tab)] = mode;
+          return next;
+        }, {})
+      : {};
   const hasExplicitAccess = Object.keys(source).some((tab) => [...BASE_TABS, "User Admin"].includes(tab));
   const fallbackTabs = normalizeUserTabs(tabs, role, isAdmin, canManage);
-  const savedTabs = Array.isArray(tabs) ? tabs.map((tab) => safeText(tab)) : [];
+  const savedTabs = Array.isArray(tabs) ? tabs.map((tab) => normalizeAppTabName(tab)) : [];
   const fallbackMode = normalizeAccessMode(accessMode, role, isAdmin || canManage);
 
   return [...BASE_TABS, "User Admin"].reduce((next, tab) => {
@@ -766,6 +806,22 @@ function normalizeTimeOffRequests(requests) {
     : [];
 }
 
+function normalizeCalendarEntries(entries) {
+  return Array.isArray(entries)
+    ? entries
+        .map((entry, index) => ({
+          id: entry.id || `calendar-${index + 1}`,
+          title: safeText(entry.title),
+          date: safeText(entry.date),
+          category: safeText(entry.category) || "Calendar Entry",
+          details: safeText(entry.details),
+          createdAt: entry.createdAt || new Date().toISOString(),
+          createdBy: safeText(entry.createdBy),
+        }))
+        .filter((entry) => entry.title && entry.date)
+    : [];
+}
+
 function normalizeShiftReports(reports) {
   return Array.isArray(reports)
     ? reports
@@ -951,6 +1007,7 @@ function defaultSharedSnapshot() {
     notes: [],
     registrationRequests: [],
     timeOffRequests: [],
+    calendarEntries: [],
     suppliesRequests: [],
     shiftReports: [],
     shipmentGroups: [],
@@ -977,6 +1034,7 @@ function normalizeSharedSnapshot(snapshot) {
     notes: normalizeNotes(source.notes),
     registrationRequests: normalizeRegistrationRequests(source.registrationRequests),
     timeOffRequests: normalizeTimeOffRequests(source.timeOffRequests),
+    calendarEntries: normalizeCalendarEntries(source.calendarEntries),
     suppliesRequests: normalizeSuppliesRequests(source.suppliesRequests),
     shiftReports: normalizeShiftReports(source.shiftReports),
     shipmentGroups: normalizeShipmentGroups(source.shipmentGroups),
@@ -1006,6 +1064,7 @@ function buildSharedSnapshot(state) {
     notes: state.notes,
     registrationRequests: state.registrationRequests,
     timeOffRequests: state.timeOffRequests,
+    calendarEntries: state.calendarEntries,
     suppliesRequests: state.suppliesRequests,
     shiftReports: state.shiftReports,
     shipmentGroups: state.shipmentGroups,
@@ -1041,6 +1100,7 @@ function normalizeSharedStateSlice(sliceKey, payload) {
       notes: normalizeNotes(source.notes),
       registrationRequests: normalizeRegistrationRequests(source.registrationRequests),
       timeOffRequests: normalizeTimeOffRequests(source.timeOffRequests),
+      calendarEntries: normalizeCalendarEntries(source.calendarEntries),
       suppliesRequests: normalizeSuppliesRequests(source.suppliesRequests),
       shiftReports: normalizeShiftReports(source.shiftReports),
     };
@@ -1555,6 +1615,7 @@ function SchedulerApp() {
   const [notes, setNotes] = useState([]);
   const [registrationRequests, setRegistrationRequests] = useState([]);
   const [timeOffRequests, setTimeOffRequests] = useState([]);
+  const [calendarEntries, setCalendarEntries] = useState([]);
   const [suppliesRequests, setSuppliesRequests] = useState([]);
   const [shiftReports, setShiftReports] = useState([]);
   const [shipmentGroups, setShipmentGroups] = useState([]);
@@ -1574,6 +1635,7 @@ function SchedulerApp() {
   const [queuePressFilter, setQueuePressFilter] = useState("All");
   const [queueScheduleFilter, setQueueScheduleFilter] = useState("All");
   const [selectedJobId, setSelectedJobId] = useState(null);
+  const [detailJobId, setDetailJobId] = useState(null);
   const [activeTab, setActiveTab] = useState("Scheduler");
   const [requestForm, setRequestForm] = useState(EMPTY_REQUEST_FORM);
   const [pullPaperForm, setPullPaperForm] = useState(EMPTY_PULL_PAPER_FORM);
@@ -1595,6 +1657,9 @@ function SchedulerApp() {
   const [shipmentEmailForm, setShipmentEmailForm] = useState(EMPTY_EMAIL_FORM);
   const [shipmentEmailGroupForm, setShipmentEmailGroupForm] = useState(EMPTY_EMAIL_GROUP_FORM);
   const [scheduleEmailForm, setScheduleEmailForm] = useState(EMPTY_SCHEDULE_EMAIL_FORM);
+  const [calendarEntryForm, setCalendarEntryForm] = useState(EMPTY_CALENDAR_ENTRY_FORM);
+  const [calendarMonth, setCalendarMonth] = useState(todayKey().slice(0, 7));
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState(todayKey());
   const [shiftReportImport, setShiftReportImport] = useState(EMPTY_SHIFT_REPORT_IMPORT);
   const [timeOffForm, setTimeOffForm] = useState(EMPTY_TIME_OFF_FORM);
   const [timeOffCalendarMonth, setTimeOffCalendarMonth] = useState(todayKey().slice(0, 7));
@@ -1661,6 +1726,7 @@ function SchedulerApp() {
     setNotes(normalized.notes);
     setRegistrationRequests(normalized.registrationRequests);
     setTimeOffRequests(normalized.timeOffRequests);
+    setCalendarEntries(normalized.calendarEntries);
     setSuppliesRequests(normalized.suppliesRequests);
     setShiftReports(normalized.shiftReports);
     setShipmentGroups(normalized.shipmentGroups);
@@ -1689,6 +1755,7 @@ function SchedulerApp() {
       setNotes(normalized.notes);
       setRegistrationRequests(normalized.registrationRequests);
       setTimeOffRequests(normalized.timeOffRequests);
+      setCalendarEntries(normalized.calendarEntries);
       setSuppliesRequests(normalized.suppliesRequests);
       setShiftReports(normalized.shiftReports);
     } else if (sliceKey === "shipments") {
@@ -1717,6 +1784,7 @@ function SchedulerApp() {
       notes,
       registrationRequests,
       timeOffRequests,
+      calendarEntries,
       suppliesRequests,
       shiftReports,
       shipmentGroups,
@@ -2216,7 +2284,7 @@ function SchedulerApp() {
     return () => {
       window.clearTimeout(saveTimerRef.current);
     };
-  }, [activityLog, assignments, currentUsername, departments, isReady, jobs, notes, pressOperators, pullPaperRequests, registrationRequests, requests, scheduleEmailLogs, scheduleLocks, shiftReports, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, shipmentRateRules, suppliesRequests, timeOffRequests, users, workspaceMode]);
+  }, [activityLog, assignments, calendarEntries, currentUsername, departments, isReady, jobs, notes, pressOperators, pullPaperRequests, registrationRequests, requests, scheduleEmailLogs, scheduleLocks, shiftReports, shipmentEmailGroups, shipmentEmailLogs, shipmentGroups, shipmentMethods, shipmentRateRules, suppliesRequests, timeOffRequests, users, workspaceMode]);
 
   useEffect(() => {
     try {
@@ -2484,6 +2552,10 @@ function SchedulerApp() {
   useEffect(() => {
     if (!jobs.some((job) => job.id === selectedJobId)) setSelectedJobId(null);
   }, [jobs, selectedJobId]);
+
+  useEffect(() => {
+    if (detailJobId && !jobs.some((job) => job.id === detailJobId)) setDetailJobId(null);
+  }, [detailJobId, jobs]);
 
   useEffect(() => {
     setShipmentForm((current) => ({ ...current, shipDate: selectedShipDate }));
@@ -3013,7 +3085,11 @@ function SchedulerApp() {
     () => (selectedJobId ? jobMap.get(selectedJobId) || null : null),
     [jobMap, selectedJobId]
   );
-  const selectedJobFinishMeta = selectedJob ? finishedMetaByJobId.get(selectedJob.id) : null;
+  const detailJob = useMemo(
+    () => (detailJobId ? jobMap.get(detailJobId) || null : null),
+    [detailJobId, jobMap]
+  );
+  const selectedJobFinishMeta = detailJob ? finishedMetaByJobId.get(detailJob.id) : null;
   const selectedJobPresenceLabel = selectedJob ? `${selectedJob.customerName} ${selectedJob.number}`.trim() : "";
 
   useEffect(() => {
@@ -3506,6 +3582,36 @@ function SchedulerApp() {
     [timeOffCalendarMonth, timeOffRequests]
   );
 
+  const calendarMonthDate = useMemo(() => monthStart(new Date(`${calendarMonth}-01T12:00:00`)), [calendarMonth]);
+  const calendarGridDays = useMemo(() => {
+    const firstVisibleDate = addDays(calendarMonthDate, -calendarMonthDate.getDay());
+    return Array.from({ length: 42 }, (_, index) => {
+      const date = addDays(firstVisibleDate, index);
+      return {
+        key: isoDate(date),
+        date,
+        inMonth: date.getMonth() === calendarMonthDate.getMonth(),
+        isToday: isoDate(date) === todayKey(),
+        isSelected: isoDate(date) === selectedCalendarDate,
+      };
+    });
+  }, [calendarMonthDate, selectedCalendarDate]);
+  const selectedCalendarEntries = useMemo(
+    () =>
+      calendarEntries
+        .filter((entry) => entry.date === selectedCalendarDate)
+        .sort((left, right) => left.title.localeCompare(right.title)),
+    [calendarEntries, selectedCalendarDate]
+  );
+  const selectedCalendarTimeOff = useMemo(
+    () =>
+      timeOffRequests
+        .filter((request) => request.status !== "denied")
+        .filter((request) => isDateKeyInRange(selectedCalendarDate, request.startDate, request.endDate))
+        .sort((left, right) => left.employeeName.localeCompare(right.employeeName)),
+    [selectedCalendarDate, timeOffRequests]
+  );
+
   const shipmentEmailsForSelectedDate = useMemo(
     () =>
       shipmentEmailLogs
@@ -3576,9 +3682,15 @@ function SchedulerApp() {
   function selectJob(jobId, shouldScroll = false) {
     setSelectedJobId(jobId);
     if (!shouldScroll) return;
+    setDetailJobId(jobId);
     requestAnimationFrame(() => {
       jobDetailsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
+  }
+
+  function openJobDetails(jobId) {
+    setSelectedJobId(jobId);
+    setDetailJobId(jobId);
   }
 
   function importText(text) {
@@ -5427,6 +5539,43 @@ function SchedulerApp() {
     }
   }
 
+  function submitCalendarEntry(event) {
+    event.preventDefault();
+    if (!currentUser || !userCanEdit) return;
+    const title = safeText(calendarEntryForm.title);
+    const date = safeText(calendarEntryForm.date);
+    if (!title || !date) return;
+    const entry = {
+      id: makeId("calendar"),
+      title,
+      date,
+      category: safeText(calendarEntryForm.category) || "Calendar Entry",
+      details: safeText(calendarEntryForm.details),
+      createdAt: new Date().toISOString(),
+      createdBy: currentUser.username,
+    };
+    setCalendarEntries((current) => [entry, ...current]);
+    setCalendarEntryForm({ ...EMPTY_CALENDAR_ENTRY_FORM, date });
+    setSelectedCalendarDate(date);
+    setCalendarMonth(date.slice(0, 7));
+    recordActivity("Added calendar entry", "Calendar", `${entry.category}: ${entry.title} on ${date}.`, {
+      entryId: entry.id,
+      date,
+    });
+  }
+
+  function deleteCalendarEntry(entryId) {
+    if (!userCanEdit) return;
+    const entry = calendarEntries.find((item) => item.id === entryId);
+    setCalendarEntries((current) => current.filter((item) => item.id !== entryId));
+    if (entry) {
+      recordActivity("Deleted calendar entry", "Calendar", `${entry.category}: ${entry.title} was deleted.`, {
+        entryId,
+        date: entry.date,
+      });
+    }
+  }
+
   function submitTimeOffRequest(event) {
     event.preventDefault();
     const employeeName = safeText(timeOffForm.employeeName || currentUser?.username);
@@ -6047,6 +6196,228 @@ function SchedulerApp() {
             </button>
           ))}
         </div>
+
+        {activeTab === "Calendar" && (
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_420px]">
+            <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
+              <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-900">Calendar</div>
+                  <div className="mt-1 text-2xl font-semibold">{monthLabel(calendarMonthDate)}</div>
+                  <div className="mt-1 text-sm text-stone-600">Time off and manual calendar entries like vendor visits show together.</div>
+                </div>
+                <div className="flex flex-wrap items-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const previousMonth = monthStart(addDays(calendarMonthDate, -1));
+                      setCalendarMonth(isoDate(previousMonth).slice(0, 7));
+                    }}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800"
+                  >
+                    Previous
+                  </button>
+                  <input
+                    type="month"
+                    value={calendarMonth}
+                    onChange={(event) => {
+                      const nextMonth = event.target.value || todayKey().slice(0, 7);
+                      setCalendarMonth(nextMonth);
+                      setSelectedCalendarDate(`${nextMonth}-01`);
+                    }}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextMonth = monthStart(addDays(calendarMonthDate, 32));
+                      setCalendarMonth(isoDate(nextMonth).slice(0, 7));
+                    }}
+                    className="rounded-2xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800"
+                  >
+                    Next
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCalendarMonth(todayKey().slice(0, 7));
+                      setSelectedCalendarDate(todayKey());
+                    }}
+                    className="rounded-2xl bg-emerald-900 px-3 py-2 text-sm font-medium text-white"
+                  >
+                    Today
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-7 border border-stone-300 bg-white text-center text-xs font-semibold text-stone-700">
+                {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
+                  <div key={day} className="border-r border-stone-200 px-2 py-3 last:border-r-0">
+                    {day}
+                  </div>
+                ))}
+              </div>
+              <div className="grid grid-cols-7 border-x border-b border-stone-300 bg-white">
+                {calendarGridDays.map((day) => {
+                  const dayEntries = calendarEntries.filter((entry) => entry.date === day.key);
+                  const dayTimeOff = timeOffRequests.filter(
+                    (request) => request.status !== "denied" && isDateKeyInRange(day.key, request.startDate, request.endDate)
+                  );
+                  const hasItems = dayEntries.length || dayTimeOff.length;
+                  return (
+                    <button
+                      key={day.key}
+                      type="button"
+                      onClick={() => {
+                        setSelectedCalendarDate(day.key);
+                        setCalendarEntryForm((current) => ({ ...current, date: day.key }));
+                      }}
+                      className={`min-h-28 border-r border-t border-stone-200 p-2 text-left transition hover:bg-sky-50 ${
+                        day.isSelected
+                          ? "bg-sky-100 ring-2 ring-inset ring-sky-300"
+                          : day.inMonth
+                            ? "bg-white"
+                            : "bg-stone-100 text-stone-400"
+                      }`}
+                    >
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <span className={`flex h-8 w-8 items-center justify-center rounded-full text-sm font-semibold ${
+                          day.isToday ? "bg-stone-900 text-white" : day.isSelected ? "bg-sky-200 text-sky-950" : ""
+                        }`}>
+                          {day.date.getDate()}
+                        </span>
+                        {hasItems && (
+                          <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold text-emerald-900">
+                            {dayEntries.length + dayTimeOff.length}
+                          </span>
+                        )}
+                      </div>
+                      <div className="space-y-1">
+                        {dayTimeOff.slice(0, 2).map((request) => (
+                          <div key={`off-${request.id}-${day.key}`} className="truncate rounded-lg bg-amber-100 px-2 py-1 text-[11px] font-medium text-amber-950">
+                            Off: {request.employeeName}
+                          </div>
+                        ))}
+                        {dayEntries.slice(0, Math.max(0, 3 - Math.min(dayTimeOff.length, 2))).map((entry) => (
+                          <div key={entry.id} className="truncate rounded-lg bg-sky-100 px-2 py-1 text-[11px] font-medium text-sky-950">
+                            {entry.category}: {entry.title}
+                          </div>
+                        ))}
+                        {dayEntries.length + dayTimeOff.length > 3 && (
+                          <div className="px-2 text-[11px] text-stone-500">+{dayEntries.length + dayTimeOff.length - 3} more</div>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
+                <div className="mb-4">
+                  <div className="text-sm font-semibold">{formatDate(new Date(`${selectedCalendarDate}T12:00:00`))}</div>
+                  <div className="text-xs text-stone-600">Click a calendar date to see who is off and what is visiting or scheduled manually.</div>
+                </div>
+                <div className="space-y-3">
+                  {selectedCalendarTimeOff.map((request) => (
+                    <div key={request.id} className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-amber-200 px-2 py-1 text-[11px] font-semibold text-amber-950">Time off</span>
+                        <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${statusTone(request.status)}`}>{request.status}</span>
+                      </div>
+                      <div className="mt-2 text-sm font-semibold">{request.employeeName}</div>
+                      <div className="mt-1 text-xs text-stone-700">{request.department || "-"} | {request.startDate} to {request.endDate || request.startDate}</div>
+                      {request.reason && <div className="mt-2 whitespace-pre-wrap text-sm text-stone-800">{request.reason}</div>}
+                    </div>
+                  ))}
+                  {selectedCalendarEntries.map((entry) => (
+                    <div key={entry.id} className="rounded-2xl border border-sky-200 bg-sky-50 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <span className="rounded-full bg-sky-200 px-2 py-1 text-[11px] font-semibold text-sky-950">{entry.category}</span>
+                        {userCanEdit && (
+                          <button
+                            type="button"
+                            onClick={() => deleteCalendarEntry(entry.id)}
+                            className="rounded-xl border border-rose-200 bg-white px-3 py-1 text-xs text-rose-700"
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                      <div className="mt-2 text-sm font-semibold">{entry.title}</div>
+                      {entry.details && <div className="mt-2 whitespace-pre-wrap text-sm text-stone-800">{entry.details}</div>}
+                      <div className="mt-2 text-xs text-stone-600">Added by {entry.createdBy || "-"} on {formatDateTime(entry.createdAt)}</div>
+                    </div>
+                  ))}
+                  {!selectedCalendarTimeOff.length && !selectedCalendarEntries.length && (
+                    <div className="rounded-2xl border border-dashed border-stone-300 bg-white/60 p-4 text-sm text-stone-600">
+                      Nothing is listed for this date yet.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-stone-300 bg-stone-50 p-5 shadow-sm shadow-stone-300/30">
+                <div className="mb-4">
+                  <div className="text-sm font-semibold">Add calendar entry</div>
+                  <div className="text-xs text-stone-600">Use this for vendor visits, audits, meetings, maintenance, or any note that should show on a date.</div>
+                </div>
+                <form onSubmit={submitCalendarEntry} className="grid gap-3">
+                  <Field
+                    label="Title"
+                    value={calendarEntryForm.title}
+                    onChange={(value) => setCalendarEntryForm((current) => ({ ...current, title: value }))}
+                    placeholder="Vendor visit, audit, meeting, etc."
+                  />
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <div className="mb-2 text-sm font-medium text-stone-800">Date</div>
+                      <input
+                        type="date"
+                        value={calendarEntryForm.date}
+                        onChange={(event) => {
+                          setCalendarEntryForm((current) => ({ ...current, date: event.target.value }));
+                          setSelectedCalendarDate(event.target.value);
+                          setCalendarMonth(event.target.value.slice(0, 7));
+                        }}
+                        className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                      />
+                    </div>
+                    <div>
+                      <div className="mb-2 text-sm font-medium text-stone-800">Type</div>
+                      <select
+                        value={calendarEntryForm.category}
+                        onChange={(event) => setCalendarEntryForm((current) => ({ ...current, category: event.target.value }))}
+                        className="w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                      >
+                        {["Vendor Visit", "Meeting", "Maintenance", "Audit", "Reminder", "Other"].map((category) => (
+                          <option key={category}>{category}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="mb-2 text-sm font-medium text-stone-800">Details</div>
+                    <textarea
+                      value={calendarEntryForm.details}
+                      onChange={(event) => setCalendarEntryForm((current) => ({ ...current, details: event.target.value }))}
+                      placeholder="Optional details"
+                      className="h-24 w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm outline-none focus:border-emerald-800"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={!userCanEdit || !safeText(calendarEntryForm.title)}
+                    className="rounded-2xl bg-emerald-900 px-4 py-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Add to calendar
+                  </button>
+                </form>
+              </div>
+            </div>
+          </div>
+        )}
 
         {activeTab === "Today" && (
           <div className="space-y-4">
@@ -6832,7 +7203,7 @@ function SchedulerApp() {
                               state={deriveVisibleJobState(job.id, activePressJobIds, userFinishedJobIds)}
                               selected={selectedJobId === job.id}
                               onSelect={() => selectJob(job.id)}
-                              onOpenDetails={() => selectJob(job.id, true)}
+                              onOpenDetails={() => openJobDetails(job.id)}
                               onFinish={userCanEdit ? () => finishJob(job.id) : undefined}
                               canMove={userCanMoveJobs}
                               scheduledAssignments={allScheduleLocationsByJobId.get(job.id) || []}
@@ -7046,6 +7417,7 @@ function SchedulerApp() {
                                     moving={localMoving}
                                     remotePresence={remotePresence}
                                     onSelect={job ? () => selectJob(job.id) : undefined}
+                                    onOpenDetails={job ? () => openJobDetails(job.id) : undefined}
                                     canMoveUp={canEditLane && index > 0}
                                     canMoveDown={canEditLane && index < laneJobs.length - 1}
                                     onMoveUp={canEditLane && index > 0 ? () => moveAssignmentByStep(assignment.id, -1) : undefined}
@@ -7106,7 +7478,7 @@ function SchedulerApp() {
                               <div className="mt-1 text-xs text-stone-700">{job.generalDescr}</div>
                             </div>
                             <button
-                              onClick={() => selectJob(job.id, true)}
+                              onClick={() => openJobDetails(job.id)}
                               className="rounded-xl border border-stone-300 bg-stone-50 px-2 py-1 text-[11px] text-stone-800"
                             >
                               Open
@@ -7118,7 +7490,7 @@ function SchedulerApp() {
                                 key={location.id}
                                 onClick={() => {
                                   setWeekStart(startOfWeek(new Date(`${location.dayKey}T12:00:00`)));
-                                  selectJob(job.id, true);
+                                  openJobDetails(job.id);
                                 }}
                                 className="flex w-full items-center justify-between rounded-2xl bg-stone-100 px-3 py-2 text-left text-xs text-stone-800"
                               >
@@ -7186,7 +7558,7 @@ function SchedulerApp() {
                                   if (scheduledLocation) {
                                     setWeekStart(startOfWeek(new Date(`${scheduledLocation.dayKey}T12:00:00`)));
                                   }
-                                  selectJob(job.id, true);
+                                  openJobDetails(job.id);
                                 }}
                                 className="rounded-2xl border border-stone-300 bg-stone-50 px-3 py-2 text-sm text-stone-800"
                               >
@@ -7219,6 +7591,7 @@ function SchedulerApp() {
                             state="ship"
                             selected={selectedJobId === job.id}
                             onClick={() => selectJob(job.id)}
+                            onDoubleClick={() => openJobDetails(job.id)}
                             finishedAt={job.finishMeta?.finishedAt}
                             finishedBy={job.finishMeta?.finishedBy}
                             onUndoFinish={userCanEdit ? () => undoFinishJob(job.id) : undefined}
@@ -9004,28 +9377,28 @@ function SchedulerApp() {
           </div>
         )}
 
-        {selectedJob && (
+        {detailJob && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/45 p-3">
             <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-[2rem] border border-stone-300 bg-white p-5 shadow-2xl">
               <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
                   <div className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-900">Job details</div>
                   <div className="mt-1 text-xl font-semibold">
-                    {selectedJob.customerName} {selectedJob.number}
+                    {detailJob.customerName} {detailJob.number}
                   </div>
-                  <div className="mt-1 text-sm text-stone-700">{selectedJob.generalDescr}</div>
+                  <div className="mt-1 text-sm text-stone-700">{detailJob.generalDescr}</div>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <span
                     className={`rounded-full px-3 py-2 text-xs font-medium ${statusTone(
-                      deriveVisibleJobState(selectedJob.id, activePressJobIds, userFinishedJobIds)
+                      deriveVisibleJobState(detailJob.id, activePressJobIds, userFinishedJobIds)
                     )}`}
                   >
-                    {deriveVisibleJobState(selectedJob.id, activePressJobIds, userFinishedJobIds)}
+                    {deriveVisibleJobState(detailJob.id, activePressJobIds, userFinishedJobIds)}
                   </span>
                   <button
                     type="button"
-                    onClick={() => setSelectedJobId(null)}
+                    onClick={() => setDetailJobId(null)}
                     className="rounded-2xl border border-stone-300 bg-stone-50 px-4 py-2 text-sm text-stone-800"
                   >
                     Close
@@ -9034,16 +9407,16 @@ function SchedulerApp() {
               </div>
               <div className="space-y-4 text-sm">
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <Detail label="Default press" value={selectedJob.press ? formatPressLabel(selectedJob.press) : "-"} />
-                  <Detail label="Priority" value={selectedJob.priority || "-"} />
-                  <Detail label="Ship by" value={formatDate(selectedJob.shipByDate)} />
-                  <Detail label="Imported status" value={selectedJob.ticketStatus || "-"} />
-                  <Detail label="Quantity" value={selectedJob.ticQuantity.toLocaleString()} />
-                  <Detail label="EST time" value={`${selectedJob.estPressTime.toFixed(2)} hrs`} />
-                  <Detail label="PO number" value={selectedJob.custPoNum || "-"} />
-                  <Detail label="Main tool" value={selectedJob.mainTool || "-"} />
-                  <Detail label="Footage" value={selectedJob.estFootage.toLocaleString()} />
-                  <Detail label="Stock" value={selectedJob.stockDisplay || "-"} />
+                  <Detail label="Default press" value={detailJob.press ? formatPressLabel(detailJob.press) : "-"} />
+                  <Detail label="Priority" value={detailJob.priority || "-"} />
+                  <Detail label="Ship by" value={formatDate(detailJob.shipByDate)} />
+                  <Detail label="Imported status" value={detailJob.ticketStatus || "-"} />
+                  <Detail label="Quantity" value={detailJob.ticQuantity.toLocaleString()} />
+                  <Detail label="EST time" value={`${detailJob.estPressTime.toFixed(2)} hrs`} />
+                  <Detail label="PO number" value={detailJob.custPoNum || "-"} />
+                  <Detail label="Main tool" value={detailJob.mainTool || "-"} />
+                  <Detail label="Footage" value={detailJob.estFootage.toLocaleString()} />
+                  <Detail label="Stock" value={detailJob.stockDisplay || "-"} />
                 </div>
                 {selectedJobFinishMeta && (
                   <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-950">
@@ -9054,7 +9427,7 @@ function SchedulerApp() {
                     {userCanEdit && (
                       <button
                         type="button"
-                        onClick={() => undoFinishJob(selectedJob.id)}
+                        onClick={() => undoFinishJob(detailJob.id)}
                         className="mt-3 rounded-xl border border-emerald-300 bg-white px-3 py-2 text-[11px] font-medium text-emerald-950"
                       >
                         Unmark done
@@ -9062,7 +9435,7 @@ function SchedulerApp() {
                     )}
                   </div>
                 )}
-                <div className={`rounded-2xl border p-4 ${selectedJob.holdActive ? "border-rose-300 bg-rose-50" : "border-stone-300 bg-stone-50"}`}>
+                <div className={`rounded-2xl border p-4 ${detailJob.holdActive ? "border-rose-300 bg-rose-50" : "border-stone-300 bg-stone-50"}`}>
                   <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                     <div>
                       <div className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Job hold</div>
@@ -9071,8 +9444,8 @@ function SchedulerApp() {
                     <label className="flex items-center gap-2 text-sm font-medium text-stone-800">
                       <input
                         type="checkbox"
-                        checked={!!selectedJob.holdActive}
-                        onChange={(event) => updateJobHoldState(selectedJob.id, event.target.checked)}
+                        checked={!!detailJob.holdActive}
+                        onChange={(event) => updateJobHoldState(detailJob.id, event.target.checked)}
                         disabled={!userCanEdit}
                         className="h-4 w-4"
                       />
@@ -9082,8 +9455,8 @@ function SchedulerApp() {
                   <div className="mt-3">
                     <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Hold reason</div>
                     <textarea
-                      value={selectedJob.holdNote || ""}
-                      onChange={(event) => updateJobHoldNote(selectedJob.id, event.target.value)}
+                      value={detailJob.holdNote || ""}
+                      onChange={(event) => updateJobHoldNote(detailJob.id, event.target.value)}
                       disabled={!userCanEdit}
                       placeholder="Why is this job on hold?"
                       className="h-24 w-full rounded-2xl border border-stone-300 bg-white px-3 py-3 text-sm outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
@@ -9093,7 +9466,7 @@ function SchedulerApp() {
                 <div>
                   <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Imported notes</div>
                   <div className="max-h-56 overflow-auto whitespace-pre-wrap rounded-2xl bg-stone-100 p-3 text-sm text-stone-800">
-                    {selectedJob.notes || "No notes on this job."}
+                    {detailJob.notes || "No notes on this job."}
                   </div>
                 </div>
               </div>
@@ -9942,6 +10315,7 @@ function CompactScheduleCard({
   moving = false,
   remotePresence = null,
   onSelect,
+  onOpenDetails,
   canMoveUp = false,
   canMoveDown = false,
   onMoveUp,
@@ -10009,6 +10383,10 @@ function CompactScheduleCard({
         onDragComplete?.();
       }}
       onClick={handleSelect}
+      onDoubleClick={(event) => {
+        event.stopPropagation();
+        onOpenDetails?.();
+      }}
       role={onSelect ? "button" : undefined}
       tabIndex={onSelect ? 0 : undefined}
       onKeyDown={(event) => {
