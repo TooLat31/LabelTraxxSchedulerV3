@@ -1,3 +1,37 @@
 @import "tailwindcss";
 html, body, #root { margin: 0; min-height: 100%; }
 * { box-sizing: border-box; }
+
+.responsive-app-viewport {
+  overflow-x: auto;
+  overflow-y: auto;
+}
+
+.app-resolution-shell {
+  --app-scale: 1;
+  width: 100%;
+  transform: scale(var(--app-scale));
+  transform-origin: top center;
+}
+
+@media (min-width: 900px) and (max-aspect-ratio: 4 / 3) {
+  .app-resolution-shell {
+    --app-scale: 0.82;
+    width: calc(100% / 0.82);
+    min-height: calc(100vh / 0.82);
+  }
+}
+
+@media (min-width: 900px) and (max-width: 1100px) and (max-height: 820px) {
+  .app-resolution-shell {
+    --app-scale: 0.67;
+    width: calc(100% / 0.67);
+    min-height: calc(100vh / 0.67);
+  }
+}
+
+@media (max-width: 767px) {
+  .responsive-app-viewport {
+    overflow-x: hidden;
+  }
+}

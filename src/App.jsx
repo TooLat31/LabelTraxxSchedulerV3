@@ -30,8 +30,8 @@ const PRESENCE_SHARED_REFRESH_MS = 5000;
 const ATTACHMENT_BUCKET = "labeltraxx-attachments";
 const ACTIVITY_LOG_LIMIT = 300;
 const DEMO_QUERY_PARAM = "demo";
-const BASE_TABS = ["Calendar", "Scheduler", "Schedule Email", "Shift Report", "Time Off", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails", "Activity Log"];
-const MANAGEMENT_ONLY_TABS = ["Schedule Email"];
+const BASE_TABS = ["Calendar", "Scheduler", "Schedule", "Shift Report", "Time Off", "Notes", "New Request", "Open Requests", "Request History", "Pull Paper Request", "Supplies Request", "Daily Shipment", "Shipment Emails", "Activity Log"];
+const MANAGEMENT_ONLY_TABS = ["Schedule"];
 const ACCESS_MODE_OPTIONS = ["edit", "view"];
 const TAB_ACCESS_OPTIONS = ["none", "view", "edit"];
 const ATTACHMENT_ACCEPT =
@@ -371,7 +371,9 @@ function normalizeTabAccessValue(value) {
 
 function normalizeAppTabName(tab) {
   const normalized = safeText(tab);
-  return normalized === "Today" ? "Calendar" : normalized;
+  if (normalized === "Today") return "Calendar";
+  if (normalized === "Schedule Email") return "Schedule";
+  return normalized;
 }
 
 function normalizeUserTabs(tabs, role, isAdmin = false, canManageUsers = false) {
@@ -1283,6 +1285,14 @@ function formatPressLabel(press) {
   const normalized = safeText(press);
   if (!normalized) return "-";
   return normalized === "Extra Duties" ? normalized : `Press ${normalized}`;
+}
+
+function formatManagementSchedulePressLabel(press) {
+  const normalized = safeText(press);
+  if (!normalized) return "-";
+  if (normalized === "Extra Duties") return "Extra Duties";
+  if (normalized === "Rewind") return "Rewinder";
+  return `P${normalized}`;
 }
 
 function isReleaseJob(job) {
@@ -3546,25 +3556,44 @@ function SchedulerApp() {
   }, [assignedShipmentJobIds, assignments, finishedMetaByJobId, jobMap, jobs, openRequests, summaryModalKey, weekKeys]);
 
   const scheduleEmailDraft = useMemo(() => {
-    const lines = [`DG-Labels schedule for ${formatShortDate(weekColumns[0]?.date)} - ${formatShortDate(weekColumns[4]?.date)}`, ""];
-    weekColumns.forEach((day) => {
-      lines.push(`${day.label} ${formatDate(day.date)}`);
-      PRESS_ORDER.forEach((press) => {
-        const laneJobs = board[day.key]?.[press] || [];
-        if (!laneJobs.length) return;
-        lines.push(`  ${formatPressLabel(press)}`);
-        laneJobs.forEach(({ assignment, job }) => {
-          lines.push(`    - ${job ? `${job.customerName} ${job.number}: ${job.generalDescr}` : assignment.manualTitle || "Manual block"}`);
-        });
-      });
-      lines.push("");
+    const weekRange = `${formatShortDate(weekColumns[0]?.date)} - ${formatShortDate(weekColumns[4]?.date)}`;
+    const lines = [`DG-Labels management schedule for ${weekRange}`, ""];
+    let scheduledLineCount = 0;
+
+    PRESS_ORDER.forEach((press) => {
+      const weekLaneItems = weekColumns.flatMap((day) => board[day.key]?.[press] || []);
+      const customers = Array.from(
+        new Set(
+          weekLaneItems
+            .map(({ assignment, job }) => safeText(job?.customerName || assignment.manualTitle))
+            .filter(Boolean)
+        )
+      );
+      const operators = Array.from(
+        new Set(
+          weekColumns
+            .flatMap((day) => {
+              const entry = pressOperators[pressOperatorKey(day.key, press)];
+              if (entry && typeof entry === "object") return [safeText(entry.operator1), safeText(entry.operator2)];
+              return [safeText(entry)];
+            })
+            .filter(Boolean)
+        )
+      );
+      if (!customers.length && !operators.length) return;
+      scheduledLineCount += 1;
+      lines.push(
+        `${formatManagementSchedulePressLabel(press)} - ${operators.join(" / ") || "Unassigned"} - ${customers.join(", ") || "No work scheduled"}`
+      );
     });
+
     return {
-      subject: `DG-Labels schedule ${formatShortDate(weekColumns[0]?.date)} - ${formatShortDate(weekColumns[4]?.date)}`,
+      subject: `DG-Labels management schedule ${weekRange}`,
       body: lines.join("\n").trim(),
       jobCount: assignments.filter((assignment) => assignment.kind === "press" && weekKeys.has(assignment.dayKey)).length,
+      lineCount: scheduledLineCount,
     };
-  }, [assignments, board, weekColumns, weekKeys]);
+  }, [assignments, board, pressOperators, weekColumns, weekKeys]);
 
   const scheduleEmailHistoryForWeek = useMemo(
     () =>
@@ -5641,6 +5670,16 @@ function SchedulerApp() {
     window.location.href = mailtoUrl;
   }
 
+  function exportManagementScheduleSummary() {
+    if (!userCanManageUsers) return;
+    downloadFile(
+      `management-schedule-${weekStartKey}.txt`,
+      scheduleEmailDraft.body,
+      "text/plain;charset=utf-8"
+    );
+    recordActivity("Exported management schedule summary", "Scheduler", `Management schedule summary for ${weekStartKey} was exported.`);
+  }
+
   function logScheduleEmailSent() {
     if (!userCanManageUsers) return;
     setScheduleEmailLogs((current) => [
@@ -6080,8 +6119,8 @@ function SchedulerApp() {
   };
 
   return (
-    <div className="min-h-screen bg-stone-100 text-stone-900">
-      <div className="mx-auto max-w-[1900px] p-3 sm:p-4 md:p-5">
+    <div className="responsive-app-viewport min-h-screen bg-stone-100 text-stone-900">
+      <div className="app-resolution-shell mx-auto max-w-[1900px] p-3 sm:p-4 md:p-5">
         <div className="mb-6 rounded-[2rem] border border-stone-300 bg-gradient-to-br from-stone-50 via-white to-stone-100 p-5 shadow-sm shadow-stone-300/40">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div>
@@ -6639,12 +6678,14 @@ function SchedulerApp() {
           </div>
         )}
 
-        {activeTab === "Schedule Email" && userCanManageUsers && (
+        {activeTab === "Schedule" && userCanManageUsers && (
           <div className="grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
             <div className="rounded-3xl border border-stone-300 bg-stone-50 p-6 shadow-sm shadow-stone-300/30">
               <div className="mb-5">
-                <div className="text-sm font-semibold">Management schedule email</div>
-                <div className="text-xs text-stone-600">Export the current week, open an email draft, and log when it was sent.</div>
+                <div className="text-sm font-semibold">Management schedule</div>
+                <div className="text-xs text-stone-600">
+                  Send a concise press/operator/customer summary for the current week, or export the detailed schedule as Excel.
+                </div>
               </div>
               <div className="grid gap-4">
                 <Field
@@ -6659,7 +6700,7 @@ function SchedulerApp() {
                   onChange={(value) => setScheduleEmailForm((current) => ({ ...current, cc: value }))}
                   placeholder="Optional CC"
                 />
-                <div className="grid gap-2 sm:grid-cols-3">
+                <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
                   <button
                     type="button"
                     onClick={sendScheduleEmailDraft}
@@ -6676,6 +6717,13 @@ function SchedulerApp() {
                   </button>
                   <button
                     type="button"
+                    onClick={exportManagementScheduleSummary}
+                    className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
+                  >
+                    Export summary
+                  </button>
+                  <button
+                    type="button"
                     onClick={exportScheduleWorkbook}
                     className="rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-800"
                   >
@@ -6685,6 +6733,9 @@ function SchedulerApp() {
                 <div className="rounded-2xl bg-white p-4">
                   <div className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Subject</div>
                   <div className="mt-1 text-sm font-medium text-stone-900">{scheduleEmailDraft.subject}</div>
+                  <div className="mt-2 text-xs text-stone-600">
+                    {scheduleEmailDraft.lineCount} press lines and {scheduleEmailDraft.jobCount} scheduled jobs for this week.
+                  </div>
                   <div className="mt-3 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Draft body</div>
                   <pre className="mt-2 max-h-[45vh] overflow-auto whitespace-pre-wrap rounded-2xl bg-stone-100 p-3 text-xs text-stone-800">
                     {scheduleEmailDraft.body}
