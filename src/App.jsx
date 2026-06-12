@@ -13,20 +13,18 @@ const SHARED_STATE_SLICE_ROWS = {
   jobs: `${SHARED_STATE_ROW_ID}:jobs`,
   schedule: `${SHARED_STATE_ROW_ID}:schedule`,
   requests: `${SHARED_STATE_ROW_ID}:requests`,
+  planning: `${SHARED_STATE_ROW_ID}:planning`,
   shipments: `${SHARED_STATE_ROW_ID}:shipments`,
   users: `${SHARED_STATE_ROW_ID}:users`,
 };
 const SHARED_STATE_SLICE_KEYS = Object.keys(SHARED_STATE_SLICE_ROWS);
 const SHARED_STATE_SLICE_ROW_IDS = Object.values(SHARED_STATE_SLICE_ROWS);
-const PRESENCE_STATE_ROW_ID = "labeltraxx-presence-state";
 const LOGIN_SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
-const SHARED_SAVE_DEBOUNCE_MS = 700;
-const SHARED_REFRESH_INTERVAL_MS = 15000;
+const SHARED_SAVE_DEBOUNCE_MS = 1500;
 const SHARED_REMOTE_GUARD_MS = SHARED_SAVE_DEBOUNCE_MS + 2000;
 const SHARED_PENDING_REMOTE_BLOCK_MS = 45000;
 const PRESENCE_STALE_MS = 35000;
 const PRESENCE_HEARTBEAT_MS = 10000;
-const PRESENCE_SHARED_REFRESH_MS = 5000;
 const ATTACHMENT_BUCKET = "labeltraxx-attachments";
 const ACTIVITY_LOG_LIMIT = 300;
 const DEMO_QUERY_PARAM = "demo";
@@ -848,6 +846,30 @@ function canUserViewCalendarEntry(user, entry) {
   return (entry.visibleTo || []).some((name) => comparableUsername(name) === username);
 }
 
+function normalizePlanningSliceFromLegacyRequestsPayload(payload) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  return {
+    notes: normalizeNotes(source.notes),
+    registrationRequests: normalizeRegistrationRequests(source.registrationRequests),
+    timeOffRequests: normalizeTimeOffRequests(source.timeOffRequests),
+    calendarEntries: normalizeCalendarEntries(source.calendarEntries),
+    shiftReports: normalizeShiftReports(source.shiftReports),
+  };
+}
+
+function estimateJsonBytes(value) {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value ?? null)).length;
+  } catch {
+    return 0;
+  }
+}
+
+function debugSupabaseSync(kind, details = {}) {
+  if (!import.meta.env.DEV) return;
+  console.info(`[supabase-sync] ${kind}`, details);
+}
+
 function normalizeShiftReports(reports) {
   return Array.isArray(reports)
     ? reports
@@ -1123,11 +1145,15 @@ function normalizeSharedStateSlice(sliceKey, payload) {
     return {
       requests: normalizeRequests(source.requests),
       pullPaperRequests: normalizePullPaperRequests(source.pullPaperRequests),
+      suppliesRequests: normalizeSuppliesRequests(source.suppliesRequests),
+    };
+  }
+  if (sliceKey === "planning") {
+    return {
       notes: normalizeNotes(source.notes),
       registrationRequests: normalizeRegistrationRequests(source.registrationRequests),
       timeOffRequests: normalizeTimeOffRequests(source.timeOffRequests),
       calendarEntries: normalizeCalendarEntries(source.calendarEntries),
-      suppliesRequests: normalizeSuppliesRequests(source.suppliesRequests),
       shiftReports: normalizeShiftReports(source.shiftReports),
     };
   }
@@ -1157,6 +1183,7 @@ function buildSharedStateSlices(state) {
     jobs: normalizeSharedStateSlice("jobs", snapshot),
     schedule: normalizeSharedStateSlice("schedule", snapshot),
     requests: normalizeSharedStateSlice("requests", snapshot),
+    planning: normalizeSharedStateSlice("planning", snapshot),
     shipments: normalizeSharedStateSlice("shipments", snapshot),
     users: normalizeSharedStateSlice("users", snapshot),
   };
@@ -1722,15 +1749,17 @@ function SchedulerApp() {
   const [manualScheduleForm, setManualScheduleForm] = useState(EMPTY_MANUAL_SCHEDULE_FORM);
   const [locationSearch, setLocationSearch] = useState("");
   const [pickedUpItem, setPickedUpItem] = useState(null);
+  const [pressOperatorDrafts, setPressOperatorDrafts] = useState({});
+  const [jobHoldNoteDrafts, setJobHoldNoteDrafts] = useState({});
   const [syncStatus, setSyncStatus] = useState(isSupabaseConfigured ? "Connecting..." : "Local only");
   const [lastSyncAt, setLastSyncAt] = useState("");
   const [activePresenceUsers, setActivePresenceUsers] = useState([]);
-  const [sharedPresenceUsers, setSharedPresenceUsers] = useState([]);
   const [presenceActivityTick, setPresenceActivityTick] = useState(0);
   const [presenceActiveAt, setPresenceActiveAt] = useState(() => new Date().toISOString());
   const jobDetailsRef = useRef(null);
   const lastSharedSnapshotRef = useRef("");
   const lastSharedSliceDigestsRef = useRef({});
+  const lastSharedSliceUpdatedAtRef = useRef({});
   const pendingSharedSnapshotRef = useRef("");
   const pendingSharedSnapshotAtRef = useRef(0);
   const pendingSharedSliceDigestsRef = useRef({});
@@ -1740,11 +1769,8 @@ function SchedulerApp() {
   const saveTimerRef = useRef(null);
   const sharedSaveInFlightRef = useRef(false);
   const queuedSharedSaveRef = useRef(null);
-  const presenceChannelRef = useRef(null);
+  const liveSyncChannelRef = useRef(null);
   const presenceClientIdRef = useRef(makeId("presence"));
-  const sharedPresenceEntriesRef = useRef({});
-  const presenceWriteInFlightRef = useRef(false);
-  const queuedPresenceEntryRef = useRef(null);
   const deferredSearch = useDeferredValue(search);
   const deferredUnscheduledSearch = useDeferredValue(unscheduledSearch);
   const deferredLocationSearch = useDeferredValue(locationSearch);
@@ -1840,6 +1866,16 @@ function SchedulerApp() {
     return normalized;
   }
 
+  function rememberSharedStateRowMetadata(rows) {
+    const next = { ...lastSharedSliceUpdatedAtRef.current };
+    (Array.isArray(rows) ? rows : []).forEach((row) => {
+      const sliceKey = getSharedStateSliceKeyForRowId(row.id);
+      if (!sliceKey || !row.updated_at) return;
+      next[sliceKey] = row.updated_at;
+    });
+    lastSharedSliceUpdatedAtRef.current = next;
+  }
+
   function hasRecentLocalSharedSliceChanges(sliceKey) {
     return Date.now() - (lastLocalSharedSliceChangeRef.current[sliceKey] || 0) < SHARED_REMOTE_GUARD_MS;
   }
@@ -1921,25 +1957,123 @@ function SchedulerApp() {
       updated_by: updatedBy,
     }));
     if (!rows.length) return slices;
+    debugSupabaseSync("write:slices", {
+      sliceKeys,
+      totalBytes: rows.reduce((sum, row) => sum + estimateJsonBytes(row.payload), 0),
+    });
     const { error } = await supabase.from("app_state").upsert(rows);
     if (error) throw error;
     return slices;
   }
 
-  async function fetchLatestSharedState({ force = false } = {}) {
-    if (!isSupabaseConfigured || !supabase) return null;
+  async function fetchSharedStateMetadata(sliceKeys = SHARED_STATE_SLICE_KEYS) {
+    if (!isSupabaseConfigured || !supabase) return [];
+    const rowIds = sliceKeys.map((sliceKey) => SHARED_STATE_SLICE_ROWS[sliceKey]).filter(Boolean);
+    if (!rowIds.length) return [];
+    debugSupabaseSync("read:metadata", { rowIds });
+    const { data, error } = await supabase
+      .from("app_state")
+      .select("id, updated_at")
+      .in("id", rowIds);
+    if (error) throw error;
+    return Array.isArray(data) ? data : [];
+  }
 
+  async function fetchSharedStateRowsByIds(rowIds) {
+    if (!isSupabaseConfigured || !supabase || !rowIds.length) return [];
     const { data, error } = await supabase
       .from("app_state")
       .select("id, payload, updated_at")
-      .in("id", [SHARED_STATE_ROW_ID, ...SHARED_STATE_SLICE_ROW_IDS]);
-
+      .in("id", rowIds);
     if (error) throw error;
     const rows = Array.isArray(data) ? data : [];
-    const legacyRow = rows.find((row) => row.id === SHARED_STATE_ROW_ID);
-    const sliceRows = rows.filter((row) => getSharedStateSliceKeyForRowId(row.id));
+    debugSupabaseSync("read:payload", {
+      rowIds,
+      totalBytes: rows.reduce((sum, row) => sum + estimateJsonBytes(row.payload), 0),
+    });
+    return rows;
+  }
 
-    if (!sliceRows.length && legacyRow?.payload) {
+  async function fetchLegacySharedStateRow() {
+    if (!isSupabaseConfigured || !supabase) return null;
+    const { data, error } = await supabase
+      .from("app_state")
+      .select("id, payload, updated_at")
+      .eq("id", SHARED_STATE_ROW_ID)
+      .maybeSingle();
+    if (error) throw error;
+    if (data?.payload) {
+      debugSupabaseSync("read:legacy-payload", {
+        rowId: SHARED_STATE_ROW_ID,
+        bytes: estimateJsonBytes(data.payload),
+      });
+    }
+    return data || null;
+  }
+
+  function hydratePlanningSliceFromLegacyRequestsRow(snapshot, rows) {
+    const hasPlanningRow = rows.some((row) => getSharedStateSliceKeyForRowId(row.id) === "planning");
+    if (hasPlanningRow) return snapshot;
+    const requestsRow = rows.find((row) => getSharedStateSliceKeyForRowId(row.id) === "requests");
+    if (!requestsRow?.payload) return snapshot;
+    return {
+      ...snapshot,
+      ...normalizePlanningSliceFromLegacyRequestsPayload(requestsRow.payload),
+    };
+  }
+
+  function rememberSharedSliceUpdate(sliceKey, digest, updatedAt = "") {
+    lastSharedSliceDigestsRef.current = {
+      ...lastSharedSliceDigestsRef.current,
+      [sliceKey]: digest,
+    };
+    if (updatedAt) {
+      lastSharedSliceUpdatedAtRef.current = {
+        ...lastSharedSliceUpdatedAtRef.current,
+        [sliceKey]: updatedAt,
+      };
+    }
+  }
+
+  function applyRemoteSharedStateRows(rows) {
+    const sliceRows = (Array.isArray(rows) ? rows : []).filter((row) => getSharedStateSliceKeyForRowId(row.id));
+    if (!sliceRows.length) return false;
+    let didApply = false;
+    sliceRows.forEach((row) => {
+      const sliceKey = getSharedStateSliceKeyForRowId(row.id);
+      if (!sliceKey) return;
+      const normalizedSlice = normalizeSharedStateSlice(sliceKey, row.payload);
+      const digest = JSON.stringify(normalizedSlice);
+      if (pendingSharedSliceDigestsRef.current[sliceKey] === digest) {
+        rememberSharedSliceUpdate(sliceKey, digest, row.updated_at || "");
+        clearPendingSharedSlice(sliceKey, digest);
+        return;
+      }
+      if (digest === lastSharedSliceDigestsRef.current[sliceKey]) {
+        rememberSharedSliceUpdate(sliceKey, digest, row.updated_at || "");
+        return;
+      }
+      if (shouldBlockRemoteSharedSlice(sliceKey, digest)) return;
+      applySharedStateSlice(sliceKey, normalizedSlice);
+      rememberSharedSliceUpdate(sliceKey, digest, row.updated_at || "");
+      didApply = true;
+    });
+    if (didApply) {
+      const merged = mergeSharedStateSlices(buildCurrentSharedSnapshot(), rowsToSharedStateSlices(sliceRows));
+      lastSharedSnapshotRef.current = JSON.stringify(buildSharedSnapshot(merged));
+    }
+    setSyncStatus("Live sync");
+    setLastSyncAt(latestRowUpdatedAt(sliceRows, new Date().toISOString()));
+    return didApply;
+  }
+
+  async function fetchLatestSharedState({ force = false } = {}) {
+    if (!isSupabaseConfigured || !supabase) return null;
+
+    const metadata = await fetchSharedStateMetadata();
+    if (!metadata.length) {
+      const legacyRow = await fetchLegacySharedStateRow();
+      if (!legacyRow?.payload) return null;
       const normalizedLegacy = normalizeSharedSnapshot(legacyRow.payload);
       await upsertSharedStateSlices(normalizedLegacy, "migration");
       const legacyDigest = JSON.stringify(buildSharedSnapshot(normalizedLegacy));
@@ -1953,98 +2087,24 @@ function SchedulerApp() {
       return applied;
     }
 
-    if (!sliceRows.length) {
+    const rowIdsToFetch = metadata
+      .filter((row) => {
+        const sliceKey = getSharedStateSliceKeyForRowId(row.id);
+        if (!sliceKey) return false;
+        if (force) return true;
+        return safeText(row.updated_at) !== safeText(lastSharedSliceUpdatedAtRef.current[sliceKey]);
+      })
+      .map((row) => row.id);
+
+    if (!rowIdsToFetch.length) {
+      setSyncStatus("Live sync");
+      setLastSyncAt(latestRowUpdatedAt(metadata, lastSyncAt || new Date().toISOString()));
       return null;
     }
 
-    let didApply = false;
-    sliceRows.forEach((row) => {
-      const sliceKey = getSharedStateSliceKeyForRowId(row.id);
-      if (!sliceKey) return;
-      const normalizedSlice = normalizeSharedStateSlice(sliceKey, row.payload);
-      const digest = JSON.stringify(normalizedSlice);
-      if (pendingSharedSliceDigestsRef.current[sliceKey] === digest) {
-        lastSharedSliceDigestsRef.current = {
-          ...lastSharedSliceDigestsRef.current,
-          [sliceKey]: digest,
-        };
-        clearPendingSharedSlice(sliceKey, digest);
-        return;
-      }
-      if (digest === lastSharedSliceDigestsRef.current[sliceKey]) return;
-      if (shouldBlockRemoteSharedSlice(sliceKey, digest)) return;
-      applySharedStateSlice(sliceKey, normalizedSlice);
-      lastSharedSliceDigestsRef.current = {
-        ...lastSharedSliceDigestsRef.current,
-        [sliceKey]: digest,
-      };
-      didApply = true;
-    });
-
-    if (didApply) {
-      const merged = mergeSharedStateSlices(buildCurrentSharedSnapshot(), rowsToSharedStateSlices(sliceRows));
-      lastSharedSnapshotRef.current = JSON.stringify(buildSharedSnapshot(merged));
-    }
-    setSyncStatus("Live sync");
-    setLastSyncAt(latestRowUpdatedAt(sliceRows, new Date().toISOString()));
+    const rows = await fetchSharedStateRowsByIds(rowIdsToFetch);
+    applyRemoteSharedStateRows(rows);
     return normalizeSharedSnapshot(buildCurrentSharedSnapshot());
-  }
-
-  function applySharedPresencePayload(payload) {
-    const entries = normalizePresenceEntries(payload?.entries);
-    sharedPresenceEntriesRef.current = entries;
-    setSharedPresenceUsers(Object.values(entries));
-    return entries;
-  }
-
-  async function fetchSharedPresenceState() {
-    if (!isSupabaseConfigured || !supabase || workspaceMode === "demo") return {};
-    const { data, error } = await supabase
-      .from("app_state")
-      .select("payload")
-      .eq("id", PRESENCE_STATE_ROW_ID)
-      .maybeSingle();
-    if (error) throw error;
-    return applySharedPresencePayload(data?.payload || {});
-  }
-
-  async function publishSharedPresence(entry) {
-    if (!isSupabaseConfigured || !supabase || workspaceMode === "demo") return;
-    queuedPresenceEntryRef.current = entry;
-    if (presenceWriteInFlightRef.current) return;
-    presenceWriteInFlightRef.current = true;
-    try {
-      while (queuedPresenceEntryRef.current) {
-        const nextEntry = queuedPresenceEntryRef.current;
-        queuedPresenceEntryRef.current = null;
-        const { data, error } = await supabase
-          .from("app_state")
-          .select("payload")
-          .eq("id", PRESENCE_STATE_ROW_ID)
-          .maybeSingle();
-        if (error) throw error;
-
-        const remoteEntries = normalizePresenceEntries(data?.payload?.entries);
-        const mergedEntries = normalizePresenceEntries({
-          ...remoteEntries,
-          ...sharedPresenceEntriesRef.current,
-          [nextEntry.clientId]: nextEntry,
-        });
-        sharedPresenceEntriesRef.current = mergedEntries;
-        setSharedPresenceUsers(Object.values(mergedEntries));
-
-        const { error: upsertError } = await supabase.from("app_state").upsert({
-          id: PRESENCE_STATE_ROW_ID,
-          payload: { entries: mergedEntries },
-          updated_by: safeText(nextEntry.username) || "presence",
-        });
-        if (upsertError) throw upsertError;
-      }
-    } catch (error) {
-      console.error("Failed to publish shared presence.", error);
-    } finally {
-      presenceWriteInFlightRef.current = false;
-    }
   }
 
   async function persistSharedSnapshot({ snapshot, digest, slices, sliceDigests, sliceKeys, updatedBy }) {
@@ -2088,6 +2148,10 @@ function SchedulerApp() {
           setSyncStatus("Live sync");
           continue;
         }
+        debugSupabaseSync("write:debounced-slices", {
+          sliceKeys: nextSliceKeys,
+          totalBytes: rows.reduce((sum, row) => sum + estimateJsonBytes(row.payload), 0),
+        });
         const { error } = await supabase.from("app_state").upsert(rows);
 
         if (error) {
@@ -2169,38 +2233,34 @@ function SchedulerApp() {
         }
 
         let sharedSnapshot = saved;
+        let sharedMetadata = [];
         if (!isCancelled) {
           setWorkspaceMode("live");
         }
 
         if (isSupabaseConfigured && supabase) {
           setSyncStatus("Connecting...");
-          const { data, error } = await supabase
-            .from("app_state")
-            .select("id, payload, updated_at")
-            .in("id", [SHARED_STATE_ROW_ID, ...SHARED_STATE_SLICE_ROW_IDS]);
+          const metadata = await fetchSharedStateMetadata();
+          sharedMetadata = metadata;
 
-          if (error) throw error;
-
-          const rows = Array.isArray(data) ? data : [];
-          const legacyRow = rows.find((row) => row.id === SHARED_STATE_ROW_ID);
-          const sliceRows = rows.filter((row) => getSharedStateSliceKeyForRowId(row.id));
-
-          if (sliceRows.length) {
+          if (metadata.length) {
+            const sliceRows = await fetchSharedStateRowsByIds(metadata.map((row) => row.id));
             sharedSnapshot = mergeSharedStateSlices(
-              legacyRow?.payload || (Object.keys(saved || {}).length > 0 ? saved : defaultSharedSnapshot()),
+              Object.keys(saved || {}).length > 0 ? saved : defaultSharedSnapshot(),
               rowsToSharedStateSlices(sliceRows)
             );
-            const existingSliceKeys = new Set(sliceRows.map((row) => getSharedStateSliceKeyForRowId(row.id)));
+            sharedSnapshot = hydratePlanningSliceFromLegacyRequestsRow(sharedSnapshot, sliceRows);
+            const existingSliceKeys = new Set(sliceRows.map((row) => getSharedStateSliceKeyForRowId(row.id)).filter(Boolean));
             const missingSliceKeys = SHARED_STATE_SLICE_KEYS.filter((sliceKey) => !existingSliceKeys.has(sliceKey));
             if (missingSliceKeys.length) {
               await upsertSharedStateSlices(sharedSnapshot, "migration", missingSliceKeys);
             }
             if (!isCancelled) {
               setSyncStatus("Live sync");
-              setLastSyncAt(latestRowUpdatedAt(rows, new Date().toISOString()));
+              setLastSyncAt(latestRowUpdatedAt(sliceRows, new Date().toISOString()));
             }
           } else {
+            const legacyRow = await fetchLegacySharedStateRow();
             const seedSnapshot =
               legacyRow?.payload ||
               (Object.keys(saved || {}).length > 0 ? buildSharedSnapshot(normalizeSharedSnapshot(saved)) : defaultSharedSnapshot());
@@ -2217,6 +2277,9 @@ function SchedulerApp() {
 
         const normalized = applySharedStateSnapshot(sharedSnapshot);
         rememberSharedStateSnapshot(normalized);
+        if (sharedMetadata.length) {
+          rememberSharedStateRowMetadata(sharedMetadata);
+        }
         clearPendingSharedSnapshot();
         clearAllPendingSharedSlices();
         if (isSessionActive) {
@@ -2428,6 +2491,7 @@ function SchedulerApp() {
     if (!isReady || workspaceMode === "demo" || !isSupabaseConfigured || !supabase) return undefined;
 
     let isCancelled = false;
+    let refreshTimer = 0;
 
     const refreshFromServer = async (force = false) => {
       try {
@@ -2439,86 +2503,128 @@ function SchedulerApp() {
       }
     };
 
+    const scheduleRefresh = (force = false) => {
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        refreshFromServer(force);
+      }, force ? 0 : 120);
+    };
+
     const handleFocus = () => {
-      refreshFromServer(true);
+      scheduleRefresh(true);
     };
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
-        refreshFromServer(true);
+        scheduleRefresh(true);
       }
     };
-
-    const intervalId = window.setInterval(() => {
-      if (document.visibilityState === "visible") {
-        refreshFromServer();
-      }
-    }, SHARED_REFRESH_INTERVAL_MS);
 
     window.addEventListener("focus", handleFocus);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       isCancelled = true;
-      window.clearInterval(intervalId);
+      window.clearTimeout(refreshTimer);
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [isReady, workspaceMode]);
+  }, [currentUser?.username, isReady, workspaceMode]);
 
   useEffect(() => {
-    if (!isReady || workspaceMode === "demo" || !isSupabaseConfigured || !supabase) return undefined;
+    if (!isReady || workspaceMode === "demo" || !isSupabaseConfigured || !supabase) {
+      setActivePresenceUsers([]);
+      return undefined;
+    }
 
-    const channel = supabase
-      .channel("labeltraxx-shared-state-slices")
-      .on(
+    const channel = supabase.channel("labeltraxx-live-sync", {
+      config: {
+        presence: {
+          key: presenceClientIdRef.current,
+        },
+      },
+    });
+
+    const syncPresenceUsers = () => {
+      const now = Date.now();
+      const presenceState = channel.presenceState();
+      const users = Object.entries(presenceState)
+        .flatMap(([presenceKey, presences]) =>
+          (Array.isArray(presences) ? presences : []).map((presence) => ({
+            clientId: safeText(presence.clientId || presenceKey),
+            username: safeText(presence.username),
+            tab: safeText(presence.tab || "Scheduler"),
+            action: safeText(presence.action || "viewing"),
+            jobLabel: safeText(presence.jobLabel),
+            jobId: safeText(presence.jobId),
+            assignmentId: safeText(presence.assignmentId),
+            updatedAt: safeText(presence.updatedAt),
+            activeAt: safeText(presence.activeAt || presence.updatedAt),
+          }))
+        )
+        .filter((presence) => presence.username)
+        .filter((presence) => {
+          const updatedAt = presence.updatedAt ? new Date(presence.updatedAt).getTime() : now;
+          return Number.isFinite(updatedAt) && now - updatedAt <= PRESENCE_STALE_MS;
+        })
+        .sort((left, right) => {
+          const leftSelf = left.clientId === presenceClientIdRef.current ? 0 : 1;
+          const rightSelf = right.clientId === presenceClientIdRef.current ? 0 : 1;
+          return leftSelf - rightSelf || left.username.localeCompare(right.username) || left.tab.localeCompare(right.tab);
+        });
+      setActivePresenceUsers(users);
+    };
+
+    const handleSharedStatePayload = (payload) => {
+      const rowId = safeText(payload.new?.id);
+      const sliceKey = getSharedStateSliceKeyForRowId(rowId);
+      if (!sliceKey || !payload.new?.payload) return;
+      const normalizedSlice = normalizeSharedStateSlice(sliceKey, payload.new.payload);
+      const digest = JSON.stringify(normalizedSlice);
+      const updatedAt = payload.new?.updated_at || new Date().toISOString();
+      if (digest === pendingSharedSliceDigestsRef.current[sliceKey]) {
+        rememberSharedSliceUpdate(sliceKey, digest, updatedAt);
+        clearPendingSharedSlice(sliceKey, digest);
+        if (!Object.keys(pendingSharedSliceDigestsRef.current).length) {
+          clearPendingSharedSnapshot();
+        }
+        setSyncStatus("Live sync");
+        setLastSyncAt(updatedAt);
+        return;
+      }
+      if (digest === lastSharedSliceDigestsRef.current[sliceKey]) {
+        rememberSharedSliceUpdate(sliceKey, digest, updatedAt);
+        setSyncStatus(Object.keys(pendingSharedSliceDigestsRef.current).length ? "Saving..." : "Live sync");
+        setLastSyncAt(updatedAt);
+        return;
+      }
+      if (shouldBlockRemoteSharedSlice(sliceKey, digest)) return;
+      applySharedStateSlice(sliceKey, normalizedSlice);
+      rememberSharedSliceUpdate(sliceKey, digest, updatedAt);
+      const mergedSnapshot = mergeSharedStateSlices(buildCurrentSharedSnapshot(), { [sliceKey]: normalizedSlice });
+      lastSharedSnapshotRef.current = JSON.stringify(buildSharedSnapshot(mergedSnapshot));
+      setSyncStatus("Live sync");
+      setLastSyncAt(updatedAt);
+    };
+
+    SHARED_STATE_SLICE_KEYS.forEach((sliceKey) => {
+      channel.on(
         "postgres_changes",
         {
           event: "*",
           schema: "public",
           table: "app_state",
+          filter: `id=eq.${SHARED_STATE_SLICE_ROWS[sliceKey]}`,
         },
-        (payload) => {
-          const rowId = safeText(payload.new?.id);
-          const sliceKey = getSharedStateSliceKeyForRowId(rowId);
-          if (!sliceKey) return;
-          const nextPayload = payload.new?.payload;
-          if (!nextPayload) return;
-          const normalizedSlice = normalizeSharedStateSlice(sliceKey, nextPayload);
-          const digest = JSON.stringify(normalizedSlice);
-          if (digest === pendingSharedSliceDigestsRef.current[sliceKey]) {
-            lastSharedSliceDigestsRef.current = {
-              ...lastSharedSliceDigestsRef.current,
-              [sliceKey]: digest,
-            };
-            clearPendingSharedSlice(sliceKey, digest);
-            if (!Object.keys(pendingSharedSliceDigestsRef.current).length) {
-              clearPendingSharedSnapshot();
-            }
-            setSyncStatus("Live sync");
-            setLastSyncAt(payload.new?.updated_at || new Date().toISOString());
-            return;
-          }
+        handleSharedStatePayload
+      );
+    });
 
-          if (digest === lastSharedSliceDigestsRef.current[sliceKey]) {
-            setSyncStatus(Object.keys(pendingSharedSliceDigestsRef.current).length ? "Saving..." : "Live sync");
-            setLastSyncAt(payload.new?.updated_at || new Date().toISOString());
-            return;
-          }
-
-          if (shouldBlockRemoteSharedSlice(sliceKey, digest)) {
-            return;
-          }
-
-          applySharedStateSlice(sliceKey, normalizedSlice);
-          lastSharedSliceDigestsRef.current = {
-            ...lastSharedSliceDigestsRef.current,
-            [sliceKey]: digest,
-          };
-          setSyncStatus("Live sync");
-          setLastSyncAt(payload.new?.updated_at || new Date().toISOString());
-        }
-      )
+    liveSyncChannelRef.current = channel;
+    channel
+      .on("presence", { event: "sync" }, syncPresenceUsers)
+      .on("presence", { event: "join" }, syncPresenceUsers)
+      .on("presence", { event: "leave" }, syncPresenceUsers)
       .subscribe((status) => {
         if (status === "SUBSCRIBED") {
           setSyncStatus("Live sync");
@@ -2527,61 +2633,20 @@ function SchedulerApp() {
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
           setSyncStatus("Sync error");
           fetchLatestSharedState({ force: true }).catch((error) => {
-            console.error("Failed to recover shared scheduler state slices after realtime error.", error);
+            console.error("Failed to recover shared scheduler state after realtime error.", error);
           });
         }
       });
 
     return () => {
+      channel.untrack().catch(() => {});
       supabase.removeChannel(channel);
+      if (liveSyncChannelRef.current === channel) {
+        liveSyncChannelRef.current = null;
+      }
+      setActivePresenceUsers([]);
     };
   }, [isReady, workspaceMode]);
-
-  useEffect(() => {
-    if (!isReady || workspaceMode === "demo" || !isSupabaseConfigured || !supabase || !currentUser) {
-      sharedPresenceEntriesRef.current = {};
-      setSharedPresenceUsers([]);
-      return undefined;
-    }
-
-    let isCancelled = false;
-    const refreshPresence = async () => {
-      try {
-        await fetchSharedPresenceState();
-      } catch (error) {
-        if (!isCancelled) {
-          console.error("Failed to refresh shared presence.", error);
-        }
-      }
-    };
-
-    refreshPresence();
-    const channel = supabase
-      .channel("labeltraxx-shared-presence")
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "app_state",
-          filter: `id=eq.${PRESENCE_STATE_ROW_ID}`,
-        },
-        (payload) => {
-          if (payload.new?.payload) {
-            applySharedPresencePayload(payload.new.payload);
-          }
-        }
-      )
-      .subscribe();
-
-    const intervalId = window.setInterval(refreshPresence, PRESENCE_SHARED_REFRESH_MS);
-
-    return () => {
-      isCancelled = true;
-      window.clearInterval(intervalId);
-      supabase.removeChannel(channel);
-    };
-  }, [currentUser?.username, isReady, workspaceMode]);
 
   useEffect(() => {
     if (!jobs.some((job) => job.id === selectedJobId)) setSelectedJobId(null);
@@ -3127,80 +3192,6 @@ function SchedulerApp() {
   const selectedJobPresenceLabel = selectedJob ? `${selectedJob.customerName} ${selectedJob.number}`.trim() : "";
 
   useEffect(() => {
-    if (!isReady || workspaceMode === "demo" || !isSupabaseConfigured || !supabase || !currentUser) {
-      setActivePresenceUsers([]);
-      return undefined;
-    }
-
-    const channel = supabase.channel("labeltraxx-user-presence", {
-      config: {
-        presence: {
-          key: presenceClientIdRef.current,
-        },
-      },
-    });
-
-    const syncPresenceUsers = () => {
-      const now = Date.now();
-      const presenceState = channel.presenceState();
-      const users = Object.entries(presenceState)
-        .flatMap(([presenceKey, presences]) =>
-          (Array.isArray(presences) ? presences : []).map((presence) => ({
-            clientId: safeText(presence.clientId || presenceKey),
-            username: safeText(presence.username),
-            tab: safeText(presence.tab || "Scheduler"),
-            action: safeText(presence.action || "viewing"),
-            jobLabel: safeText(presence.jobLabel),
-            jobId: safeText(presence.jobId),
-            assignmentId: safeText(presence.assignmentId),
-            updatedAt: safeText(presence.updatedAt),
-            activeAt: safeText(presence.activeAt || presence.updatedAt),
-          }))
-        )
-        .filter((presence) => presence.username)
-        .filter((presence) => {
-          const updatedAt = presence.updatedAt ? new Date(presence.updatedAt).getTime() : now;
-          return Number.isFinite(updatedAt) && now - updatedAt <= PRESENCE_STALE_MS;
-        })
-        .sort((left, right) => {
-          const leftSelf = left.clientId === presenceClientIdRef.current ? 0 : 1;
-          const rightSelf = right.clientId === presenceClientIdRef.current ? 0 : 1;
-          return leftSelf - rightSelf || left.username.localeCompare(right.username) || left.tab.localeCompare(right.tab);
-        });
-      setActivePresenceUsers(users);
-    };
-
-    presenceChannelRef.current = channel;
-    channel
-      .on("presence", { event: "sync" }, syncPresenceUsers)
-      .on("presence", { event: "join" }, syncPresenceUsers)
-      .on("presence", { event: "leave" }, syncPresenceUsers)
-      .subscribe((status) => {
-        if (status !== "SUBSCRIBED") return;
-        channel.track({
-          clientId: presenceClientIdRef.current,
-          username: currentUser.username,
-          tab: activeTab,
-          action: "viewing",
-          jobLabel: "",
-          jobId: "",
-          assignmentId: "",
-          updatedAt: new Date().toISOString(),
-          activeAt: new Date().toISOString(),
-        }).catch(() => {});
-      });
-
-    return () => {
-      channel.untrack().catch(() => {});
-      supabase.removeChannel(channel);
-      if (presenceChannelRef.current === channel) {
-        presenceChannelRef.current = null;
-      }
-      setActivePresenceUsers([]);
-    };
-  }, [currentUser?.username, isReady, workspaceMode]);
-
-  useEffect(() => {
     if (!isReady || workspaceMode === "demo" || !currentUser) return undefined;
     const bumpPresenceActivity = () => {
       setPresenceActiveAt(new Date().toISOString());
@@ -3226,7 +3217,7 @@ function SchedulerApp() {
 
   useEffect(() => {
     if (!isReady || workspaceMode === "demo" || !currentUser) return;
-    const channel = presenceChannelRef.current;
+    const channel = liveSyncChannelRef.current;
     if (!channel) return;
     const isMoving = activeTab === "Scheduler" && !!pickedUpItem;
     const isViewingSchedulerJob = activeTab === "Scheduler" && !!selectedJobPresenceLabel;
@@ -3249,7 +3240,6 @@ function SchedulerApp() {
         activeAt: presenceActiveAt,
       };
       channel.track(presenceEntry).catch(() => {});
-      publishSharedPresence(presenceEntry);
     };
     publishPresence();
     const intervalId = window.setInterval(publishPresence, PRESENCE_HEARTBEAT_MS);
@@ -3281,7 +3271,6 @@ function SchedulerApp() {
     const latestByUsername = new Map();
     const candidates = [
       ...activePresenceUsers.filter((presence) => presence.clientId !== presenceClientIdRef.current),
-      ...sharedPresenceUsers.filter((presence) => presence.clientId !== presenceClientIdRef.current),
       ...(localPresenceUser ? [localPresenceUser] : []),
     ];
     candidates
@@ -3306,7 +3295,7 @@ function SchedulerApp() {
       const rightActive = presenceTimeValue({ updatedAt: right.activeAt }) || presenceTimeValue(right);
       return leftSelf - rightSelf || rightActive - leftActive || left.username.localeCompare(right.username);
     });
-  }, [activePresenceUsers, localPresenceUser, sharedPresenceUsers]);
+  }, [activePresenceUsers, localPresenceUser]);
 
   const otherPresenceUsers = useMemo(
     () =>
@@ -4309,6 +4298,19 @@ function SchedulerApp() {
     return slot === "operator1" ? safeText(entry) : "";
   }
 
+  function getPressOperatorDraft(dayKey, press, slot = "operator1") {
+    const key = `${pressOperatorKey(dayKey, press)}:${slot}`;
+    if (Object.prototype.hasOwnProperty.call(pressOperatorDrafts, key)) {
+      return safeText(pressOperatorDrafts[key]);
+    }
+    return getPressOperator(dayKey, press, slot);
+  }
+
+  function updatePressOperatorDraft(dayKey, press, slot, value) {
+    const key = `${pressOperatorKey(dayKey, press)}:${slot}`;
+    setPressOperatorDrafts((current) => ({ ...current, [key]: value }));
+  }
+
   function updatePressOperator(dayKey, press, slot, value) {
     if (!canEditScheduleDay(dayKey)) return;
     const key = pressOperatorKey(dayKey, press);
@@ -4335,7 +4337,15 @@ function SchedulerApp() {
     if (!currentUser || !canEditScheduleDay(dayKey)) return;
     const previous = safeText(previousValue);
     const nextValue = safeText(value);
+    const draftKey = `${pressOperatorKey(dayKey, press)}:${slot}`;
+    setPressOperatorDrafts((current) => {
+      if (!Object.prototype.hasOwnProperty.call(current, draftKey)) return current;
+      const next = { ...current };
+      delete next[draftKey];
+      return next;
+    });
     if (previous === nextValue) return;
+    updatePressOperator(dayKey, press, slot, nextValue);
     const slotLabel = slot === "operator2" ? "Operator 2" : "Operator 1";
     recordActivity(
       nextValue ? `Updated ${slotLabel.toLowerCase()}` : `Cleared ${slotLabel.toLowerCase()}`,
@@ -5259,8 +5269,35 @@ function SchedulerApp() {
               holdNote,
             }
           : item
-      )
+        )
     );
+  }
+
+  function getJobHoldNoteDraft(jobId, holdNote) {
+    if (!jobId) return safeText(holdNote);
+    if (Object.prototype.hasOwnProperty.call(jobHoldNoteDrafts, jobId)) {
+      return safeText(jobHoldNoteDrafts[jobId]);
+    }
+    return safeText(holdNote);
+  }
+
+  function updateJobHoldNoteDraft(jobId, holdNote) {
+    if (!jobId) return;
+    setJobHoldNoteDrafts((current) => ({ ...current, [jobId]: holdNote }));
+  }
+
+  function commitJobHoldNote(jobId, previousValue, nextValue) {
+    if (!jobId || !userCanEdit) return;
+    const previous = safeText(previousValue);
+    const next = safeText(nextValue);
+    setJobHoldNoteDrafts((current) => {
+      if (!Object.prototype.hasOwnProperty.call(current, jobId)) return current;
+      const updated = { ...current };
+      delete updated[jobId];
+      return updated;
+    });
+    if (previous === next) return;
+    updateJobHoldNote(jobId, next);
   }
 
   function addNote(event) {
@@ -7543,6 +7580,8 @@ function SchedulerApp() {
                         const totalHours = laneJobs.reduce((sum, item) => sum + (item.job?.estPressTime || 0), 0);
                         const operatorOneName = getPressOperator(day.key, press, "operator1");
                         const operatorTwoName = getPressOperator(day.key, press, "operator2");
+                        const operatorOneDraft = getPressOperatorDraft(day.key, press, "operator1");
+                        const operatorTwoDraft = getPressOperatorDraft(day.key, press, "operator2");
                         const canEditLane = canEditScheduleDay(day.key);
                         return (
                           <div
@@ -7559,8 +7598,8 @@ function SchedulerApp() {
                               <div className="flex flex-wrap items-center gap-2">
                                 <input
                                   type="text"
-                                  value={operatorOneName}
-                                  onChange={(event) => updatePressOperator(day.key, press, "operator1", event.target.value)}
+                                  value={operatorOneDraft}
+                                  onChange={(event) => updatePressOperatorDraft(day.key, press, "operator1", event.target.value)}
                                   onBlur={(event) => commitPressOperator(day.key, press, "operator1", operatorOneName, event.target.value)}
                                   placeholder="Operator 1"
                                   disabled={!canEditLane}
@@ -7568,8 +7607,8 @@ function SchedulerApp() {
                                 />
                                 <input
                                   type="text"
-                                  value={operatorTwoName}
-                                  onChange={(event) => updatePressOperator(day.key, press, "operator2", event.target.value)}
+                                  value={operatorTwoDraft}
+                                  onChange={(event) => updatePressOperatorDraft(day.key, press, "operator2", event.target.value)}
                                   onBlur={(event) => commitPressOperator(day.key, press, "operator2", operatorTwoName, event.target.value)}
                                   placeholder="Operator 2"
                                   disabled={!canEditLane}
@@ -9636,8 +9675,9 @@ function SchedulerApp() {
                   <div className="mt-3">
                     <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-stone-600">Hold reason</div>
                     <textarea
-                      value={detailJob.holdNote || ""}
-                      onChange={(event) => updateJobHoldNote(detailJob.id, event.target.value)}
+                      value={getJobHoldNoteDraft(detailJob.id, detailJob.holdNote)}
+                      onChange={(event) => updateJobHoldNoteDraft(detailJob.id, event.target.value)}
+                      onBlur={(event) => commitJobHoldNote(detailJob.id, detailJob.holdNote, event.target.value)}
                       disabled={!userCanEdit}
                       placeholder="Why is this job on hold?"
                       className="h-24 w-full rounded-2xl border border-stone-300 bg-white px-3 py-3 text-sm outline-none focus:border-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-100"
